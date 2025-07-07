@@ -8,6 +8,7 @@ const UserSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true, index: true },
     password: { type: String, required: true },
     fullName: { type: String, required: true },
+    fullNameLower: { type: String, index: true },
     phoneNumber: String,
     dateOfBirth: String,
     gender: { type: String, enum: ['male', 'female', 'other'] },
@@ -21,6 +22,7 @@ const UserSchema = new mongoose.Schema({
     isBusinessProfile: { type: Boolean, default: false },
     isEmailVerified: { type: Boolean, default: false },
     isPhoneVerified: { type: Boolean, default: false },
+    refreshToken: { type: String, select: false },
     accountStatus: {
         type: String,
         enum: ['active', 'deactivated', 'banned'],
@@ -36,7 +38,7 @@ UserSchema.pre("save", async function (next) {
 });
 
 // 🔐 Compare password
-UserSchema.methods.isPasswordCorrect = async function (password) {
+ UserSchema.methods.isPasswordCorrect = async function (password) {
     return await bcrypt.compare(password, this.password);
 };
 
@@ -57,7 +59,7 @@ UserSchema.methods.generateAccessToken = function () {
 };
 
 // 🔐 Refresh Token
-UserSchema.methods.generateRefreshToken = function () {
+ UserSchema.methods.generateRefreshToken = function () {
     return jwt.sign(
         {
             _id: this._id
@@ -69,8 +71,5 @@ UserSchema.methods.generateRefreshToken = function () {
     );
 };
 
-// 👇 Additional manual indexes (optional but clear)
-UserSchema.index({ username: 1 });
-UserSchema.index({ email: 1 });
 
 export const User = mongoose.model("User", UserSchema);
