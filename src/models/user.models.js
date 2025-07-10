@@ -4,9 +4,9 @@ import bcrypt from "bcrypt";
 
 const UserSchema = new mongoose.Schema({
     uid: { type: String, required: true, unique: true },
-    username: { type: String, required: true, unique: true, index: true },
-    email: { type: String, required: true, unique: true, index: true },
-    password: { type: String, required: true },
+    username: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },
+    email: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },
+    password: { type: String, required: true, minlength:8 },
     fullName: { type: String, required: true },
     fullNameLower: { type: String, index: true },
     phoneNumber: String,
@@ -21,7 +21,12 @@ const UserSchema = new mongoose.Schema({
     posts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
     isBusinessProfile: { type: Boolean, default: false },
     isEmailVerified: { type: Boolean, default: false },
+    emailVerificationToken: { type: String },
+    emailOTPExpiry: {type: Date},
+    emailOTP: {type: String},
     isPhoneVerified: { type: Boolean, default: false },
+    phoneVerificationCode: { type: String },
+    phoneVerificationExpiry: { type: Date },
     refreshToken: { type: String, select: false },
     accountStatus: {
         type: String,
@@ -34,11 +39,18 @@ const UserSchema = new mongoose.Schema({
 UserSchema.pre("save", async function (next) {
     if (!this.isModified("password")) return next();
     this.password = await bcrypt.hash(this.password, 10);
+
+    if (this.isModified("fullName")) {
+        this.fullNameLower = this.fullName.toLowerCase();
+    }
     next();
-});
+}
+);
+
+
 
 // 🔐 Compare password
- UserSchema.methods.isPasswordCorrect = async function (password) {
+UserSchema.methods.isPasswordCorrect = async function (password) {
     return await bcrypt.compare(password, this.password);
 };
 
@@ -59,7 +71,7 @@ UserSchema.methods.generateAccessToken = function () {
 };
 
 // 🔐 Refresh Token
- UserSchema.methods.generateRefreshToken = function () {
+UserSchema.methods.generateRefreshToken = function () {
     return jwt.sign(
         {
             _id: this._id
