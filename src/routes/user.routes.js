@@ -1,6 +1,7 @@
 import { Router } from "express";
+import { upload } from "../middlewares/multerConfig.js";
 import { verifyJWT } from "../middlewares/auth.middleware.js";
-import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailwithToken, sendVerificationEmailWithToken, verifyEmailWithOTP, sendVerificationOTP } from "../controllers/user.controllers.js";
+import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, sendVerificationOTP, uploadProfileImage } from "../controllers/user.controllers.js";
 
 const router = Router();
 
@@ -12,9 +13,7 @@ router.route("/profile").put(verifyJWT, updateUserProfile);
 router.route("/profile/change-password").put(verifyJWT, changePassword);
 router.route("/profile").delete(verifyJWT, deleteAccount);
 router.route("/profile/search").get(verifyJWT, searchUsers);
-router.route("/verify-email-token").get(verifyEmailwithToken);
-router.route("/send-verification-email-token").post(sendVerificationEmailWithToken);
 router.route("/verify-email-otp").post(verifyEmailWithOTP);
 router.route("/send-verification-otp").post(sendVerificationOTP);
-
+router.route("/profile/upload-image").post(verifyJWT, upload.single("profileImage"), uploadProfileImage);
 export default router;

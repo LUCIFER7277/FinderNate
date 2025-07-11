@@ -5,6 +5,7 @@ import { ApiResponse } from "../utlis/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import { sendEmail } from "../utlis/sendEmail.js"
+import { uploadBufferToCloudinary } from "../utlis/cloudinary.js";
 
 
 
@@ -23,11 +24,15 @@ const generateAcessAndRefreshToken = async (userId) => {
 }
 
 const registerUser = asyncHandler(async (req, res) => {
-    const { fullName, username, email, password, phoneNumber, dateOfBirth, gender } = req.body;
+    const { fullName, username, email, password, confirmPassword, phoneNumber, dateOfBirth, gender } = req.body;
 
-    if (!fullName || !username || !email || !password) {
-        throw new ApiError(400, "Full name, username, email and password are required");
+    if (!fullName || !username || !email || !password || !confirmPassword) {
+        throw new ApiError(400, "All fields are required");
     }
+
+     if(password !== confirmPassword) {
+        throw new ApiError(400, "Password and confirm password do not match");
+     }
 
     const errors = [];
 
@@ -54,25 +59,25 @@ const registerUser = asyncHandler(async (req, res) => {
         password,
         phoneNumber,
         dateOfBirth,
-        gender
+        gender,
+        profileImageUrl 
     });
 
-    const verificationToken = crypto.randomBytes(32).toString("hex");
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
 
-    user.emailVerificationToken = verificationToken;
-
-    await user.save({ validateBeforeSave: false });
-
-    const verificationUrl = `${process.env.CLIENT_URL}/verify-email?token=${verificationToken}&id=${user._id}`;
+    user.emailOTP = otp;
+    user.emailOTPExpiry = expiry;
+    await user.save({validateBeforeSave: false});
 
     await sendEmail({
         to: user.email,
         subject: "verify your email - FinderNate",
         html: `
-                <h3>Verify your email</h3>
-                <p>Click the link below to verify your email:</p>
-                <a href = "${verificationUrl}" target="_blank">${verificationUrl}</a>
-                <p>If you did not create an account, please ignore this email.</p>`
+                <h3>Email verification OTP</h3>
+                <h2>Your OTP is: <b>${otp}</b></h2>
+                <p>This OTP is valid for 10 minutes.</p>
+                <p>If you did not request this, please ignore this email.</p>`
     })
 
     const createdUser = await User.findById(user._id).select("-password -refreshToken");
@@ -87,50 +92,88 @@ const registerUser = asyncHandler(async (req, res) => {
 });
 
 const loginUser = asyncHandler(async (req, res) => {
-    const { email, username, password, fullName, fullNameLower } = req.body;
+    const { email, username, password, otp } = req.body;
 
-    if (!(username || email)) {
-        throw new ApiError(400, "username or email is required");
+    if (!(email || username)) {
+        throw new ApiError(400, "Email or username is required");
+    }
+
+    if (!password) {
+        throw new ApiError(400, "Password is required");
     }
 
     const user = await User.findOne({
-        $or: [{ username }, { email }]
-    })
+        $or: [{ email }, { username }]
+    });
+
     if (!user) {
-        throw new ApiError(404, "User does not exist");
+        throw new ApiError(404, "User not found");
     }
 
     const isPasswordValid = await user.isPasswordCorrect(password);
-
     if (!isPasswordValid) {
-        throw new ApiError(401, "Invalid user credentials");
+        throw new ApiError(401, "Invalid credentials");
+    }
+
+    if (user.isEmailVerified) {
+        if (!otp) {
+          
+            const generatedOTP = Math.floor(100000 + Math.random() * 900000).toString();
+            user.emailOTP = generatedOTP;
+            user.emailOTPExpiry = new Date(Date.now() + 10 * 60 * 1000);
+            await user.save({ validateBeforeSave: false });
+
+            await sendEmail({
+                to: user.email,
+                subject: "OTP for Email Verification - Findernate",
+                html: `
+                    <h3>Email Verification Required</h3>
+                    <p>Your OTP is: <strong>${generatedOTP}</strong></p>
+                    <p>This OTP is valid for 10 minutes.</p>
+                `
+            });
+
+            return res.status(403).json(new ApiResponse(
+                403,
+                {},
+                "Email not verified. OTP has been sent to your email."
+            ));
+        }
+
+        // ✅ Validate OTP
+        if (
+            user.emailOTP !== otp ||
+            !user.emailOTPExpiry ||
+            user.emailOTPExpiry < new Date()
+        ) {
+            throw new ApiError(400, "Invalid or expired OTP");
+        }
+
+        user.isEmailVerified = true;
+        user.emailOTP = undefined;
+        user.emailOTPExpiry = undefined;
+        await user.save({ validateBeforeSave: false });
     }
 
     const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
-
     const loggedUser = await User.findById(user._id).select("-password -refreshToken");
 
     const options = {
         httpOnly: true,
         secure: true
-    }
+    };
 
-    return res
-        .status(200)
+    return res.status(200)
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
-        .json(
-            new ApiResponse(
-                200,
-                {
-                    user: loggedUser,
-                    accessToken,
-                    refreshToken
-                },
-                "User logged in successfully"
-            )
-        )
+        .json(new ApiResponse(200, {
+            user: loggedUser,
+            accessToken,
+            refreshToken
+        }, "Login successful"));
 });
+
+    
 
 const logOutUser = asyncHandler(async (req, res) => {
     await User.findByIdAndUpdate(
@@ -305,74 +348,6 @@ const searchUsers = asyncHandler(async (req, res) => {
         );
 });
 
-
-const sendVerificationEmailWithToken = asyncHandler(async (req, res) => {
-    const { email } = req.body;
-
-    if (!email) {
-        throw new ApiError(400, "Email is required");
-    }
-
-    const user = await User.findOne({ email });
-
-    if (!user) {
-        throw new ApiError(404, "User not found with this email");
-    }
-
-    const verificationToken = crypto.randomBytes(32).toString("hex");
-    user.emailVerificationToken = verificationToken;
-    await user.save({ validateBeforeSave: false });
-
-
-    const verificationUrl = `http://localhost:8000/api/v1/users/verify-email?token=${verificationToken}&id=${user._id}`;
-
-    await sendEmail({
-        to: user.email,
-        subject: "Verify your email - Findernate",
-        html: `
-      <h3>Verify your email</h3>
-      <p>Click the link below to verify your email:</p>
-      <a href="${verificationUrl}" target="_blank">${verificationUrl}</a>
-      <p>If you did not request this, please ignore this email.</p>
-    `
-    });
-
-    return res
-        .status(200)
-        .json(new ApiResponse(200, {}, "Verification email sent successfully"));
-})
-
-const verifyEmailwithToken = asyncHandler(async (req, res) => {
-    const { token, id } = req.query;
-
-    if (!token || !id) {
-        throw new ApiError(400, "Token and user ID are required")
-    }
-
-    const user = await User.findById(id);
-
-    if (!user) {
-        throw new ApiError(404, "User not found");
-    }
-
-
-    if (user.emailVerificationToken !== token) {
-        throw new ApiError(400, "Invalid or expired token");
-    }
-
-    user.isEmailVerified = true;
-    user.emailVerificationToken = undefined;
-
-    await user.save({ validateBeforeSave: false });
-
-    return res
-        .status(200)
-        .json(
-            new ApiResponse(200, {}, "Email verified successfully")
-        )
-});
-
-
 const sendVerificationOTP = asyncHandler(async (req, res) => {
     
     const { email } = req.body;
@@ -438,6 +413,28 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, {}, "Email verified successfully"));
 })
 
+const uploadProfileImage = asyncHandler(async (req, res) => {
+    if(!req.file) {
+        throw new ApiError(400, "Profile Image is required");
+    }
+
+    const userId = req.user._id;
+
+    const uploadResult = await uploadBufferToCloudinary(req.file.buffer);
+
+    if(!uploadResult || !uploadResult.secure_url) {
+        throw new ApiError(500, "Failed to upload image to Cloudinary");
+    }
+
+    const user = await User.findByIdAndUpdate(userId,
+        {profileImageUrl: uploadResult.secure_url},
+        {new: true, runValidators: true}
+    ).select("username fullName profileImageUrl")
+
+    return res
+    .status(200)
+    .json(new ApiResponse(200, user, "profile image uploaded successfully"));
+});
 
 
 export {
@@ -449,8 +446,7 @@ export {
     changePassword,
     deleteAccount,
     searchUsers,
-    verifyEmailwithToken,
-    sendVerificationEmailWithToken,
     verifyEmailWithOTP,
-    sendVerificationOTP
+    sendVerificationOTP,
+    uploadProfileImage
 };
