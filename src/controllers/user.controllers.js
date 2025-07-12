@@ -3,7 +3,6 @@ import { User } from "../models/user.models.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
-import crypto from "crypto";
 import { sendEmail } from "../utlis/sendEmail.js"
 import { uploadBufferToCloudinary } from "../utlis/cloudinary.js";
 
@@ -60,7 +59,6 @@ const registerUser = asyncHandler(async (req, res) => {
         phoneNumber,
         dateOfBirth,
         gender,
-        profileImageUrl 
     });
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -92,7 +90,7 @@ const registerUser = asyncHandler(async (req, res) => {
 });
 
 const loginUser = asyncHandler(async (req, res) => {
-    const { email, username, password, otp } = req.body;
+    const { email, username, password } = req.body;
 
     if (!(email || username)) {
         throw new ApiError(400, "Email or username is required");
@@ -115,45 +113,9 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Invalid credentials");
     }
 
-    if (user.isEmailVerified) {
-        if (!otp) {
-          
-            const generatedOTP = Math.floor(100000 + Math.random() * 900000).toString();
-            user.emailOTP = generatedOTP;
-            user.emailOTPExpiry = new Date(Date.now() + 10 * 60 * 1000);
-            await user.save({ validateBeforeSave: false });
-
-            await sendEmail({
-                to: user.email,
-                subject: "OTP for Email Verification - Findernate",
-                html: `
-                    <h3>Email Verification Required</h3>
-                    <p>Your OTP is: <strong>${generatedOTP}</strong></p>
-                    <p>This OTP is valid for 10 minutes.</p>
-                `
-            });
-
-            return res.status(403).json(new ApiResponse(
-                403,
-                {},
-                "Email not verified. OTP has been sent to your email."
-            ));
-        }
-
-        // ✅ Validate OTP
-        if (
-            user.emailOTP !== otp ||
-            !user.emailOTPExpiry ||
-            user.emailOTPExpiry < new Date()
-        ) {
-            throw new ApiError(400, "Invalid or expired OTP");
-        }
-
-        user.isEmailVerified = true;
-        user.emailOTP = undefined;
-        user.emailOTPExpiry = undefined;
-        await user.save({ validateBeforeSave: false });
-    }
+    // if(!user.isEmailVerified) {
+    //     throw new ApiError(403, "Email is not verified. Please verify your email to login");
+    // }
 
     const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
     const loggedUser = await User.findById(user._id).select("-password -refreshToken");
@@ -173,7 +135,6 @@ const loginUser = asyncHandler(async (req, res) => {
         }, "Login successful"));
 });
 
-    
 
 const logOutUser = asyncHandler(async (req, res) => {
     await User.findByIdAndUpdate(

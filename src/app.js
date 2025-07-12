@@ -6,8 +6,7 @@ import { errorHandler } from './middlewares/errorHandler.js';
 const app = express();
 
 app.use(cors({
-    origin: process.env.ORIGIN,
-    credentials: true
+    origin: "*"
 }));
 
 app.use(express.json());

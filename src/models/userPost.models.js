@@ -21,7 +21,7 @@ const PostSchema = new mongoose.Schema({
     tags: [{ type: String }],
 
     // 📍 Location (can be address, place name, or GPS)
-    location: { type: String },
+    location: { type: String }, //longitude and latitude
 
     // ❤️ Likes and 💬 Comments
     likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
