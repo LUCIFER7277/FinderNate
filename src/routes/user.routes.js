@@ -1,11 +1,12 @@
 import { Router } from "express";
 import { upload } from "../middlewares/multerConfig.js";
 import { verifyJWT } from "../middlewares/auth.middleware.js";
-import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, sendVerificationOTP, uploadProfileImage } from "../controllers/user.controllers.js";
+import { loginUser, logOutUser, registerUser, verifyAndRegisterUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, sendVerificationOTP, uploadProfileImage } from "../controllers/user.controllers.js";
 
 const router = Router();
 
 router.route("/register").post(registerUser);
+router.route("/register/verify").post(verifyAndRegisterUser);
 router.route("/login").post(loginUser);
 router.route("/logout").post(verifyJWT, logOutUser);
 router.route("/profile").get(verifyJWT, getUserProfile);

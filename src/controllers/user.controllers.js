@@ -5,6 +5,7 @@ import { ApiResponse } from "../utlis/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
 import { sendEmail } from "../utlis/sendEmail.js"
 import { uploadBufferToCloudinary } from "../utlis/cloudinary.js";
+import { TempUser } from "../models/tempUser.model.js";
 
 
 
@@ -49,8 +50,10 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(409, "User already exists with this username or email", errors);
     }
 
-    const user = await User.create({
-        uid: uuidv4(),
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    const user = await TempUser.create({
         fullName,
         fullNameLower: fullName.toLowerCase(),
         username: username.toLowerCase(),
@@ -59,14 +62,9 @@ const registerUser = asyncHandler(async (req, res) => {
         phoneNumber,
         dateOfBirth,
         gender,
+        emailOTP: otp,
+        emailOTPExpiry: expiry
     });
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiry = new Date(Date.now() + 10 * 60 * 1000);
-
-    user.emailOTP = otp;
-    user.emailOTPExpiry = expiry;
-    await user.save({validateBeforeSave: false});
 
     await sendEmail({
         to: user.email,
@@ -76,16 +74,44 @@ const registerUser = asyncHandler(async (req, res) => {
                 <h2>Your OTP is: <b>${otp}</b></h2>
                 <p>This OTP is valid for 10 minutes.</p>
                 <p>If you did not request this, please ignore this email.</p>`
-    })
-
-    const createdUser = await User.findById(user._id).select("-password -refreshToken");
-
-    if (!createdUser) {
-        throw new ApiError(500, "Something went wrong while registering user");
-    }
+    });
 
     return res.status(201).json(
-        new ApiResponse(201, createdUser, "User registered successfully")
+        new ApiResponse(200, null, "OTP sent to your email. Please verify your email to complete registration")
+    );
+});
+
+const verifyAndRegisterUser = asyncHandler(async(req, res) => {
+    
+    const { email, otp } = req.body;
+    
+    const tempUser = await TempUser.findOne({email});
+
+    if(!tempUser) {
+        throw new ApiError(404, "User not found with this email");
+    };
+
+    if(tempUser.emailOTP !== otp || tempUser.emailOTPExpiry < Date()) { 
+        throw new ApiError(400, "Inavlid or expired OTP");
+    }
+
+    const user = await User.create({
+        uid: uuidv4(),
+        fullName: tempUser.fullName,
+        fullNameLower: tempUser.fullName.toLowerCase(),
+        username: tempUser.username.toLowerCase(),
+        email: tempUser.email,
+        password: tempUser.password,
+        phoneNumber: tempUser.phoneNumber,
+        dateOfBirth: tempUser.dateOfBirth,
+        gender: tempUser.gender,
+        isEmailVerified: true,
+    });
+
+    await tempUser.deleteOne();
+
+    return res.status(201).json(
+        new ApiResponse(201, user, "User registered successfully. You can now login.")
     );
 });
 
@@ -113,9 +139,9 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Invalid credentials");
     }
 
-    // if(!user.isEmailVerified) {
-    //     throw new ApiError(403, "Email is not verified. Please verify your email to login");
-    // }
+    if(!user.isEmailVerified) {
+        throw new ApiError(403, "Email is not verified. Please verify your email to login");
+    }
 
     const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
     const loggedUser = await User.findById(user._id).select("-password -refreshToken");
@@ -400,6 +426,7 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
 
 export {
     registerUser,
+    verifyAndRegisterUser,
     loginUser,
     logOutUser,
     getUserProfile,
