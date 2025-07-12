@@ -30,9 +30,9 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(400, "All fields are required");
     }
 
-     if(password !== confirmPassword) {
+    if (password !== confirmPassword) {
         throw new ApiError(400, "Password and confirm password do not match");
-     }
+    }
 
     const errors = [];
 
@@ -81,18 +81,17 @@ const registerUser = asyncHandler(async (req, res) => {
     );
 });
 
-const verifyAndRegisterUser = asyncHandler(async(req, res) => {
-    
-    const { email, otp } = req.body;
-    
-    const tempUser = await TempUser.findOne({email});
+const verifyAndRegisterUser = asyncHandler(async (req, res) => {
+    const { otp } = req.body;
 
-    if(!tempUser) {
-        throw new ApiError(404, "User not found with this email");
-    };
+    const tempUser = await TempUser.findOne({ emailOTP: otp });
 
-    if(tempUser.emailOTP !== otp || tempUser.emailOTPExpiry < Date()) { 
-        throw new ApiError(400, "Inavlid or expired OTP");
+    if (!tempUser) {
+        throw new ApiError(404, "No user found.");
+    }
+
+    if (tempUser.emailOTPExpiry < new Date()) {
+        throw new ApiError(400, "OTP has expired");
     }
 
     const user = await User.create({
@@ -111,9 +110,10 @@ const verifyAndRegisterUser = asyncHandler(async(req, res) => {
     await tempUser.deleteOne();
 
     return res.status(201).json(
-        new ApiResponse(201, user, "User registered successfully. You can now login.")
+        new ApiResponse(201, user, "User registered successfully.")
     );
 });
+
 
 const loginUser = asyncHandler(async (req, res) => {
     const { email, username, password } = req.body;
@@ -139,7 +139,7 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Invalid credentials");
     }
 
-    if(!user.isEmailVerified) {
+    if (!user.isEmailVerified) {
         throw new ApiError(403, "Email is not verified. Please verify your email to login");
     }
 
@@ -336,7 +336,7 @@ const searchUsers = asyncHandler(async (req, res) => {
 });
 
 const sendVerificationOTP = asyncHandler(async (req, res) => {
-    
+
     const { email } = req.body;
 
     if (!email) {
@@ -356,7 +356,7 @@ const sendVerificationOTP = asyncHandler(async (req, res) => {
     user.emailOTPExpiry = expiry;
     await user.save({ validateBeforeSave: false });
 
-    
+
     await sendEmail({
         to: user.email,
         subject: "Your OTP for Email Verification - Findernate",
@@ -401,7 +401,7 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
 })
 
 const uploadProfileImage = asyncHandler(async (req, res) => {
-    if(!req.file) {
+    if (!req.file) {
         throw new ApiError(400, "Profile Image is required");
     }
 
@@ -409,18 +409,18 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
 
     const uploadResult = await uploadBufferToCloudinary(req.file.buffer);
 
-    if(!uploadResult || !uploadResult.secure_url) {
+    if (!uploadResult || !uploadResult.secure_url) {
         throw new ApiError(500, "Failed to upload image to Cloudinary");
     }
 
     const user = await User.findByIdAndUpdate(userId,
-        {profileImageUrl: uploadResult.secure_url},
-        {new: true, runValidators: true}
+        { profileImageUrl: uploadResult.secure_url },
+        { new: true, runValidators: true }
     ).select("username fullName profileImageUrl")
 
     return res
-    .status(200)
-    .json(new ApiResponse(200, user, "profile image uploaded successfully"));
+        .status(200)
+        .json(new ApiResponse(200, user, "profile image uploaded successfully"));
 });
 
 
