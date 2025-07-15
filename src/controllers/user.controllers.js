@@ -109,26 +109,43 @@ const verifyAndRegisterUser = asyncHandler(async (req, res) => {
 
     await tempUser.deleteOne();
 
-    return res.status(201).json(
-        new ApiResponse(201, user, "User registered successfully.")
+    const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
+    await user.save({ validateBeforeSave: false });
+
+    const options = {
+        httpOnly: true,       
+        secure: true
+    };
+    
+
+    return res
+    .status(201)
+    .cookie("accessToken", accessToken, options)
+    .cookie("refreshToken", refreshToken, options)
+
+    .json(
+        new ApiResponse(201,
+            {
+                user,
+                accessToken,
+                refreshToken
+            }, "User registered successfully.")
     );
 });
 
 
 const loginUser = asyncHandler(async (req, res) => {
-    const { email, username, password } = req.body;
+    const { email, password } = req.body;
 
-    if (!(email || username)) {
-        throw new ApiError(400, "Email or username is required");
+    if (!(email)) {
+        throw new ApiError(400, "Email is required");
     }
 
     if (!password) {
         throw new ApiError(400, "Password is required");
     }
 
-    const user = await User.findOne({
-        $or: [{ email }, { username }]
-    });
+    const user = await User.findOne({ email });
 
     if (!user) {
         throw new ApiError(404, "User not found");

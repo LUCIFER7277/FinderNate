@@ -1,6 +1,10 @@
 import mongoose from 'mongoose';
 
 const TaggedUserSchema = new mongoose.Schema({
+    taggedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
     targetId: {
         type: mongoose.Schema.Types.ObjectId,
         required: true
