@@ -69,6 +69,10 @@ const ProductDetailsSchema = new mongoose.Schema({
         width: Number,
         height: Number,
         unit: String
+    },
+    location: {
+        name: String,
+        coordinates: GeoJSONPointSchema
     }
 }, { _id: false });
 
@@ -236,7 +240,7 @@ const PostSchema = new mongoose.Schema({
     description: String,
     hashtags: [String],
     mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-    media: MediaSchema,
+    media: [MediaSchema],
     customization: CustomizationSchema,
     engagement: EngagementSchema,
     settings: SettingsSchema,

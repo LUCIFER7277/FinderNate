@@ -5,6 +5,16 @@ import Post from "../models/userPost.models.js";
 import { uploadBufferToCloudinary } from "../utlis/cloudinary.js";
 import { getCoordinates } from "../utlis/getCoordinates.js";
 
+const extractMediaFiles = (files) => {
+    const allFiles = [];
+    ["image", "video", "reel", "story"].forEach((field) => {
+        if (files?.[field]) {
+            allFiles.push(...files[field]);
+        }
+    });
+    return allFiles;
+};
+
 
 export const createNormalPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
@@ -24,24 +34,20 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         publishedAt,
         status,
     } = req.body;
-
-    // 🔒 Validate postType
-    if (!postType || !["photo", "reel"].includes(postType)) {
-        throw new ApiError(400, "postType must be 'photo' or 'reel'");
+    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
     }
 
-    // 🧠 Parse JSON strings if necessary (Postman sends form-data as strings)
+
     const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
     const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
-    // 🗺️ Add coordinates if location name is present
     let resolvedLocation = parsedLocation || {};
     if (resolvedLocation.name && !resolvedLocation.coordinates) {
         const coords = await getCoordinates(resolvedLocation.name);
-        console.log("Coordinates for", resolvedLocation.name, ":", coords);
-        if (coords && coords.latitude && coords.longitude) {
+        if (coords?.latitude && coords?.longitude) {
             resolvedLocation.coordinates = {
                 type: "Point",
                 coordinates: [coords.longitude, coords.latitude]
@@ -51,12 +57,15 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         }
     }
 
-    // 📸 Upload media to Cloudinary
-    let uploadedMedia = null;
-    if (req.file) {
+    const files = extractMediaFiles(req.files);
+    if (!files.length) throw new ApiError(400, "Media file is required");
+
+    let uploadedMedia = [];
+
+    for (const file of files) {
         try {
-            const result = await uploadBufferToCloudinary(req.file.buffer, "posts");
-            uploadedMedia = {
+            const result = await uploadBufferToCloudinary(file.buffer, "posts");
+            uploadedMedia.push({
                 type: result.resource_type,
                 url: result.secure_url,
                 thumbnailUrl: result.secure_url,
@@ -67,15 +76,12 @@ export const createNormalPost = asyncHandler(async (req, res) => {
                     width: result.width,
                     height: result.height,
                 },
-            };
-        } catch (err) {
+            });
+        } catch {
             throw new ApiError(500, "Cloudinary upload failed");
         }
-    } else {
-        throw new ApiError(400, "Media file is required");
     }
 
-    // 🛠️ Create the post
     const post = await Post.create({
         userId,
         postType,
@@ -104,19 +110,76 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         analytics: {},
     });
 
-    return res
-        .status(201)
-        .json(new ApiResponse(201, post, "Normal post created successfully"));
+    return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
 export const createProductPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, media, settings, product } = req.body;
+    const {
+        postType,
+        caption,
+        description,
+        mentions,
+        mood,
+        activity,
+        location,
+        tags,
+        product,
+        settings,
+        scheduledAt,
+        publishedAt,
+        status,
+    } = req.body;
+    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    }
 
-    if (!postType || !['photo', 'reel'].includes(postType)) {
-        throw new ApiError(400, "postType must be 'photo' or 'reel'");
+    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
+    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
+    const parsedProduct = typeof product === "string" ? JSON.parse(product) : product;
+    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
+    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+
+    let resolvedLocation = parsedLocation || {};
+    if (resolvedLocation.name && !resolvedLocation.coordinates) {
+        const coords = await getCoordinates(resolvedLocation.name);
+        if (coords?.latitude && coords?.longitude) {
+            resolvedLocation.coordinates = {
+                type: "Point",
+                coordinates: [coords.longitude, coords.latitude]
+            };
+        } else {
+            throw new ApiError(400, `Could not resolve coordinates for location: ${resolvedLocation.name}`);
+        }
+    }
+
+    const files = extractMediaFiles(req.files);
+
+    if (!files.length) throw new ApiError(400, "Media file is required");
+
+    let uploadedMedia = [];
+    for (const file of files) {
+        try {
+
+            const result = await uploadBufferToCloudinary(file.buffer, "posts");
+            uploadedMedia.push({
+                type: result.resource_type,
+                url: result.secure_url,
+                thumbnailUrl: result.secure_url,
+                fileSize: result.bytes,
+                format: result.format,
+                duration: result.duration || null,
+                dimensions: {
+                    width: result.width,
+                    height: result.height,
+                },
+            });
+        } catch (error) {
+            console.error("Upload failed for:", file.originalname, error);
+            throw new ApiError(500, "Cloudinary upload failed");
+        }
     }
 
     const post = await Post.create({
@@ -125,23 +188,96 @@ export const createProductPost = asyncHandler(async (req, res) => {
         contentType: "product",
         caption,
         description,
-        mentions,
-        media,
-        settings,
-        customization: { product }
+        mentions: parsedMentions || [],
+        media: uploadedMedia,
+        customization: {
+            product: parsedProduct,
+            normal: {
+                mood,
+                activity,
+                location: resolvedLocation,
+                tags: parsedTags || [],
+            },
+        },
+        settings: parsedSettings || {},
+        scheduledAt,
+        publishedAt,
+        status: status || (scheduledAt ? "scheduled" : "published"),
+        isPromoted: false,
+        isFeatured: false,
+        isReported: false,
+        reportCount: 0,
+        engagement: {},
+        analytics: {},
     });
 
-    return res.status(201).json(new ApiResponse(201, post, "Product post created"));
+    return res.status(201).json(new ApiResponse(201, post, "Product post created successfully"));
 });
 
 export const createServicePost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, media, settings, service } = req.body;
+    const {
+        postType,
+        caption,
+        description,
+        mentions,
+        mood,
+        activity,
+        location,
+        tags,
+        service,
+        settings,
+        scheduledAt,
+        publishedAt,
+        status,
+    } = req.body;
+    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    }
 
-    if (!postType || !['photo', 'reel'].includes(postType)) {
-        throw new ApiError(400, "postType must be 'photo' or 'reel'");
+    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
+    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
+    const parsedService = typeof service === "string" ? JSON.parse(service) : service;
+    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
+    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+
+    let resolvedLocation = parsedLocation || {};
+    if (resolvedLocation.name && !resolvedLocation.coordinates) {
+        const coords = await getCoordinates(resolvedLocation.name);
+        if (coords?.latitude && coords?.longitude) {
+            resolvedLocation.coordinates = {
+                type: "Point",
+                coordinates: [coords.longitude, coords.latitude]
+            };
+        } else {
+            throw new ApiError(400, `Could not resolve coordinates for location: ${resolvedLocation.name}`);
+        }
+    }
+
+    const files = extractMediaFiles(req.files);
+    if (!files.length) throw new ApiError(400, "Media file is required");
+
+    let uploadedMedia = [];
+    for (const file of files) {
+        try {
+            const result = await uploadBufferToCloudinary(file.buffer, "posts");
+            uploadedMedia.push({
+                type: result.resource_type,
+                url: result.secure_url,
+                thumbnailUrl: result.secure_url,
+                fileSize: result.bytes,
+                format: result.format,
+                duration: result.duration || null,
+                dimensions: {
+                    width: result.width,
+                    height: result.height,
+                },
+            });
+        } catch {
+            throw new ApiError(500, "Cloudinary upload failed");
+        }
     }
 
     const post = await Post.create({
@@ -150,22 +286,96 @@ export const createServicePost = asyncHandler(async (req, res) => {
         contentType: "service",
         caption,
         description,
-        mentions,
-        media,
-        settings,
-        customization: { service }
+        mentions: parsedMentions || [],
+        media: uploadedMedia,
+        customization: {
+            service: parsedService,
+            normal: {
+                mood,
+                activity,
+                location: resolvedLocation,
+                tags: parsedTags || [],
+            },
+        },
+        settings: parsedSettings || {},
+        scheduledAt,
+        publishedAt,
+        status: status || (scheduledAt ? "scheduled" : "published"),
+        isPromoted: false,
+        isFeatured: false,
+        isReported: false,
+        reportCount: 0,
+        engagement: {},
+        analytics: {},
     });
 
-    return res.status(201).json(new ApiResponse(201, post, "Service post created"));
+    return res.status(201).json(new ApiResponse(201, post, "Service post created successfully"));
 });
+
 export const createBusinessPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, media, settings, business } = req.body;
+    const {
+        postType,
+        caption,
+        description,
+        mentions,
+        mood,
+        activity,
+        location,
+        tags,
+        business,
+        settings,
+        scheduledAt,
+        publishedAt,
+        status,
+    } = req.body;
+    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    }
 
-    if (!postType || !['photo', 'reel'].includes(postType)) {
-        throw new ApiError(400, "postType must be 'photo' or 'reel'");
+    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
+    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
+    const parsedBusiness = typeof business === "string" ? JSON.parse(business) : business;
+    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
+    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+
+    let resolvedLocation = parsedLocation || {};
+    if (resolvedLocation.name && !resolvedLocation.coordinates) {
+        const coords = await getCoordinates(resolvedLocation.name);
+        if (coords?.latitude && coords?.longitude) {
+            resolvedLocation.coordinates = {
+                type: "Point",
+                coordinates: [coords.longitude, coords.latitude]
+            };
+        } else {
+            throw new ApiError(400, `Could not resolve coordinates for location: ${resolvedLocation.name}`);
+        }
+    }
+
+    const files = extractMediaFiles(req.files);
+    if (!files.length) throw new ApiError(400, "Media file is required");
+
+    let uploadedMedia = [];
+    for (const file of files) {
+        try {
+            const result = await uploadBufferToCloudinary(file.buffer, "posts");
+            uploadedMedia.push({
+                type: result.resource_type,
+                url: result.secure_url,
+                thumbnailUrl: result.secure_url,
+                fileSize: result.bytes,
+                format: result.format,
+                duration: result.duration || null,
+                dimensions: {
+                    width: result.width,
+                    height: result.height,
+                },
+            });
+        } catch {
+            throw new ApiError(500, "Cloudinary upload failed");
+        }
     }
 
     const post = await Post.create({
@@ -174,14 +384,32 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
         contentType: "business",
         caption,
         description,
-        mentions,
-        media,
-        settings,
-        customization: { business }
+        mentions: parsedMentions || [],
+        media: uploadedMedia,
+        customization: {
+            business: parsedBusiness,
+            normal: {
+                mood,
+                activity,
+                location: resolvedLocation,
+                tags: parsedTags || [],
+            },
+        },
+        settings: parsedSettings || {},
+        scheduledAt,
+        publishedAt,
+        status: status || (scheduledAt ? "scheduled" : "published"),
+        isPromoted: false,
+        isFeatured: false,
+        isReported: false,
+        reportCount: 0,
+        engagement: {},
+        analytics: {},
     });
 
-    return res.status(201).json(new ApiResponse(201, post, "Business post created"));
+    return res.status(201).json(new ApiResponse(201, post, "Business post created successfully"));
 });
+
 
 // Get all posts
 export const getAllPosts = asyncHandler(async (req, res) => {

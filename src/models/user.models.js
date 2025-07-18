@@ -24,6 +24,9 @@ const UserSchema = new mongoose.Schema({
     emailVerificationToken: { type: String },
     emailOTPExpiry: {type: Date},
     emailOTP: {type: String},
+    passwordResetOTP: String,
+    passwordResetOTPExpiry: Date,
+
     isPhoneVerified: { type: Boolean, default: false },
     phoneVerificationCode: { type: String },
     phoneVerificationExpiry: { type: Date },

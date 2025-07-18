@@ -352,7 +352,7 @@ const searchUsers = asyncHandler(async (req, res) => {
         );
 });
 
-const sendVerificationOTP = asyncHandler(async (req, res) => {
+const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
 
     const { email } = req.body;
 
@@ -389,6 +389,7 @@ const sendVerificationOTP = asyncHandler(async (req, res) => {
         .status(200)
         .json(new ApiResponse(200, {}, "OTP sent to your email successfully"));
 });
+
 
 const verifyEmailWithOTP = asyncHandler(async (req, res) => {
     const { email, otp } = req.body;
@@ -440,6 +441,70 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
         .json(new ApiResponse(200, user, "profile image uploaded successfully"));
 });
 
+const sendPasswordResetOTP = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    
+    if(!email) {
+        throw new ApiError(400, "Email is required");
+    }
+
+    const user = await User.findOne({email});
+    if(!user) {
+        throw new ApiError(404, "User not found with this email");
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiry = new Date(Date.now() + 10 * 60 * 1000); // valid for 10 minutes
+
+    user.passwordResetOTP = otp;
+    user.passwordResetOTPExpiry = expiry;
+    await user.save({ validateBeforeSave: false });
+
+    await sendEmail({
+        to: user.email,
+        subject: "Your OTP for Password Reset - FinderNate",
+        html: `
+            <h3>Password Reset OTP </h3>
+            <h2>Your OTP is: <b>${otp}</b></h2>
+            <p>This OTP is valid for 10 minutes.</p>
+            <p>If you did not request this, please ignore this email.</p>`
+    });
+    return res 
+        .status(200)
+        .json(new ApiResponse(200, {}, "OTP sent to your email successfully for password reset"));
+    });
+  
+    const resetPasswordWithOTP = asyncHandler(async (req, res) => {
+        const { otp, newPassword, confirmPassword } = req.body;
+        if (!otp || !newPassword || !confirmPassword) {
+            throw new ApiError(400, "OTP, new password and confirm password are required");
+        }
+
+        if(newPassword !== confirmPassword) {
+            throw new ApiError(400, "New password and confirm password do not match");
+        }
+
+        const user = await User.findOne({ passwordResetOTP: otp});
+
+        if(!user) {
+            throw new ApiError(404, "No user found with this OTP");
+        }
+
+        if(!user.passwordResetOTPExpiry || user.passwordResetOTPExpiry < new Date()) {
+            throw new ApiError(400, "OTP has expired");
+        }
+
+        user.password = newPassword;
+        user.passwordResetOTP = undefined;
+        user.passwordResetOTPExpiry = undefined;
+
+        await user.save({ validateBeforeSave: false });
+
+        return res 
+            .status(200)
+            .json(new ApiResponse(200, {}, "Password reset successfully"));
+
+    })
 
 export {
     registerUser,
@@ -452,6 +517,8 @@ export {
     deleteAccount,
     searchUsers,
     verifyEmailWithOTP,
-    sendVerificationOTP,
-    uploadProfileImage
+    sendVerificationOTPForEmail,
+    uploadProfileImage,
+    sendPasswordResetOTP,
+    resetPasswordWithOTP
 };
