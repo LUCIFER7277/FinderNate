@@ -220,6 +220,7 @@ import Story from '../models/story.models.js';
 import { ApiResponse } from '../utlis/ApiResponse.js';
 import { ApiError } from '../utlis/ApiError.js';
 import Comment from '../models/comment.models.js';
+import Like from '../models/like.models.js';
 
 // Helper function to shuffle array
 function shuffleArray(arr) {
@@ -349,8 +350,6 @@ export const getHomeFeed = async (req, res) => {
 
         const rankedFeed = [...followedFeed, ...otherFeed];
 
-        rankedFeed = shuffleArray(deduplicated);
-
         const page = parseInt(req.query.page, 10) || 1;
         const limit = parseInt(req.query.limit, 10) || 20;
         const skip = (page - 1) * limit;
@@ -398,9 +397,17 @@ export const getHomeFeed = async (req, res) => {
                         };
                     })
                 );
+
+                // Check if current user has liked this post
+                const userLike = await Like.findOne({
+                    userId: userId,
+                    postId: post._id
+                });
+
                 return {
                     ...post,
-                    comments: commentsWithReplies
+                    comments: commentsWithReplies,
+                    isLiked: !!userLike
                 };
             })
         );

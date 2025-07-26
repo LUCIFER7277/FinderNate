@@ -11,7 +11,8 @@ app.use(express.urlencoded({ extended: true }));
 
 
 app.use(cors({
-    origin: "https://findernate.vercel.app/onboarding" || "*" || "http://localhost:3000",
+    origin: ["http://localhost:3000", "https://findernate.vercel.app", "*"],
+    credentials: true
 }));
 
 

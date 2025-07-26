@@ -678,6 +678,21 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             .limit(parseInt(limit))
             .lean();
 
+        // Add isLiked field for each post
+        const currentUserId = req.user?._id;
+        const postsWithLikeStatus = await Promise.all(
+            posts.map(async post => {
+                const userLike = await Like.findOne({
+                    userId: currentUserId,
+                    postId: post._id
+                });
+                return {
+                    ...post,
+                    isLiked: !!userLike
+                };
+            })
+        );
+
         // Get total count for pagination info
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / parseInt(limit));
@@ -686,7 +701,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
         // Prepare response with pagination metadata
         const response = {
-            posts,
+            posts: postsWithLikeStatus,
             pagination: {
                 currentPage: parseInt(page),
                 totalPages,
