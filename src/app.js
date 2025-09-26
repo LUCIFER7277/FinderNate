@@ -24,57 +24,21 @@ app.use(compression({
 app.use(express.json({ limit: '10mb' })); // Limit JSON payload size
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-
-const allowedOrigins = [
-        "https://eckss0cw0ggco0okoocc4wo4.194.164.151.15.sslip.io",
-        "https://p0k804os4c4scowcg488800c.194.164.151.15.sslip.io",
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:4000",
-        "https://localhost:4000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:4000",
-        // Add environment variable for additional origins
-        ...(process.env.ADDITIONAL_CORS_ORIGINS ? process.env.ADDITIONAL_CORS_ORIGINS.split(',') : [])
-];
-
-
 app.use(cors({
-        origin: function (origin, callback) {
-                if (!origin || allowedOrigins.includes(origin)) {
-                        callback(null, true);
-                } else {
-                        callback(new Error("Not allowed by CORS"));
-                }
-        },
+        origin: [
+                "https://p0k804os4c4scowcg488800c.194.164.151.15.sslip.io",
+                "http://localhost:3000",
+                "http://localhost:3001",
+                process.env.FRONTEND_URL
+        ].filter(Boolean), // Remove any undefined values
         credentials: true,
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-        allowedHeaders: [
-                "Content-Type",
-                "Authorization",
-                "X-Requested-With",
-                "Accept",
-                "Origin",
-                "Access-Control-Request-Method",
-                "Access-Control-Request-Headers"
-        ],
-        exposedHeaders: ["Set-Cookie"],
-        optionsSuccessStatus: 200,
-        preflightContinue: false
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'x-csrf-token'],
+        exposedHeaders: ['*'],
+        maxAge: 86400 // 24 hours
 }));
 
 app.use(cookieParser());
-
-// Trust proxy for production (behind load balancer/reverse proxy)
-if (process.env.NODE_ENV === 'production') {
-    app.set('trust proxy', 1);
-}
-
-// Explicit preflight handler for all routes
-app.options('*', (req, res) => {
-        res.status(200).end();
-});
 
 // Apply general rate limiting to all routes
 app.use(generalRateLimit);
@@ -84,18 +48,6 @@ app.get('/', healthCheckRateLimit, (req, res) => {
         res.status(200).json({
                 message: 'FinderNate Backend API is running!',
                 status: 'healthy',
-                timestamp: new Date().toISOString(),
-                port: process.env.PORT || 3000,
-                host: req.get('host')
-        });
-});
-
-// Simple debug endpoint
-app.get('/debug', (req, res) => {
-        res.status(200).json({
-                message: 'Debug endpoint working',
-                port: process.env.PORT || 3000,
-                env: process.env.NODE_ENV,
                 timestamp: new Date().toISOString()
         });
 });
@@ -135,14 +87,6 @@ app.get('/health', healthCheckRateLimit, async (req, res) => {
                         timestamp: new Date().toISOString()
                 });
         }
-});
-
-// API v1 health endpoint
-app.get('/api/v1/health', healthCheckRateLimit, async (req, res) => {
-        res.status(200).json({
-                success: true,
-                message: "Backend is healthy"
-        });
 });
 
 //import route

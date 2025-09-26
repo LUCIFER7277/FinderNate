@@ -241,7 +241,8 @@ export const initiateCall = asyncHandler(async (req, res) => {
         console.log('📡 Emitting socket events...');
         if (socketManager.isReady()) {
             const callData = {
-                callId: newCall._id,
+                // always send backend-authoritative ID as a string
+                callId: newCall._id ? newCall._id.toString() : null,
                 chatId,
                 callType,
                 caller: {
@@ -281,8 +282,12 @@ export const initiateCall = asyncHandler(async (req, res) => {
         }
 
         console.log('🎉 Call initiated successfully:', { callId: newCall._id });
+        // Explicitly include _id to avoid it being removed by toJSON/toObject transforms
         res.status(201).json(
-            new ApiResponse(201, populatedCall, 'Call initiated successfully')
+            new ApiResponse(201, {
+                _id: populatedCall && populatedCall._id ? populatedCall._id.toString() : null,
+                ...populatedCall.toObject()
+            }, 'Call initiated successfully')
         );
 
     } catch (error) {
