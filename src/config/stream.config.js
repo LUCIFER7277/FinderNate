@@ -217,7 +217,7 @@ class StreamService {
                     audio: {
                         mic_default_on: true,
                         speaker_default_on: true,
-                        default_device: 'speaker'
+                        default_device: 'earpiece'
                     },
                     video: {
                         camera_default_on: false,
