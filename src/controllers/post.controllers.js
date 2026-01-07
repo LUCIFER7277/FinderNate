@@ -782,6 +782,64 @@ export const editPost = asyncHandler(async (req, res) => {
     return res.status(200).json(new ApiResponse(200, updatedPost, "Post updated successfully"));
 });
 
+// Toggle post privacy
+export const togglePostPrivacy = asyncHandler(async (req, res) => {
+    const { postId } = req.params;
+    const userId = req.user?._id;
+    const { privacy } = req.body;
+
+    if (!userId) throw new ApiError(401, "User authentication required");
+
+    // Validate privacy value
+    if (!privacy || !['public', 'private'].includes(privacy)) {
+        throw new ApiError(400, "Invalid privacy value. Must be 'public' or 'private'");
+    }
+
+    // Find the post first to check ownership
+    const post = await Post.findById(postId);
+    if (!post) throw new ApiError(404, "Post not found");
+
+    // Check if user owns the post
+    if (post.userId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You can only modify your own posts");
+    }
+
+    // Track if privacy is changing from private to public
+    const oldPrivacy = post.settings?.privacy || 'public';
+    const isPrivacyChangingToPublic = privacy === 'public' && oldPrivacy === 'private';
+
+    // Update only the privacy settings
+    const updatedPost = await Post.findByIdAndUpdate(
+        postId,
+        {
+            $set: {
+                "settings.privacy": privacy,
+                "settings.isPrivacyTouched": true,
+                updatedAt: new Date()
+            }
+        },
+        { new: true, runValidators: true }
+    ).populate('userId', 'username fullName profileImageUrl');
+
+    // Invalidate caches if post privacy changed from private to public
+    if (isPrivacyChangingToPublic) {
+        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+
+        // Invalidate explore and trending feeds so the post can appear
+        await FeedCacheManager.invalidateExploreFeed();
+        await FeedCacheManager.invalidateTrendingFeed();
+
+        // Invalidate author's feed
+        await FeedCacheManager.invalidateUserFeed(userId);
+    }
+
+    return res.status(200).json(new ApiResponse(200, {
+        postId: updatedPost._id,
+        privacy: updatedPost.settings.privacy,
+        post: updatedPost
+    }, `Post privacy updated to ${privacy}`));
+});
+
 // Update post
 export const updatePost = asyncHandler(async (req, res) => {
     const { id } = req.params;
