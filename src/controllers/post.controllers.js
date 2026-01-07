@@ -629,7 +629,8 @@ export const getPostById = asyncHandler(async (req, res) => {
     const currentUser = req.user;
 
     const post = await Post.findById(postId)
-        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate');
+        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate')
+        .lean();
 
     if (!post) throw new ApiError(404, "Post not found");
 
@@ -649,6 +650,23 @@ export const getPostById = asyncHandler(async (req, res) => {
     if (!canViewPost(post, post.userId, currentUser, viewerFollowing, viewerFollowers)) {
         throw new ApiError(403, "You don't have permission to view this post");
     }
+
+    // Fetch likes for this post and populate user details
+    const likes = await Like.find({ postId: postId }).lean();
+    const likedByUserIds = likes.map(like => like.userId.toString());
+
+    // Fetch user details for all users who liked the post
+    let likedByUsers = [];
+    if (likedByUserIds.length > 0) {
+        likedByUsers = await Post.db.model('User').find(
+            { _id: { $in: likedByUserIds } },
+            'username fullName profileImageUrl isVerified'
+        ).lean();
+    }
+
+    // Add likedBy array and isLikedBy flag to the post
+    post.likedBy = likedByUsers;
+    post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
 
     return res.status(200).json(new ApiResponse(200, post, "Post fetched successfully"));
 });
