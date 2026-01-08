@@ -44,12 +44,41 @@ const MessageSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     }],
+    deliveryStatus: [{
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        status: {
+            type: String,
+            enum: ['sent', 'delivered', 'seen'],
+            default: 'sent'
+        },
+        deliveredAt: Date,
+        seenAt: Date
+    }],
     isDeleted: {
         type: Boolean,
         default: false,
         index: true
     },
     deletedAt: Date,
+    deletedFor: [{
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        deletedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }],
+    deletedForEveryone: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    deletedForEveryoneAt: Date,
     editedAt: Date,
     originalMessage: String, // Store original message for potential restoration
     reactions: [{
@@ -74,6 +103,8 @@ MessageSchema.index({ chatId: 1, timestamp: -1 }); // For message fetching
 MessageSchema.index({ chatId: 1, isDeleted: 1, timestamp: -1 }); // For non-deleted messages
 MessageSchema.index({ chatId: 1, isDeleted: 1, readBy: 1 }); // For unread count queries
 MessageSchema.index({ sender: 1, timestamp: -1 }); // For user's sent messages
+MessageSchema.index({ chatId: 1, 'deliveryStatus.userId': 1, 'deliveryStatus.status': 1 }); // For delivery status queries
+MessageSchema.index({ chatId: 1, deletedForEveryone: 1 }); // For deleted messages filtering
 
 // Virtual for unread status (per user)
 MessageSchema.virtual('isUnread').get(function () {

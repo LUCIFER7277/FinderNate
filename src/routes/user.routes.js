@@ -3,7 +3,7 @@ import { upload } from "../middlewares/multerConfig.js";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blocking.middleware.js";
 import { cacheSearchResults } from "../middlewares/cache.middleware.js";
-import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, uploadProfileImage, sendVerificationOTPForEmail, sendPasswordResetOTP, resetPasswordWithOTP, getOtherUserProfile, checkTokenExpiry, togglePhoneNumberVisibility, toggleAddressVisibility, trackSearch, getPopularSearches, blockUser, unblockUser, getBlockedUsers, checkIfUserBlocked, getUsernameSuggestions, checkUsernameAvailability, toggleFullPrivateAccount, toggleServiceAutoFill, getPreviousServicePostData, toggleProductAutoFill, getPreviousProductPostData, saveFCMToken, testFCMNotification, checkFirebaseStatus } from "../controllers/user.controllers.js";
+import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, uploadProfileImage, sendVerificationOTPForEmail, sendPasswordResetOTP, resetPasswordWithOTP, getOtherUserProfile, checkTokenExpiry, togglePhoneNumberVisibility, toggleAddressVisibility, trackSearch, getPopularSearches, blockUser, unblockUser, getBlockedUsers, checkIfUserBlocked, getUsernameSuggestions, checkUsernameAvailability, toggleFullPrivateAccount, toggleServiceAutoFill, getPreviousServicePostData, toggleProductAutoFill, getPreviousProductPostData, saveFCMToken, testFCMNotification, checkFirebaseStatus, updateMessagingPrivacy, getMessagingPrivacy } from "../controllers/user.controllers.js";
 import { searchAllContent } from "../controllers/searchAllContent.controllers.js";
 import { followUser, unfollowUser, getFollowers, getFollowing, approveFollowRequest, rejectFollowRequest, getPendingFollowRequests, getSentFollowRequests } from "../controllers/follower.controllers.js";
 import { getSearchSuggestions } from "../controllers/searchSuggestion.controllers.js";
@@ -82,5 +82,9 @@ router.get("/firebase-status", checkFirebaseStatus);
 
 // Test FCM notification route
 router.post("/test-fcm", verifyJWT, testFCMNotification);
+
+// Messaging privacy routes
+router.patch("/messaging/privacy", verifyJWT, updateMessagingPrivacy);
+router.get("/messaging/privacy", verifyJWT, getMessagingPrivacy);
 
 export default router;

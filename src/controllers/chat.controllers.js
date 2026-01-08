@@ -12,6 +12,8 @@ import { User } from '../models/user.models.js';
 import { ChatPubSub, NotificationPubSub, LiveFeaturesPubSub } from '../utlis/pubsub.utils.js';
 import notificationCache from '../utlis/notificationCache.utils.js';
 import { redisClient } from '../config/redis.config.js';
+import { getPrivacyFilteredStatus } from '../middlewares/messaging-privacy.middleware.js';
+import { calculateMessageStatus } from '../utlis/messageStatus.utils.js';
 
 // Helper function to safely emit socket events
 const safeEmitToChat = (chatId, event, data) => {
@@ -19,6 +21,14 @@ const safeEmitToChat = (chatId, event, data) => {
         socketManager.emitToChat(chatId, event, data);
     } else {
         console.warn(`Socket not ready, skipping ${event} for chat ${chatId}`);
+    }
+};
+
+const safeEmitToUser = (userId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToUser(userId, event, data);
+    } else {
+        console.warn(`Socket not ready, skipping ${event} for user ${userId}`);
     }
 };
 
@@ -650,16 +660,24 @@ export const getChatMessages = asyncHandler(async (req, res) => {
         throw new ApiError(403, 'This chat request has been declined');
     }
 
+    // Build query to exclude deleted messages
+    const messageQuery = {
+        chatId,
+        $and: [
+            // Exclude messages deleted for everyone
+            { deletedForEveryone: { $ne: true } },
+            // Exclude messages deleted for this specific user
+            { 'deletedFor.userId': { $ne: currentUserId } }
+        ]
+    };
+
     // Get messages with pagination using Message model
     const [messages, totalMessages] = await Promise.all([
-        Message.find({
-            chatId,
-            isDeleted: { $ne: true } // Exclude deleted messages
-        })
+        Message.find(messageQuery)
             .sort({ timestamp: -1 })
             .skip(skip)
             .limit(pageLimit)
-            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions')
+            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone')
             .populate('sender', 'username fullName profileImageUrl')
             .populate({
                 path: 'replyTo',
@@ -670,10 +688,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
                 }
             })
             .lean(),
-        Message.countDocuments({
-            chatId,
-            isDeleted: { $ne: true } // Exclude deleted messages when counting
-        })
+        Message.countDocuments(messageQuery)
     ]);
 
     // If this is the first page, update chat's last message if needed
@@ -694,9 +709,21 @@ export const getChatMessages = asyncHandler(async (req, res) => {
         }
     }
 
+    // Add message status for sender's messages
+    const messagesWithStatus = messages.map(msg => {
+        // Only add status info if the current user is the sender
+        if (msg.sender._id.toString() === currentUserId.toString()) {
+            return {
+                ...msg,
+                status: calculateMessageStatus(msg, chat.participants)
+            };
+        }
+        return msg;
+    });
+
     return res.status(200).json(
         new ApiResponse(200, {
-            messages: messages.reverse(), // Reverse to get chronological order
+            messages: messagesWithStatus.reverse(), // Reverse to get chronological order
             pagination: {
                 currentPage: pageNum,
                 totalPages: Math.ceil(totalMessages / pageLimit),
@@ -754,6 +781,11 @@ export const addMessage = asyncHandler(async (req, res) => {
         throw new ApiError(403, 'This chat request has been declined');
     }
 
+    // Get all recipients (participants except sender)
+    const recipients = chat.participants.filter(
+        p => p.toString() !== currentUserId.toString()
+    );
+
     // Create message data object
     const messageData = {
         chatId,
@@ -762,7 +794,14 @@ export const addMessage = asyncHandler(async (req, res) => {
         messageType, // ✅ Use the actual messageType from request
         timestamp: new Date(),
         readBy: [currentUserId],
-        replyTo: replyTo || null
+        replyTo: replyTo || null,
+        // Initialize delivery status for all recipients
+        deliveryStatus: recipients.map(recipientId => ({
+            userId: recipientId,
+            status: 'sent',
+            deliveredAt: null,
+            seenAt: null
+        }))
     };
 
     // ✅ Handle file upload if present
@@ -913,8 +952,10 @@ export const markMessagesRead = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'Chat not found or access denied');
     }
 
+    const currentTime = new Date();
+
     if (messageIds && Array.isArray(messageIds)) {
-        // Mark specific messages as read
+        // Mark specific messages as read and update delivery status
         await Message.updateMany(
             {
                 _id: { $in: messageIds },
@@ -922,18 +963,32 @@ export const markMessagesRead = asyncHandler(async (req, res) => {
                 readBy: { $ne: currentUserId }
             },
             {
-                $addToSet: { readBy: currentUserId }
+                $addToSet: { readBy: currentUserId },
+                $set: {
+                    'deliveryStatus.$[elem].status': 'seen',
+                    'deliveryStatus.$[elem].seenAt': currentTime
+                }
+            },
+            {
+                arrayFilters: [{ 'elem.userId': currentUserId }]
             }
         );
     } else {
-        // Mark all unread messages in the chat as read
+        // Mark all unread messages in the chat as read and update delivery status
         await Message.updateMany(
             {
                 chatId,
                 readBy: { $ne: currentUserId }
             },
             {
-                $addToSet: { readBy: currentUserId }
+                $addToSet: { readBy: currentUserId },
+                $set: {
+                    'deliveryStatus.$[elem].status': 'seen',
+                    'deliveryStatus.$[elem].seenAt': currentTime
+                }
+            },
+            {
+                arrayFilters: [{ 'elem.userId': currentUserId }]
             }
         );
     }
@@ -1037,8 +1092,8 @@ export const markChatAsRead = asyncHandler(async (req, res) => {
     );
 });
 
-// Delete a message
-export const deleteMessage = asyncHandler(async (req, res) => {
+// Delete a message for everyone (24-hour limit)
+export const deleteMessageForEveryone = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { chatId, messageId } = req.params;
 
@@ -1068,11 +1123,21 @@ export const deleteMessage = asyncHandler(async (req, res) => {
         throw new ApiError(403, 'Not authorized to delete this message');
     }
 
-    // Soft delete the message
-    message.deletedAt = new Date();
+    // Check if message is within 24 hours
+    const messageAge = Date.now() - new Date(message.timestamp).getTime();
+    const twentyFourHours = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+    if (messageAge > twentyFourHours) {
+        throw new ApiError(400, 'Cannot delete messages older than 24 hours. Use "Delete for Me" instead.');
+    }
+
+    // Delete for everyone
+    message.deletedForEveryone = true;
+    message.deletedForEveryoneAt = new Date();
+    message.deletedAt = new Date(); // Keep for backward compatibility
     message.originalMessage = message.message; // Store original for potential restoration
     message.message = '[Message deleted]';
-    message.isDeleted = true;
+    message.isDeleted = true; // Keep for backward compatibility
 
     await message.save();
 
@@ -1112,8 +1177,8 @@ export const deleteMessage = asyncHandler(async (req, res) => {
 
     await chat.save();
 
-    // Emit real-time event for message deletion
-    safeEmitToChat(chatId, 'message_deleted', {
+    // Emit real-time event for message deletion for everyone
+    safeEmitToChat(chatId, 'message_deleted_for_everyone', {
         chatId,
         messageId,
         deletedBy: {
@@ -1124,7 +1189,61 @@ export const deleteMessage = asyncHandler(async (req, res) => {
     });
 
     return res.status(200).json(
-        new ApiResponse(200, {}, 'Message deleted successfully')
+        new ApiResponse(200, {}, 'Message deleted for everyone successfully')
+    );
+});
+
+// Delete a message for me only (no time limit)
+export const deleteMessageForMe = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // Find the message
+    const message = await Message.findOne({
+        _id: messageId,
+        chatId
+    });
+
+    if (!message) {
+        throw new ApiError(404, 'Message not found');
+    }
+
+    // Check if already deleted for this user
+    const alreadyDeleted = message.deletedFor.some(
+        del => del.userId.toString() === currentUserId.toString()
+    );
+
+    if (alreadyDeleted) {
+        throw new ApiError(400, 'Message already deleted for you');
+    }
+
+    // Add user to deletedFor array
+    message.deletedFor.push({
+        userId: currentUserId,
+        deletedAt: new Date()
+    });
+
+    await message.save();
+
+    // Note: Do NOT update chat's lastMessage - this is a personal deletion
+    // Only emit to the user who deleted it
+    safeEmitToUser(currentUserId, 'message_deleted_for_me', {
+        chatId,
+        messageId
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, {}, 'Message deleted for you successfully')
     );
 });
 
@@ -1258,8 +1377,9 @@ export const stopTyping = asyncHandler(async (req, res) => {
     );
 });
 
-// Get online status of users
+// Get online status of users with privacy filtering
 export const getOnlineStatus = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
     let userIds = req.query.userIds;
 
     // Handle different formats of userIds in query
@@ -1278,11 +1398,18 @@ export const getOnlineStatus = asyncHandler(async (req, res) => {
         throw new ApiError(400, "User IDs array is required");
     }
 
-    // Rest of the function remains the same
+    // Get online status with privacy filtering
     const onlineStatus = {};
-    userIds.forEach(userId => {
-        onlineStatus[userId] = socketManager.isReady() ? socketManager.isUserOnline(userId) : false;
-    });
+
+    for (const userId of userIds) {
+        const status = await getPrivacyFilteredStatus(
+            currentUserId,
+            userId,
+            socketManager.isUserOnline.bind(socketManager)
+        );
+
+        onlineStatus[userId] = status;
+    }
 
     return res.status(200).json(
         new ApiResponse(200, { onlineStatus }, 'Online status fetched successfully')

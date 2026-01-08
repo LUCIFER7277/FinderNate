@@ -21,6 +21,24 @@ const UserSchema = new mongoose.Schema({
     isAddressHidden: { type: Boolean, default: false },
     privacy: { type: String, enum: ['private', 'public'], default: 'public' },
     isFullPrivate: { type: Boolean, default: false },
+    // Messaging privacy settings
+    messagingPrivacy: {
+        onlineStatus: {
+            type: String,
+            enum: ['everyone', 'followers', 'nobody'],
+            default: 'everyone'
+        },
+        lastSeen: {
+            type: String,
+            enum: ['everyone', 'followers', 'nobody'],
+            default: 'everyone'
+        }
+    },
+    lastSeenAt: {
+        type: Date,
+        default: Date.now,
+        index: true
+    },
     link: String,
     followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
