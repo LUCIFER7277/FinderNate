@@ -1823,7 +1823,5 @@ export {
     getPreviousProductPostData,
     saveFCMToken,
     testFCMNotification,
-    checkFirebaseStatus,
-    updateMessagingPrivacy,
-    getMessagingPrivacy
+    checkFirebaseStatus
 };
