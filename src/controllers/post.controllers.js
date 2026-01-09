@@ -16,6 +16,7 @@ import { CacheManager } from "../utlis/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
+import { enrichWithRatings } from "../utlis/reviewUtils.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -618,7 +619,10 @@ export const getAllPosts = asyncHandler(async (req, res) => {
     }
 
     // Filter posts based on privacy settings
-    const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+    let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+
+    // Enrich posts with review/rating data
+    visiblePosts = await enrichWithRatings(visiblePosts, 'userId');
 
     return res.status(200).json(new ApiResponse(200, visiblePosts, "Posts fetched successfully"));
 });
@@ -849,6 +853,14 @@ export const togglePostPrivacy = asyncHandler(async (req, res) => {
 
         // Invalidate author's feed
         await FeedCacheManager.invalidateUserFeed(userId);
+    }
+
+    // Invalidate share caches when privacy changes to private
+    if (privacy === 'private') {
+        await redisClient.del(`fn:share:post:${postId}`);
+        await redisClient.del(`fn:share:reel:${postId}`);
+        await redisClient.del(`fn:share:preview:${postId}`);
+        await redisClient.del(`fn:share:preview:reel:${postId}`);
     }
 
     return res.status(200).json(new ApiResponse(200, {
@@ -1114,6 +1126,12 @@ const invalidatePostCaches = async (postId, userId) => {
         } catch (err) {
             console.error('Redis reel cache clear error:', err);
         }
+
+        // 3. Invalidate share caches for deleted content
+        await redisClient.del(`fn:share:post:${postId}`);
+        await redisClient.del(`fn:share:reel:${postId}`);
+        await redisClient.del(`fn:share:preview:${postId}`);
+        await redisClient.del(`fn:share:preview:reel:${postId}`);
 
         console.log(`✅ Cache invalidated for deleted content: ${postId}`);
     } catch (error) {
@@ -1454,12 +1472,15 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
     });
 
+    // Enrich posts with review/rating data
+    const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
+
     return res.status(200).json(
         new ApiResponse(200, {
             totalPosts: total,
             page,
             totalPages: Math.ceil(total / limit),
-            posts: postsWithThumbnails
+            posts: enrichedPosts
         }, "User posts fetched successfully")
     );
 });
@@ -1577,9 +1598,12 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
         });
 
+        // Enrich posts with review/rating data
+        const enrichedPosts = await enrichWithRatings(visiblePosts, 'userId');
+
         return res.status(200).json(
             new ApiResponse(200, {
-                posts: visiblePosts,
+                posts: enrichedPosts,
                 pagination: {
                     currentPage,
                     totalPages,

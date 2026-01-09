@@ -11,6 +11,7 @@ import { setCache } from '../middlewares/cache.middleware.js';
 import { redisClient } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
 import mongoose from 'mongoose';
+import { enrichWithRatings } from '../utlis/reviewUtils.js';
 
 export const getHomeFeed = asyncHandler(async (req, res) => {
     try {
@@ -254,6 +255,8 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             comments: commentsByPost.get(post._id.toString()) || [],
             isLikedBy: likedPostIds.has(post._id.toString())
         }));
+        // Enrich posts with review/rating data
+        const enrichedFeedData = await enrichWithRatings(feedData, 'userId');
 
         // Get total count for pagination (cached to avoid expensive count queries)
         let totalCount = posts.length; // Simplified - use actual count for better pagination
@@ -270,7 +273,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         }
 
         const response = new ApiResponse(200, {
-            feed: feedData,
+            feed: enrichedFeedData,
             pagination: {
                 page,
                 limit,

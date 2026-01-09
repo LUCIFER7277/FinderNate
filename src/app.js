@@ -213,6 +213,7 @@ import adminRouter from "./routes/admin.routes.js";
 import feedbackRouter from "./routes/feedback.routes.js";
 import qrRouter from "./routes/qr.routes.js";
 import streamRouter from "./routes/stream.routes.js";
+import shareRouter from "./routes/share.routes.js";
 
 
 
@@ -234,6 +235,7 @@ app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/feedback", feedbackRouter);
 app.use("/api/v1/qr", qrRouter);
 app.use("/api/v1/stream", streamRouter);
+app.use("/api/v1/share", shareRouter);
 
 app.use(errorHandler);
 

@@ -4,6 +4,7 @@ import { User } from "../models/user.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
+import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -152,9 +153,15 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
                 reel.profileImageUrl = null;
             }
         });
+
+        // Enrich reels with review/rating data
+        reels = await enrichWithRatings(reels, 'userId');
     }
 
     // Posts already have populated user details from the query
+
+    // Enrich posts with review/rating data
+    posts = await enrichWithRatings(posts, 'userId');
 
     // Combine and shuffle final feed based on query type
     let feed, totalAvailable, totalPages, hasNextPage;
