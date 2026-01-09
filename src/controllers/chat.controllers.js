@@ -345,11 +345,14 @@ export const getUserChats = asyncHandler(async (req, res) => {
     // Get all chat IDs from deduplicated chats
     const chatIds = deduplicatedChats.map(chat => chat._id);
 
-    // For each chat, find the last non-deleted message
+    // For each chat, find the last non-deleted message (excluding messages deleted for this user)
     const lastMessagesPromises = chatIds.map(chatId =>
         Message.findOne({
             chatId,
-            isDeleted: { $ne: true }
+            $and: [
+                { deletedForEveryone: { $ne: true } },
+                { 'deletedFor.userId': { $ne: userObjectId } }
+            ]
         })
             .sort({ timestamp: -1 })
             .populate('sender', 'username fullName profileImageUrl')
@@ -377,7 +380,10 @@ export const getUserChats = asyncHandler(async (req, res) => {
         {
             $match: {
                 chatId: { $in: chatIds },
-                isDeleted: { $ne: true }
+                $and: [
+                    { deletedForEveryone: { $ne: true } },
+                    { 'deletedFor.userId': { $ne: userObjectId } }
+                ]
             }
         },
         {
@@ -1145,7 +1151,10 @@ export const deleteMessageForEveryone = asyncHandler(async (req, res) => {
     // Find the most recent non-deleted message
     const remainingLastMessage = await Message.findOne({
         chatId,
-        isDeleted: { $ne: true }
+        $and: [
+            { deletedForEveryone: { $ne: true } },
+            { isDeleted: { $ne: true } }
+        ]
     }).sort({ timestamp: -1 });
 
     if (remainingLastMessage) {
@@ -1187,6 +1196,35 @@ export const deleteMessageForEveryone = asyncHandler(async (req, res) => {
             fullName: req.user.fullName
         }
     });
+
+    // Invalidate caches asynchronously (don't block response)
+    (async () => {
+        try {
+            const participantIds = chat.participants.map(p => p.toString());
+
+            // Invalidate message cache for all participants
+            await notificationCache.invalidateMultipleUsersCache(participantIds, 'message');
+
+            // Invalidate chat list cache for all participants
+            const cacheInvalidations = [];
+            for (const participantId of participantIds) {
+                // Invalidate both active and requested chat lists (multiple pages)
+                for (let page = 1; page <= 3; page++) {
+                    const activeKey = `chats:user:${participantId}:status:active:page:${page}:limit:20`;
+                    const requestedKey = `chats:user:${participantId}:status:requested:page:${page}:limit:20`;
+                    cacheInvalidations.push(
+                        redisClient.del(activeKey),
+                        redisClient.del(requestedKey)
+                    );
+                }
+            }
+
+            await Promise.all(cacheInvalidations);
+            console.log(`✅ Invalidated caches for ${participantIds.length} participants after message deletion`);
+        } catch (cacheError) {
+            console.error('Error invalidating caches after message deletion:', cacheError);
+        }
+    })();
 
     return res.status(200).json(
         new ApiResponse(200, {}, 'Message deleted for everyone successfully')
@@ -1241,6 +1279,29 @@ export const deleteMessageForMe = asyncHandler(async (req, res) => {
         chatId,
         messageId
     });
+
+    // Invalidate caches for the user who deleted the message
+    (async () => {
+        try {
+            // Invalidate message cache
+            await notificationCache.invalidateMessageCache(currentUserId.toString());
+
+            // Invalidate chat list cache so they see updated lastMessage on refresh
+            const cacheInvalidations = [];
+            for (let page = 1; page <= 3; page++) {
+                const activeKey = `chats:user:${currentUserId}:status:active:page:${page}:limit:20`;
+                const requestedKey = `chats:user:${currentUserId}:status:requested:page:${page}:limit:20`;
+                cacheInvalidations.push(
+                    redisClient.del(activeKey),
+                    redisClient.del(requestedKey)
+                );
+            }
+            await Promise.all(cacheInvalidations);
+            console.log(`✅ Invalidated caches for user ${currentUserId} after deleting message for self`);
+        } catch (cacheError) {
+            console.error('Error invalidating caches after personal message deletion:', cacheError);
+        }
+    })();
 
     return res.status(200).json(
         new ApiResponse(200, {}, 'Message deleted for you successfully')
