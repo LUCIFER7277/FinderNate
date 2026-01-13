@@ -296,7 +296,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         console.log('🎬 Reels Debug - Match criteria:', JSON.stringify(matchCriteria, null, 2));
 
         // Execute aggregation
-        const reels = await Post.aggregate(pipeline);
+        let reels = await Post.aggregate(pipeline);
 
         console.log('🎬 Reels Debug - Reels found:', reels.length);
 
