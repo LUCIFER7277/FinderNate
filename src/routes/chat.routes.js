@@ -17,7 +17,8 @@ import {
     getOnlineStatus,
     searchMessages,
     acceptChatRequest,
-    declineChatRequest
+    declineChatRequest,
+    updateChatTheme
 } from '../controllers/chat.controllers.js';
 
 const router = express.Router();
@@ -37,6 +38,9 @@ router.get('/', getUserChats);
 // Chat request management
 router.patch('/:chatId/accept', acceptChatRequest);
 router.patch('/:chatId/decline', declineChatRequest);
+
+// Update chat theme color
+router.patch('/:chatId/theme', updateChatTheme);
 
 // Get messages for a chat
 router.get('/:chatId/messages', getChatMessages);

@@ -1703,4 +1703,55 @@ export const cleanupProblematicChats = asyncHandler(async (req, res) => {
     }
 
     throw new ApiError(400, 'Invalid action. Use "analyze" or "fix"');
+});
+
+// Update chat theme color
+export const updateChatTheme = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+    const { themeColor } = req.body;
+
+    // Validate themeColor is provided
+    if (!themeColor) {
+        throw new ApiError(400, 'Theme color is required');
+    }
+
+    // Validate hex color format
+    if (!/^#[0-9A-F]{6}$/i.test(themeColor)) {
+        throw new ApiError(400, 'Invalid color format. Use hex color code (e.g., #DBB42C)');
+    }
+
+    // Find the chat and verify user is a participant
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+
+    // Update theme color
+    chat.themeColor = themeColor;
+    await chat.save();
+
+    // Get populated chat data
+    const populatedChat = await Chat.findById(chat._id)
+        .populate('participants', 'username fullName profileImageUrl')
+        .populate('createdBy', 'username fullName profileImageUrl');
+
+    // Notify all participants via socket about theme change
+    safeEmitToChat(chatId, 'chat_theme_updated', {
+        chatId,
+        themeColor,
+        updatedBy: {
+            _id: currentUserId,
+            username: req.user.username,
+            fullName: req.user.fullName
+        }
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, populatedChat, 'Chat theme updated successfully')
+    );
 }); 
