@@ -28,6 +28,19 @@ export const searchAllContent = async (req, res) => {
 
         if (!q) throw new ApiError(400, "Search query 'q' is required");
 
+<<<<<<< HEAD
+=======
+        // 🎯 Smart query preprocessing
+        const isHashtagSearch = q.startsWith('#');
+        const cleanQuery = q.replace(/^#/, '').trim();
+        const queryVariations = [
+            q.trim(),
+            cleanQuery,
+            q.toLowerCase().trim(),
+            cleanQuery.toLowerCase()
+        ].filter(Boolean);
+
+>>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         // Track search keyword if it's 3+ characters
         if (q.trim().length >= 3) {
             const normalizedKeyword = q.trim().toLowerCase();
@@ -232,6 +245,7 @@ export const searchAllContent = async (req, res) => {
             ...basePostFilters,
             userId: { $nin: blockedUsers }
         })
+<<<<<<< HEAD
             .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
             .lean();
 
@@ -304,6 +318,12 @@ export const searchAllContent = async (req, res) => {
             const isBusiness = userIdStr && businessUserIdsSet.has(userIdStr);
             const hasActivePlan = userIdStr && activePlanUserIdsSet.has(userIdStr);
             
+=======
+            .populate('userId', 'username profileImageUrl bio location')
+            .lean();
+
+        const scoredPosts = rawPosts.map(post => {
+>>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
             const engagement = post.engagement || {};
             const score =
                 (engagement.likes || 0) * 1 +
@@ -318,11 +338,14 @@ export const searchAllContent = async (req, res) => {
                 case 'business': base = 1.0; break;
                 case 'normal': base = 0.8; break;
             }
+<<<<<<< HEAD
             
             // Boost score for paid business posts
             if (isBusiness && hasActivePlan) {
                 base += 2.0; // Significant boost for paid business posts
             }
+=======
+>>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
 
             return {
                 ...post,
@@ -380,6 +403,7 @@ export const searchAllContent = async (req, res) => {
             }
 
             const rawReels = await Reel.find(reelFilters)
+<<<<<<< HEAD
                 .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
                 .lean();
 
@@ -396,6 +420,12 @@ export const searchAllContent = async (req, res) => {
                 const isBusiness = userIdStr && reelBusinessUserIdsSet.has(userIdStr);
                 const hasActivePlan = userIdStr && reelActivePlanUserIdsSet.has(userIdStr);
                 
+=======
+                .populate('userId', 'username profileImageUrl bio location')
+                .lean();
+
+            scoredReels = rawReels.map(reel => {
+>>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
                 const engagement = reel.engagement || {};
                 const score =
                     (engagement.likes || 0) * 1 +
@@ -403,6 +433,7 @@ export const searchAllContent = async (req, res) => {
                     (engagement.views || 0) * 1.5 +
                     (engagement.shares || 0) * 0.5;
 
+<<<<<<< HEAD
                 let baseScore = 2;
                 // Boost score for paid business reels
                 if (isBusiness && hasActivePlan) {
@@ -412,6 +443,11 @@ export const searchAllContent = async (req, res) => {
                 return {
                     ...reel,
                     _score: baseScore + score + (new Date(reel.createdAt).getTime() / 10000000000000),
+=======
+                return {
+                    ...reel,
+                    _score: 2 + score + (new Date(reel.createdAt).getTime() / 10000000000000),
+>>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
                     _type: 'reel'
                 };
             });
