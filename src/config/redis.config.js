@@ -1,0 +1,215 @@
+import Redis from 'ioredis';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+
+// Redis Configuration
+const REDIS_CONFIG = {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT) || 6379,
+    password: process.env.REDIS_PASSWORD || undefined,
+    db: parseInt(process.env.REDIS_DB) || 0,
+
+    // Connection options
+    connectTimeout: 10000,
+    commandTimeout: 5000,
+    lazyConnect: false, // ✅ FIXED: Connect immediately instead of waiting for first command
+
+    // Pool settings optimized for limited connections
+    family: 4,
+    keepAlive: true,
+    maxLoadingTimeout: 10000,
+
+    // Connection pooling to limit connections
+    enableAutoPipelining: true,
+    maxRetriesPerRequest: 3,
+
+    // Error handling
+    enableOfflineQueue: true,
+
+    // Retry configuration
+    retryDelayOnFailover: 1000,
+    retryDelayOnClusterDown: 300,
+    maxRetriesPerRequest: 3,
+
+    // Reconnection settings
+    reconnectOnError: (err) => {
+        const targetError = 'READONLY';
+        return err.message.includes(targetError);
+    },
+
+    // Better timeout handling
+    socketTimeout: 30000,
+
+    // Retry strategy
+    retryStrategy: (times) => {
+        const delay = Math.min(times * 50, 2000);
+        return delay;
+    },
+};
+
+// Create Redis instances for this process
+const createRedisInstance = () => new Redis(REDIS_CONFIG);
+
+// Primary Redis instance for caching and general operations
+export const redisClient = createRedisInstance();
+
+// Socket.IO Redis adapter requires dedicated pub/sub instances
+const PUBSUB_CONFIG = {
+    ...REDIS_CONFIG,
+    enableOfflineQueue: true,
+    lazyConnect: false,
+    enableAutoPipelining: false // Disable for subscriber
+};
+
+const PUBLISHER_CONFIG = {
+    ...REDIS_CONFIG,
+    enableOfflineQueue: true,
+    lazyConnect: false,
+    enableAutoPipelining: true // Enable for publisher
+};
+
+// Socket.IO Redis adapter connections (handles all pub/sub needs)
+export const redisPubSub = new Redis(PUBSUB_CONFIG);
+export const redisPublisher = new Redis(PUBLISHER_CONFIG);
+
+// Removed: redisAppSubscriber and redisAppPublisher (use Socket.IO adapter instead)
+
+// Redis connection event handlers
+redisClient.on('connect', () => {
+    console.log(' Redis Client: Connected');
+});
+
+redisClient.on('ready', () => {
+    console.log('=� Redis Client: Ready for operations');
+});
+
+redisClient.on('error', (err) => {
+    console.error('L Redis Client Error:', err);
+});
+
+redisClient.on('close', () => {
+    console.log('� Redis Client: Connection closed');
+});
+
+// PubSub Redis event handlers
+redisPubSub.on('connect', () => {
+    console.log(' Redis PubSub: Connected');
+});
+
+redisPubSub.on('ready', () => {
+    console.log('🔄 Redis PubSub: Ready');
+});
+
+redisPubSub.on('error', (err) => {
+    console.error('L Redis PubSub Error:', err);
+});
+
+// Publisher Redis event handlers
+redisPublisher.on('connect', () => {
+    console.log(' Redis Publisher: Connected');
+});
+
+redisPublisher.on('ready', () => {
+    console.log('🔄 Redis Publisher: Ready');
+});
+
+redisPublisher.on('error', (err) => {
+    console.error('L Redis Publisher Error:', err);
+});
+
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('=� Closing Redis connections...');
+    await redisClient.quit();
+    await redisPubSub.quit();
+    await redisPublisher.quit();
+    process.exit(0);
+});
+
+// Health check function
+export const redisHealthCheck = async () => {
+    try {
+        const pong = await redisClient.ping();
+        return pong === 'PONG';
+    } catch (error) {
+        console.error('Redis health check failed:', error);
+        return false;
+    }
+};
+
+// Key generation utilities
+export const RedisKeys = {
+    // User data keys
+    userProfile: (userId) => `fn:user:${userId}:profile`,
+    userFeed: (userId, page = 1) => `fn:user:${userId}:feed:p${page}`,
+    userFollowers: (userId) => `fn:user:${userId}:followers`,
+    userFollowing: (userId) => `fn:user:${userId}:following`,
+    userNotifications: (userId) => `fn:user:${userId}:notifications`,
+    
+    // Post data keys
+    postDetails: (postId) => `fn:post:${postId}:details`,
+    postStats: (postId) => `fn:post:${postId}:stats`,
+    trendingPosts: (location = 'global') => `fn:posts:trending:${location}`,
+    
+    // Search and exploration
+    searchResults: (query, page = 1) => {
+        const queryHash = Buffer.from(query).toString('base64').slice(0, 16);
+        return `fn:search:${queryHash}:p${page}`;
+    },
+    exploreFeed: (page = 1) => `fn:explore:feed:p${page}`,
+    userSuggestions: (userId) => `fn:suggestions:user:${userId}`,
+    
+    // Business and products
+    businessProfile: (businessId) => `fn:business:${businessId}:profile`,
+    businessProducts: (businessId) => `fn:business:${businessId}:products`,
+    productDetails: (productId) => `fn:product:${productId}:details`,
+    categories: () => 'fn:categories:all',
+    
+    // Authentication and sessions
+    userSession: (userId, deviceId) => `fn:session:${userId}:${deviceId}`,
+    tokenBlacklist: (jti) => `fn:auth:blacklist:${jti}`,
+    authRateLimit: (ip) => `fn:auth:rate:${ip}`,
+    
+    // Real-time features
+    chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,
+    onlineUsers: () => 'fn:live:online_users',
+    tempUpload: (userId) => `fn:temp:upload:${userId}`,
+};
+
+// TTL constants (in seconds)
+export const RedisTTL = {
+    // Real-time data (short TTL)
+    USER_FEED: 5 * 60,              // 5 minutes
+    NOTIFICATIONS: 2 * 60,          // 2 minutes  
+    CHAT_MESSAGES: 1 * 60,          // 1 minute
+    TRENDING_POSTS: 5 * 60,         // 5 minutes
+    
+    // Semi-static data (medium TTL)
+    USER_PROFILE: 1 * 60 * 60,      // 1 hour
+    POST_DETAILS: 30 * 60,          // 30 minutes
+    SEARCH_RESULTS: 15 * 60,        // 15 minutes
+    BUSINESS_PROFILE: 2 * 60 * 60,  // 2 hours
+    
+    // Static data (long TTL)
+    USER_FOLLOWERS: 4 * 60 * 60,    // 4 hours
+    PRODUCT_CATALOG: 12 * 60 * 60,  // 12 hours
+    CATEGORIES: 24 * 60 * 60,       // 24 hours
+    
+    // Authentication (custom TTL)
+    USER_SESSION: 30 * 24 * 60 * 60, // 30 days
+    TOKEN_BLACKLIST: 24 * 60 * 60,   // 24 hours
+    RATE_LIMIT: 15 * 60,             // 15 minutes
+    
+    // Temporary data
+    TEMP_UPLOAD: 10 * 60,            // 10 minutes
+    PASSWORD_RESET: 15 * 60,         // 15 minutes
+};
+
+export default redisClient;
