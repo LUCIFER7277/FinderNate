@@ -71,7 +71,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             console.log('🔍 Feed Debug - feedUserIds count:', feedUserIds.length);
         }
 
-<<<<<<< HEAD
         // ✅ Get business users with active payment plans for filtering and prioritization
         const activePaymentPlanUserIds = await Business.find({
             subscriptionStatus: 'active',
@@ -84,8 +83,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
 
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
@@ -107,7 +104,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 $match: matchQuery
             },
             {
-<<<<<<< HEAD
                 $lookup: {
                     from: 'users',
                     localField: 'userId',
@@ -148,13 +144,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 }
             },
             {
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
                 $addFields: {
                     // Score posts by priority
                     feedScore: {
                         $add: [
-<<<<<<< HEAD
                             // Paid business posts get HIGHEST priority (even higher than followed users)
                             {
                                 $cond: [
@@ -169,9 +162,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                                 ]
                             },
                             // Followed users get high priority (but lower than paid business)
-=======
-                            // Followed users get highest priority
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
                             { $cond: [{ $in: ['$userId', feedUserIds] }, 100, 0] },
                             // Recent posts get boost
                             { $cond: [{ $gte: ['$createdAt', yesterday] }, 20, 0] },
@@ -221,7 +211,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 $unwind: '$userId'
             },
             {
-<<<<<<< HEAD
                 $project: {
                     isBusinessAccount: 0,
                     userIdForCheck: 0,
@@ -229,8 +218,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 }
             },
             {
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
                 // Project only necessary fields to reduce payload size
                 $project: {
                     _id: 1,
@@ -342,15 +329,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         }));
 
         // Get total count for pagination (cached to avoid expensive count queries)
-<<<<<<< HEAD
         // Need to count posts excluding unpaid business posts
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         let totalCount = posts.length; // Simplified - use actual count for better pagination
         if (page === 1 && posts.length === limit) {
             // Only do count query for first page if it's full
             try {
-<<<<<<< HEAD
                 // Count all posts, then filter out unpaid business posts
                 const allPostsForCount = await Post.find({
                     contentType: { $in: ['normal', 'service', 'product', 'business'] },
@@ -366,12 +349,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 });
                 
                 totalCount = filteredPosts.length;
-=======
-                totalCount = await Post.countDocuments({
-                    contentType: { $in: ['normal', 'service', 'product', 'business'] },
-                    userId: { $nin: blockedUsers }
-                });
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
             } catch (error) {
                 totalCount = posts.length; // Fallback
             }

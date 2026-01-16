@@ -50,7 +50,6 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
         expiresAt: { $gt: now }
     })
         .sort({ createdAt: -1 })
-<<<<<<< HEAD
         .populate("userId", "username profileImageUrl privacy followers following isBusinessProfile");
 
     // Get active payment plan user IDs and business user IDs
@@ -66,14 +65,6 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
         const storyOwnerPrivacy = story.userId.privacy || 'public';
         const isBusinessAccount = story.userId.isBusinessProfile || false;
         const hasActivePlan = activePlanUserIdsSet.has(storyOwnerId);
-=======
-        .populate("userId", "username profileImageUrl privacy followers following");
-
-    // Filter stories based on privacy rules
-    const visibleStories = allStories.filter(story => {
-        const storyOwnerId = story.userId._id.toString();
-        const storyOwnerPrivacy = story.userId.privacy || 'public';
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
 
         // Rule 1: Always show own stories
         if (storyOwnerId === userId.toString()) {
@@ -85,25 +76,17 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
             return false;
         }
 
-<<<<<<< HEAD
         // Rule 3: Hide unpaid business stories from ALL users (including followers)
         if (isBusinessAccount && !hasActivePlan) {
             return false;
         }
 
         // Rule 4: If story owner has PUBLIC account → show to everyone
-=======
-        // Rule 3: If story owner has PUBLIC account → show to everyone
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         if (storyOwnerPrivacy === 'public') {
             return true;
         }
 
-<<<<<<< HEAD
         // Rule 5: If story owner has PRIVATE account → only show to followers/following
-=======
-        // Rule 4: If story owner has PRIVATE account → only show to followers/following
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         if (storyOwnerPrivacy === 'private') {
             const isFollowing = following.some(id => id.toString() === storyOwnerId);
             const isFollower = followers.some(id => id.toString() === storyOwnerId);
@@ -165,7 +148,6 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
         }
     }
 
-<<<<<<< HEAD
     // Get active payment plan user IDs and business user IDs
     const activePaymentPlanUserIds = await Business.find({
         subscriptionStatus: 'active',
@@ -177,8 +159,6 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
     const isBusinessAccount = targetUserFull?.isBusinessProfile || false;
     const hasActivePlan = activePlanUserIdsSet.has(userId);
 
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
     const now = new Date();
     const stories = await Story.find({
         userId,
@@ -186,7 +166,6 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
         expiresAt: { $gt: now }
     }).sort({ createdAt: -1 });
 
-<<<<<<< HEAD
     // Filter out unpaid business stories (hide from ALL users including followers)
     const filteredStories = stories.filter(story => {
         // If it's a business account without active plan, hide the story
@@ -198,10 +177,6 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
 
     // Map mediaType to postType and remove viewers
     const storiesWithPostType = filteredStories.map(story => {
-=======
-    // Map mediaType to postType and remove viewers
-    const storiesWithPostType = stories.map(story => {
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
         const obj = story.toObject();
         obj.postType = obj.mediaType;
         delete obj.mediaType;

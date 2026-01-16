@@ -78,7 +78,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         .populate('userId', 'username profileImageUrl')
         .select('-analytics -__v -settings.customAudience');
 
-<<<<<<< HEAD
     // Filter out unpaid business posts
     const filteredPosts = await filterBusinessPostsByPaymentPlan(allPosts);
 
@@ -111,9 +110,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
     });
 
     // Shuffle arrays separately
-=======
-    // Shuffle all posts for variety
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
     function shuffleArray(arr) {
         return arr
             .map(value => ({ value, sort: Math.random() }))
@@ -121,7 +117,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
             .map(({ value }) => value);
     }
 
-<<<<<<< HEAD
     const shuffledRegularPosts = shuffleArray(regularPosts);
     const shuffledPaidBusinessPosts = shuffleArray(paidBusinessPosts);
 
@@ -150,9 +145,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
             break;
         }
     }
-=======
-    let posts = shuffleArray(allPosts);
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
 
     // Apply sorting if requested (but keep shuffled by default)
     if (sortBy !== "time") {
@@ -225,7 +217,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
 
     // Posts already have populated user details from the query
 
-<<<<<<< HEAD
     // 3. Get paid business stories to intersperse in the feed
     let paidBusinessStories = [];
     if (contentType === "all") {
@@ -243,13 +234,10 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         paidBusinessStories = shuffleArray(allBusinessStories);
     }
 
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
     // Combine and shuffle final feed based on query type
     let feed, totalAvailable, totalPages, hasNextPage;
 
     if (contentType === "all") {
-<<<<<<< HEAD
         // For contentType=all, combine reels, posts, and business stories
         feed = [
             ...reels.map(r => ({ ...r, _type: "reel", location: null })), // Legacy reels don't have location
@@ -259,11 +247,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
                 postType: s.mediaType,
                 location: null
             })),
-=======
-        // For contentType=all, combine reels and posts separately
-        feed = [
-            ...reels.map(r => ({ ...r, _type: "reel", location: null })), // Legacy reels don't have location
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
             ...posts.map(p => {
                 const post = p.toObject ? p.toObject() : p;
 
@@ -356,10 +339,7 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
             limit,
             reelsCount: contentType === "all" ? reels.length : feed.filter(item => item._type === "reel").length,
             postsCount: contentType === "all" ? posts.length : feed.filter(item => item._type === "post").length,
-<<<<<<< HEAD
             businessStoriesCount: contentType === "all" ? paidBusinessStories.length : 0,
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
             total: feed.length,
             totalAvailable,
             totalPages,

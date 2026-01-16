@@ -83,11 +83,8 @@ export const unsubscribeFromPush = asyncHandler(async (req, res) => {
 // Send push notification to user(s)
 export const sendPushNotification = async (userIds, notificationData) => {
   try {
-<<<<<<< HEAD
     initializeVapid();
     
-=======
->>>>>>> ac77c6651c422022ac6ec4f8ddfa65a87d42f7ee
     if (!Array.isArray(userIds)) {
       userIds = [userIds];
     }
