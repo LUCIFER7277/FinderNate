@@ -462,8 +462,20 @@ export const getBusinessProfile = asyncHandler(async (req, res) => {
         delete businessObj.rating;
     }
 
+    // Check if content is currently visible to others
+    // Content is visible only if subscriptionStatus is 'active' and plan is not 'plan1'
+    const isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
+
     return res.status(200).json(
-        new ApiResponse(200, { business: businessObj }, "Business profile fetched successfully")
+        new ApiResponse(200, {
+            business: businessObj,
+            visibility: {
+                isContentVisible,
+                message: isContentVisible
+                    ? 'Your business content is visible to all users'
+                    : 'Your business content is currently hidden. Activate your payment plan to make it visible.'
+            }
+        }, "Business profile fetched successfully")
     );
 });
 
@@ -508,6 +520,10 @@ export const getBusinessById = asyncHandler(async (req, res) => {
         totalRatings: 0
     };
 
+    // Check if content is currently visible
+    // Content is visible only if subscriptionStatus is 'active' and plan is not 'plan1'
+    const isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
+
     return res.status(200).json(
         new ApiResponse(200, {
             business: {
@@ -515,7 +531,13 @@ export const getBusinessById = asyncHandler(async (req, res) => {
                 rating: ratingInfo.averageRating,
                 totalRatings: ratingInfo.totalRatings
             },
-            owner
+            owner,
+            visibility: {
+                isContentVisible,
+                message: isContentVisible
+                    ? 'Business content is visible'
+                    : 'Business content is currently hidden due to inactive payment plan'
+            }
         }, "Business profile fetched successfully")
     );
 });
