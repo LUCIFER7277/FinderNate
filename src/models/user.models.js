@@ -111,5 +111,99 @@ UserSchema.methods.generateRefreshToken = function () {
     );
 };
 
+// 📞 Check if user has calling features access
+UserSchema.methods.hasCallingAccess = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    // Business profiles always have calling access
+    if (this.isBusinessProfile) {
+        return true;
+    }
+
+    // Check if user has an active paid subscription
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    // Free users don't have calling access
+    if (!subscription || subscription.plan === 'free') {
+        return false;
+    }
+
+    // All paid plans (basic, pro, premium, business) have calling access
+    return true;
+};
+
+// 📋 Get user subscription tier
+UserSchema.methods.getSubscriptionTier = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    return subscription ? subscription.plan : 'free';
+};
+
+// 🏅 Get user subscription badge
+UserSchema.methods.getSubscriptionBadge = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    // Business profiles always get business badge
+    if (this.isBusinessProfile) {
+        return {
+            type: 'business',
+            label: 'Business',
+            color: '#10B981', // green
+            isPaid: true
+        };
+    }
+
+    // Check active subscription
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    if (!subscription || subscription.plan === 'free') {
+        return null; // No badge for free users
+    }
+
+    // Return badge based on plan
+    const badgeMap = {
+        basic: {
+            type: 'basic',
+            label: 'Basic',
+            color: '#3B82F6', // blue
+            isPaid: true
+        },
+        pro: {
+            type: 'pro',
+            label: 'Pro',
+            color: '#8B5CF6', // purple
+            isPaid: true
+        },
+        premium: {
+            type: 'premium',
+            label: 'Premium',
+            color: '#F59E0B', // amber/gold
+            isPaid: true
+        },
+        business: {
+            type: 'business',
+            label: 'Business',
+            color: '#10B981', // green
+            isPaid: true
+        }
+    };
+
+    return badgeMap[subscription.plan] || null;
+};
+
 
 export const User = mongoose.model("User", UserSchema);
