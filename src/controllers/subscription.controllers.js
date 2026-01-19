@@ -10,8 +10,11 @@ import { User } from '../models/user.models.js';
 export const getSubscriptionStatus = asyncHandler(async (req, res) => {
     const userId = req.user._id;
 
-    // Check if user is a business profile
-    const isBusinessProfile = req.user.isBusinessProfile;
+    // Get the full user object to check business profile status
+    const user = await User.findById(userId);
+
+    // Check if user is a business profile (only true if businessProfileId exists)
+    const isBusinessProfile = user.isBusinessProfile && user.businessProfileId ? true : false;
 
     // Get active subscription
     const subscription = await Subscription.findOne({
@@ -21,7 +24,11 @@ export const getSubscriptionStatus = asyncHandler(async (req, res) => {
     });
 
     const subscriptionTier = subscription ? subscription.plan : 'free';
-    const hasCallingAccess = isBusinessProfile || (subscription && subscription.plan !== 'free');
+
+    // Calling access rules:
+    // 1. Business profiles with active subscription (small_business or corporate)
+    // 2. Normal users with paid subscription
+    const hasCallingAccess = (subscription && ['small_business', 'corporate'].includes(subscription.plan));
 
     res.status(200).json(
         new ApiResponse(200, {
@@ -56,10 +63,9 @@ export const getUpgradePrompt = asyncHandler(async (req, res) => {
     });
 
     const currentTier = subscription ? subscription.plan : 'free';
-    const isBusinessProfile = req.user.isBusinessProfile;
 
     // If user already has access, no upgrade needed
-    if (isBusinessProfile || (subscription && subscription.plan !== 'free')) {
+    if (subscription && ['small_business', 'corporate'].includes(subscription.plan)) {
         return res.status(200).json(
             new ApiResponse(200, {
                 requiresUpgrade: false,
@@ -132,7 +138,9 @@ export const checkFeatureAccess = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { feature } = req.params;
 
-    const isBusinessProfile = req.user.isBusinessProfile;
+    // Get the full user object
+    const user = await User.findById(userId);
+    const isBusinessProfile = user.isBusinessProfile && user.businessProfileId ? true : false;
 
     // Get active subscription
     const subscription = await Subscription.findOne({
@@ -151,29 +159,29 @@ export const checkFeatureAccess = asyncHandler(async (req, res) => {
         case 'calling':
         case 'audio_call':
         case 'video_call':
-            hasAccess = isBusinessProfile || (subscription && subscription.plan !== 'free');
+            hasAccess = (subscription && ['small_business', 'corporate'].includes(subscription.plan));
             requiredTier = hasAccess ? null : 'small_business';
             break;
 
         case 'unlimited_posts':
-            hasAccess = isBusinessProfile || (subscription && ['small_business', 'corporate'].includes(subscription.plan));
+            hasAccess = (subscription && ['small_business', 'corporate'].includes(subscription.plan));
             requiredTier = hasAccess ? null : 'small_business';
             break;
 
         case 'advanced_analytics':
-            hasAccess = isBusinessProfile || (subscription && ['small_business', 'corporate'].includes(subscription.plan));
+            hasAccess = (subscription && ['small_business', 'corporate'].includes(subscription.plan));
             requiredTier = hasAccess ? null : 'small_business';
             break;
 
         case 'product_catalog':
-            hasAccess = isBusinessProfile || (subscription && ['small_business', 'corporate'].includes(subscription.plan));
+            hasAccess = (subscription && ['small_business', 'corporate'].includes(subscription.plan));
             requiredTier = hasAccess ? null : 'small_business';
             break;
 
         case 'api_access':
         case 'white_label':
         case 'dedicated_manager':
-            hasAccess = isBusinessProfile || (subscription && subscription.plan === 'corporate');
+            hasAccess = (subscription && subscription.plan === 'corporate');
             requiredTier = hasAccess ? null : 'corporate';
             break;
 
