@@ -6,7 +6,7 @@ import Subscription from "../models/subscription.models.js";
 /**
  * Middleware to verify user has calling features access
  * Free users are blocked from audio and video calls
- * Paid users (basic, pro, premium, business) and business profiles have access
+ * Paid users (small_business, corporate) and business profiles have access
  */
 export const verifyCallingAccess = asyncHandler(async (req, res, next) => {
     try {
@@ -14,7 +14,7 @@ export const verifyCallingAccess = asyncHandler(async (req, res, next) => {
 
         // Check if user is a business profile (they have calling access)
         if (req.user.isBusinessProfile) {
-            req.user.subscriptionTier = 'business';
+            req.user.subscriptionTier = 'corporate';
             return next();
         }
 
@@ -34,7 +34,7 @@ export const verifyCallingAccess = asyncHandler(async (req, res, next) => {
                 errorCode: 'CALLING_FEATURE_RESTRICTED',
                 subscriptionTier: 'free',
                 requiresUpgrade: true,
-                availablePlans: ['basic', 'pro', 'premium', 'business']
+                availablePlans: ['small_business', 'corporate']
             });
         }
 
@@ -60,7 +60,7 @@ export const attachSubscriptionInfo = asyncHandler(async (req, res, next) => {
 
         // Check if user is a business profile
         if (req.user.isBusinessProfile) {
-            req.user.subscriptionTier = 'business';
+            req.user.subscriptionTier = 'corporate';
             req.user.hasCallingAccess = true;
             return next();
         }
