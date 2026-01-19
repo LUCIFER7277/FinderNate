@@ -221,9 +221,17 @@ const getUserProfile = asyncHandler(async (req, res) => {
 
     // Get business profile information if user is a business profile
     let businessInfo = null;
+    let isContentVisible = true; // Non-business accounts always have visible content
     if (user.isBusinessProfile) {
-        businessInfo = await Business.findOne({ userId }).select('postSettings isVerified');
+        businessInfo = await Business.findOne({ userId }).select('postSettings isVerified subscriptionStatus plan');
+        // Check if business content is visible (active payment plan)
+        if (businessInfo) {
+            isContentVisible = businessInfo.subscriptionStatus === 'active' && businessInfo.plan !== 'plan1';
+        }
     }
+
+    // Get subscription badge
+    const subscriptionBadge = await user.getSubscriptionBadge();
 
     const userProfile = {
         _id: user._id,
@@ -247,6 +255,12 @@ const getUserProfile = asyncHandler(async (req, res) => {
         productEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowProductPosts ?? true) : null,
         serviceEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowServicePosts ?? true) : null,
         isVerified: user.isBusinessProfile ? (businessInfo?.isVerified ?? false) : null,
+        isContentVisible: user.isBusinessProfile ? isContentVisible : true,
+        contentVisibilityMessage: user.isBusinessProfile && !isContentVisible
+            ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
+            : null,
+        // Add subscription badge
+        subscriptionBadge: subscriptionBadge,
         createdAt: user.createdAt,
         bio: user.bio,
         link: user.link,
@@ -919,6 +933,9 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         }
     }
 
+    // Get subscription badge
+    const subscriptionBadge = await targetUser.getSubscriptionBadge();
+
     // Prepare user data with counts (respecting privacy settings)
     const userWithCounts = {
         _id: targetUser._id,
@@ -935,6 +952,7 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         isPhoneVerified: targetUser.isPhoneVerified,
         isPhoneNumberHidden: targetUser.isPhoneNumberHidden,
         isAddressHidden: targetUser.isAddressHidden,
+        subscriptionBadge: subscriptionBadge,
         bio: targetUser.bio || "",
         link: targetUser.link || "",
         location: targetUser.location || "",
