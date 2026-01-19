@@ -11,23 +11,24 @@ import {
     forceEndActiveCalls
 } from '../controllers/call.controllers.js';
 import { verifyJWT } from '../middlewares/auth.middleware.js';
+import { verifyCallingAccess, attachSubscriptionInfo } from '../middlewares/subscription.middleware.js';
 
 const router = Router();
 
 // Apply authentication middleware to all routes
 router.use(verifyJWT);
 
-// Call management routes
-router.post('/initiate', initiateCall); // POST /api/v1/calls/initiate
-router.patch('/:callId/accept', acceptCall); // PATCH /api/v1/calls/:callId/accept
-router.patch('/:callId/decline', declineCall); // PATCH /api/v1/calls/:callId/decline
-router.patch('/:callId/end', endCall);     // PATCH /api/v1/calls/:callId/end
-router.patch('/:callId/status', updateCallStatus); // PATCH /api/v1/calls/:callId/status
+// Call management routes - require calling access (paid users only)
+router.post('/initiate', verifyCallingAccess, initiateCall); // POST /api/v1/calls/initiate
+router.patch('/:callId/accept', verifyCallingAccess, acceptCall); // PATCH /api/v1/calls/:callId/accept
+router.patch('/:callId/decline', declineCall); // PATCH /api/v1/calls/:callId/decline (no restriction)
+router.patch('/:callId/end', endCall);     // PATCH /api/v1/calls/:callId/end (no restriction)
+router.patch('/:callId/status', updateCallStatus); // PATCH /api/v1/calls/:callId/status (no restriction)
 router.post('/force-end-active', forceEndActiveCalls); // POST /api/v1/calls/force-end-active (cleanup stuck calls)
 
-// Call data routes
-router.get('/history', getCallHistory);                    // GET /api/v1/calls/history
-router.get('/active', getActiveCall);                      // GET /api/v1/calls/active
-router.get('/stats', getCallStats);                        // GET /api/v1/calls/stats
+// Call data routes - attach subscription info but don't restrict
+router.get('/history', attachSubscriptionInfo, getCallHistory);                    // GET /api/v1/calls/history
+router.get('/active', attachSubscriptionInfo, getActiveCall);                      // GET /api/v1/calls/active
+router.get('/stats', attachSubscriptionInfo, getCallStats);                        // GET /api/v1/calls/stats
 
 export default router;
