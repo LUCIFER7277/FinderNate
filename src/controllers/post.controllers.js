@@ -16,6 +16,8 @@ import { CacheManager } from "../utlis/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
+import { addBadgeToUser, addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
+import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -629,7 +631,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     const currentUser = req.user;
 
     const post = await Post.findById(postId)
-        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate');
+        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate isBusinessProfile');
 
     if (!post) throw new ApiError(404, "Post not found");
 
@@ -650,7 +652,18 @@ export const getPostById = asyncHandler(async (req, res) => {
         throw new ApiError(403, "You don't have permission to view this post");
     }
 
-    return res.status(200).json(new ApiResponse(200, post, "Post fetched successfully"));
+    // Filter out posts from business accounts with inactive payment plans
+    // Business posts without active payment are hidden from ALL users (including followers)
+    const [filteredPost] = await filterBusinessPostsByPaymentPlan([post.toObject()]);
+
+    if (!filteredPost) {
+        throw new ApiError(403, "This content is currently unavailable");
+    }
+
+    // Add badge to user
+    const postWithBadge = await addBadgesToNestedUsers([filteredPost]);
+
+    return res.status(200).json(new ApiResponse(200, postWithBadge[0], "Post fetched successfully"));
 });
 
 // Edit post
@@ -1441,8 +1454,8 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
     try {
         const posts = await Post.find(filter)
-            .populate('userId', 'username profileImageUrl fullName isVerified location bio privacy isFullPrivate')
-            .populate('mentions', 'username fullName profileImageUrl')
+            .populate('userId', 'username profileImageUrl fullName isVerified location bio privacy isFullPrivate isBusinessProfile')
+            .populate('mentions', 'username fullName profileImageUrl isBusinessProfile')
             .sort(sortObj)
             .skip(skip)
             .limit(pageLimit)
@@ -1462,7 +1475,11 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         }
 
         // Filter posts based on privacy settings
-        const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+        let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+
+        // Filter out posts from business accounts with inactive payment plans
+        // Business posts without active payment are hidden from ALL users (including followers)
+        visiblePosts = await filterBusinessPostsByPaymentPlan(visiblePosts);
 
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / pageLimit);
@@ -1501,9 +1518,12 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
         });
 
+        // Add badges to all posts (userId and mentions)
+        const postsWithBadges = await addBadgesToNestedUsers(visiblePosts);
+
         return res.status(200).json(
             new ApiResponse(200, {
-                posts: visiblePosts,
+                posts: postsWithBadges,
                 pagination: {
                     currentPage,
                     totalPages,

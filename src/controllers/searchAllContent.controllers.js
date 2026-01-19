@@ -7,6 +7,7 @@ import { ApiResponse } from '../utlis/ApiResponse.js';
 import { ApiError } from '../utlis/ApiError.js';
 import { getCoordinates } from '../utlis/getCoordinates.js';
 import { filterBusinessPostsByPaymentPlan } from '../utlis/businessPlan.utils.js';
+import { addBadgesToNestedUsers, addBadgesToUsers } from '../utlis/userBadge.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {
@@ -438,7 +439,7 @@ export const searchAllContent = async (req, res) => {
             _id: { $nin: blockedUsers }
         })
             .limit(limit)
-            .select('username fullName profileImageUrl bio location');
+            .select('username fullName profileImageUrl bio location isBusinessProfile');
 
         // Also find users through business category and subcategory search
         const businessUsersByCategory = await Business.find({
@@ -451,7 +452,7 @@ export const searchAllContent = async (req, res) => {
             ],
             userId: { $nin: blockedUsers }
         })
-            .populate('userId', 'username fullName profileImageUrl bio location')
+            .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
             .limit(limit)
             .lean();
 
@@ -505,10 +506,16 @@ export const searchAllContent = async (req, res) => {
             };
         }));
 
+        // Add badges to posts/reels in search results
+        const contentWithBadges = await addBadgesToNestedUsers(paginatedContent);
+
+        // Add badges to user search results
+        const usersWithBadges = await addBadgesToUsers(usersWithPosts);
+
         return res.status(200).json(
             new ApiResponse(200, {
-                results: paginatedContent,
-                users: usersWithPosts,
+                results: contentWithBadges,
+                users: usersWithBadges,
                 pagination: {
                     page: parseInt(page),
                     limit: parseInt(limit),
