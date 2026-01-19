@@ -12,11 +12,9 @@ export const verifyCallingAccess = asyncHandler(async (req, res, next) => {
     try {
         const userId = req.user._id;
 
-        // Check if user is a business profile (they have calling access)
-        if (req.user.isBusinessProfile) {
-            req.user.subscriptionTier = 'corporate';
-            return next();
-        }
+        // Get the full user object to check business profile status
+        const user = await User.findById(userId);
+        const isBusinessProfile = user.isBusinessProfile && user.businessProfileId ? true : false;
 
         // Check user subscription
         const subscription = await Subscription.findOne({
@@ -27,18 +25,19 @@ export const verifyCallingAccess = asyncHandler(async (req, res, next) => {
 
         const subscriptionTier = subscription ? subscription.plan : 'free';
         req.user.subscriptionTier = subscriptionTier;
+        req.user.isBusinessProfile = isBusinessProfile;
 
-        // Free users don't have calling access
-        if (subscriptionTier === 'free') {
+        // Only paid plans (small_business or corporate) have calling access
+        if (!subscription || !['small_business', 'corporate'].includes(subscription.plan)) {
             throw new ApiError(403, "Calling features are not available for free users. Please upgrade your subscription to access audio and video calls.", {
                 errorCode: 'CALLING_FEATURE_RESTRICTED',
-                subscriptionTier: 'free',
+                subscriptionTier: subscriptionTier,
                 requiresUpgrade: true,
                 availablePlans: ['small_business', 'corporate']
             });
         }
 
-        // All other paid plans have calling access
+        // All paid plans have calling access
         next();
     } catch (error) {
         // If error is already an ApiError, throw it
@@ -58,12 +57,9 @@ export const attachSubscriptionInfo = asyncHandler(async (req, res, next) => {
     try {
         const userId = req.user._id;
 
-        // Check if user is a business profile
-        if (req.user.isBusinessProfile) {
-            req.user.subscriptionTier = 'corporate';
-            req.user.hasCallingAccess = true;
-            return next();
-        }
+        // Get the full user object
+        const user = await User.findById(userId);
+        const isBusinessProfile = user.isBusinessProfile && user.businessProfileId ? true : false;
 
         // Check user subscription
         const subscription = await Subscription.findOne({
@@ -74,13 +70,15 @@ export const attachSubscriptionInfo = asyncHandler(async (req, res, next) => {
 
         const subscriptionTier = subscription ? subscription.plan : 'free';
         req.user.subscriptionTier = subscriptionTier;
-        req.user.hasCallingAccess = subscriptionTier !== 'free';
+        req.user.isBusinessProfile = isBusinessProfile;
+        req.user.hasCallingAccess = subscription && ['small_business', 'corporate'].includes(subscription.plan);
 
         next();
     } catch (error) {
         console.error('Error attaching subscription info:', error);
         // Continue even if there's an error - just set defaults
         req.user.subscriptionTier = 'free';
+        req.user.isBusinessProfile = false;
         req.user.hasCallingAccess = false;
         next();
     }
@@ -101,7 +99,7 @@ export const getUserSubscription = async (userId) => {
             tier: subscription ? subscription.plan : 'free',
             hasActiveSubscription: !!subscription,
             subscription: subscription,
-            hasCallingAccess: subscription && subscription.plan !== 'free'
+            hasCallingAccess: subscription && ['small_business', 'corporate'].includes(subscription.plan)
         };
     } catch (error) {
         console.error('Error getting user subscription:', error);
