@@ -700,15 +700,26 @@ class SocketManager {
         });
     }
 
-    emitUserOffline(userId) {
+    async emitUserOffline(userId) {
         if (!this.io) {
             console.warn('Socket.IO not initialized, skipping emitUserOffline');
             return;
         }
+        // Get user's last seen timestamp
+        let lastSeenAt = new Date();
+        try {
+            const user = await User.findById(userId).select('lastSeenAt').lean();
+            if (user?.lastSeenAt) {
+                lastSeenAt = user.lastSeenAt;
+            }
+        } catch (err) {
+            console.error('Error fetching lastSeenAt for offline emit:', err);
+        }
         // Emit to all users who might be interested in this user's status
         this.io.emit('user_offline', {
             userId,
-            timestamp: new Date()
+            timestamp: new Date(),
+            lastSeenAt
         });
     }
 

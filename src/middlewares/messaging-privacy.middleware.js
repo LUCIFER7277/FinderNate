@@ -96,11 +96,28 @@ export const checkLastSeenPrivacy = async (viewerId, targetUserId, targetUser = 
 };
 
 /**
+ * Check if current user can see others' online status (reciprocity check)
+ * If user hides their own status, they cannot see others'
+ * @param {string} userId - ID of user to check
+ * @returns {Promise<boolean>} - true if user can see others' status
+ */
+export const canUserSeeOthersStatus = async (userId) => {
+    const user = await User.findById(userId).select('messagingPrivacy').lean();
+    if (!user) return true;
+
+    const onlinePrivacy = user.messagingPrivacy?.onlineStatus || 'everyone';
+    const lastSeenPrivacy = user.messagingPrivacy?.lastSeen || 'everyone';
+
+    // If user hides either status completely, they cannot see others'
+    return onlinePrivacy !== 'nobody' && lastSeenPrivacy !== 'nobody';
+};
+
+/**
  * Get the online status and last seen for a user, respecting privacy settings
  * @param {string} viewerId - ID of user trying to view status
  * @param {string} targetUserId - ID of user whose status is being viewed
  * @param {Function} isUserOnline - Function to check if user is online (from socketManager)
- * @returns {Promise<Object>} - Object with online status and lastSeen
+ * @returns {Promise<Object>} - Object with online status, lastSeen, and canSeeStatus
  */
 export const getPrivacyFilteredStatus = async (viewerId, targetUserId, isUserOnline) => {
     const targetUser = await User.findById(targetUserId)
@@ -110,15 +127,18 @@ export const getPrivacyFilteredStatus = async (viewerId, targetUserId, isUserOnl
     if (!targetUser) {
         return {
             online: false,
-            lastSeen: null
+            lastSeen: null,
+            canSeeStatus: false
         };
     }
 
     const canSeeOnline = await checkOnlineStatusPrivacy(viewerId, targetUserId, targetUser);
     const canSeeLastSeen = await checkLastSeenPrivacy(viewerId, targetUserId, targetUser);
+    const canSeeStatus = canSeeOnline || canSeeLastSeen;
 
     return {
         online: canSeeOnline ? await isUserOnline(targetUserId) : false,
-        lastSeen: canSeeLastSeen ? targetUser.lastSeenAt : null
+        lastSeen: canSeeLastSeen ? targetUser.lastSeenAt : null,
+        canSeeStatus
     };
 };

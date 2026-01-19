@@ -1764,8 +1764,19 @@ export const updateMessagingPrivacy = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'User not found');
     }
 
+    // Calculate canSeeOthersStatus for updated settings
+    const updatedOnlineStatus = user.messagingPrivacy?.onlineStatus || 'everyone';
+    const updatedLastSeen = user.messagingPrivacy?.lastSeen || 'everyone';
+    const canSeeOthersStatus = updatedOnlineStatus !== 'nobody' && updatedLastSeen !== 'nobody';
+
     return res.status(200).json(
-        new ApiResponse(200, { privacy: user.messagingPrivacy }, 'Messaging privacy settings updated successfully')
+        new ApiResponse(200, {
+            privacy: {
+                onlineStatus: updatedOnlineStatus,
+                lastSeen: updatedLastSeen,
+                canSeeOthersStatus
+            }
+        }, 'Messaging privacy settings updated successfully')
     );
 });
 
@@ -1780,9 +1791,16 @@ export const getMessagingPrivacy = asyncHandler(async (req, res) => {
     }
 
     // Return default values if not set
+    const onlineStatus = user.messagingPrivacy?.onlineStatus || 'everyone';
+    const lastSeen = user.messagingPrivacy?.lastSeen || 'everyone';
+
+    // If user hides their status, they cannot see others' status (reciprocity)
+    const canSeeOthersStatus = onlineStatus !== 'nobody' && lastSeen !== 'nobody';
+
     const privacy = {
-        onlineStatus: user.messagingPrivacy?.onlineStatus || 'everyone',
-        lastSeen: user.messagingPrivacy?.lastSeen || 'everyone'
+        onlineStatus,
+        lastSeen,
+        canSeeOthersStatus
     };
 
     return res.status(200).json(
