@@ -11,7 +11,7 @@ const SubscriptionSchema = new mongoose.Schema({
     plan: {
         type: String,
         required: true,
-        enum: ['free', 'basic', 'pro', 'premium', 'business'] // define your tiers
+        enum: ['free', 'small_business', 'corporate'] // Only three tiers: free, small_business, and corporate
     },
     startDate: {
         type: Date,

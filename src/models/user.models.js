@@ -153,12 +153,12 @@ UserSchema.methods.getSubscriptionTier = async function () {
 UserSchema.methods.getSubscriptionBadge = async function () {
     const Subscription = mongoose.model('Subscription');
 
-    // Business profiles always get business badge
+    // Business profiles always get corporate badge
     if (this.isBusinessProfile) {
         return {
-            type: 'business',
-            label: 'Business',
-            color: '#10B981', // green
+            type: 'corporate',
+            label: 'Corporate',
+            color: '#F59E0B', // gold
             isPaid: true
         };
     }
@@ -176,28 +176,16 @@ UserSchema.methods.getSubscriptionBadge = async function () {
 
     // Return badge based on plan
     const badgeMap = {
-        basic: {
-            type: 'basic',
-            label: 'Basic',
+        small_business: {
+            type: 'small_business',
+            label: 'Small Business',
             color: '#3B82F6', // blue
             isPaid: true
         },
-        pro: {
-            type: 'pro',
-            label: 'Pro',
-            color: '#8B5CF6', // purple
-            isPaid: true
-        },
-        premium: {
-            type: 'premium',
-            label: 'Premium',
-            color: '#F59E0B', // amber/gold
-            isPaid: true
-        },
-        business: {
-            type: 'business',
-            label: 'Business',
-            color: '#10B981', // green
+        corporate: {
+            type: 'corporate',
+            label: 'Corporate',
+            color: '#F59E0B', // gold
             isPaid: true
         }
     };
