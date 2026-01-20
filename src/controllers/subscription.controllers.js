@@ -262,3 +262,129 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
         new ApiResponse(200, { plans }, 'Available plans fetched successfully')
     );
 });
+
+/**
+ * TEST ONLY: Simulate subscription upgrade without payment
+ * This endpoint is for testing purposes until payment integration is complete
+ * It creates/updates a subscription record with active status
+ */
+export const testUpgradeSubscription = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const { plan } = req.body;
+
+    // Debug logging
+    console.log('=== TEST UPGRADE DEBUG ===');
+    console.log('Request body:', req.body);
+    console.log('Plan received:', plan);
+    console.log('Plan type:', typeof plan);
+    console.log('========================');
+
+    // Valid plan options for testing
+    const validPlans = ['free', 'small_business', 'corporate'];
+
+    if (!plan || !validPlans.includes(plan)) {
+        throw new ApiError(400, `Invalid plan. Must be one of: ${validPlans.join(', ')}`);
+    }
+
+    // Get user
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    // Map subscription plan names to business plan names
+    const planMapping = {
+        'free': 'plan1',
+        'small_business': 'plan2',
+        'corporate': 'plan3'
+    };
+
+    // Find existing subscription or create new one
+    let subscription = await Subscription.findOne({ userId });
+
+    const now = new Date();
+    const endDate = new Date();
+    endDate.setMonth(endDate.getMonth() + 1); // 1 month from now
+
+    // Handle free plan differently - delete subscription record for free users
+    if (plan === 'free') {
+        if (subscription) {
+            // Delete existing subscription when downgrading to free
+            await Subscription.deleteOne({ userId });
+            subscription = null;
+        }
+        // Free users don't have a subscription record
+    } else {
+        // Handle paid plans (small_business, corporate)
+        if (subscription) {
+            // Update existing subscription
+            subscription.plan = plan;
+            subscription.status = 'active';
+            subscription.startDate = now;
+            subscription.endDate = endDate;
+            await subscription.save();
+        } else {
+            // Create new subscription
+            subscription = await Subscription.create({
+                userId: userId,
+                plan: plan,
+                status: 'active',
+                startDate: now,
+                endDate: endDate
+            });
+        }
+    }
+
+    // IMPORTANT: Also update Business model if user has a business profile
+    // The home feed checks Business model for post visibility
+    const Business = (await import('../models/business.models.js')).default;
+    const business = await Business.findOne({ userId });
+
+    if (business) {
+        business.plan = planMapping[plan];
+        business.subscriptionStatus = plan === 'free' ? 'inactive' : 'active';
+        await business.save();
+        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
+    }
+
+    // ✅ CRITICAL: Invalidate all feed caches when subscription changes
+    // This ensures business posts appear/disappear immediately based on payment status
+    try {
+        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+
+        // Invalidate all feed types since business post visibility affects them all
+        await Promise.allSettled([
+            FeedCacheManager.invalidateUserFeed(userId),
+            FeedCacheManager.invalidateExploreFeed(),
+            FeedCacheManager.invalidateTrendingFeed()
+        ]);
+
+        // Also invalidate Redis cache patterns for home feeds
+        const { redisClient } = await import('../config/redis.config.js');
+        const feedKeys = await redisClient.keys('fn:user:*:feed:*');
+        if (feedKeys.length > 0) {
+            await redisClient.del(...feedKeys);
+        }
+
+        console.log(`✅ Cache invalidated for user ${userId} after subscription change`);
+    } catch (cacheError) {
+        console.error('Cache invalidation error:', cacheError);
+        // Don't throw - cache invalidation failure shouldn't block subscription update
+    }
+
+    // Get updated subscription status
+    const hasCallingAccess = plan !== 'free';
+
+    res.status(200).json(
+        new ApiResponse(200, {
+            subscription: subscription, // Will be null for free plan
+            business: business ? { plan: business.plan, subscriptionStatus: business.subscriptionStatus } : null,
+            tier: plan,
+            hasCallingAccess: hasCallingAccess,
+            message: plan === 'free'
+                ? 'Successfully downgraded to free plan. Subscription record removed.'
+                : `Successfully upgraded to ${plan} plan (TEST MODE - No payment required)`,
+            note: 'This is a test endpoint. In production, payment will be required.'
+        }, 'Subscription updated successfully (TEST MODE)')
+    );
+});
