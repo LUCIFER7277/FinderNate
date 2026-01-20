@@ -36,9 +36,17 @@ const DisputeSchema = new mongoose.Schema({
     resolvedAt: Date
 }, { _id: false });
 
+// Guest buyer details schema (for shareable payment links)
+const GuestBuyerDetailsSchema = new mongoose.Schema({
+    fullName: String,
+    email: String,
+    phoneNumber: String
+}, { _id: false });
+
 const OrderSchema = new mongoose.Schema({
     orderNumber: { type: String, required: true, unique: true },
-    buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Optional for guest checkout
+    buyerDetails: GuestBuyerDetailsSchema, // For guest buyers via shareable links
     sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     postId: { type: mongoose.Schema.Types.ObjectId, ref: 'Post' },
     chatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Chat' },
@@ -82,7 +90,8 @@ const OrderSchema = new mongoose.Schema({
     buyerRating: { type: Number, min: 1, max: 5 },
     buyerReview: String,
     sellerRating: { type: Number, min: 1, max: 5 },
-    sellerReview: String
+    sellerReview: String,
+    isShareableOrder: { type: Boolean, default: false } // Created via shareable payment link
 }, { timestamps: true });
 
 OrderSchema.pre('save', function(next) {

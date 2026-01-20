@@ -164,7 +164,8 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     await order.save();
 
     const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.releaseFunds(order, order.amount, order.platformFee, `Payment released for order ${order.orderNumber}`);
+    // No platform fee - release full amount to seller
+    await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released for order ${order.orderNumber}`);
 
     return res.status(200).json(
         new ApiResponse(200, { order }, "Delivery confirmed and payment released to seller")

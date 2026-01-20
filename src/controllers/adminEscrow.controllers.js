@@ -125,6 +125,10 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Order is not in disputed status");
     }
 
+    if (order.paymentStatus !== 'held') {
+        throw new ApiError(400, "Payment is not in held status - cannot resolve");
+    }
+
     const escrowWallet = await EscrowWallet.getWallet();
 
     if (action === 'refund_buyer') {
@@ -133,7 +137,8 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         order.paymentStatus = 'refunded';
         order.orderStatus = 'refunded';
     } else if (action === 'release_seller') {
-        await escrowWallet.releaseFunds(order, order.amount, order.platformFee, `Payment released after dispute resolution - Order ${order.orderNumber}`);
+        // No platform fee - release full amount to seller
+        await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released after dispute resolution - Order ${order.orderNumber}`);
         order.paymentStatus = 'released';
         order.orderStatus = 'confirmed';
     } else if (action === 'partial_refund') {
@@ -145,11 +150,18 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         }
         order.paymentStatus = 'refunded';
         order.orderStatus = 'refunded';
+    } else {
+        throw new ApiError(400, "Invalid action. Use: refund_buyer, release_seller, or partial_refund");
     }
 
-    order.dispute.status = 'resolved';
-    order.dispute.resolution = resolution;
-    order.dispute.resolvedAt = new Date();
+    // Update dispute object if it exists
+    if (order.dispute) {
+        order.dispute.status = 'resolved';
+        order.dispute.resolution = resolution;
+        order.dispute.resolvedAt = new Date();
+    }
+
+    order.paymentReleasedAt = new Date();
     await order.save();
 
     return res.status(200).json(
@@ -172,7 +184,8 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
     }
 
     const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.releaseFunds(order, order.amount, order.platformFee, `Manual release by admin: ${reason || 'Admin action'}`);
+    // No platform fee - release full amount to seller
+    await escrowWallet.releaseFunds(order, order.amount, 0, `Manual release by admin: ${reason || 'Admin action'}`);
 
     order.paymentStatus = 'released';
     order.orderStatus = 'confirmed';

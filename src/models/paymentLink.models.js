@@ -24,11 +24,13 @@ const PaymentLinkSchema = new mongoose.Schema({
     paidAt: Date,
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
     paymentUrl: String,
-    shortUrl: String
+    shortUrl: String,
+    isShareableLink: { type: Boolean, default: false }
 }, { timestamps: true });
 
 PaymentLinkSchema.index({ sellerId: 1 });
 PaymentLinkSchema.index({ buyerId: 1 });
 PaymentLinkSchema.index({ status: 1 });
+PaymentLinkSchema.index({ postId: 1, amount: 1, isShareableLink: 1 });
 
 export default mongoose.model('PaymentLink', PaymentLinkSchema);
