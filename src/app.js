@@ -214,6 +214,8 @@ import feedbackRouter from "./routes/feedback.routes.js";
 import qrRouter from "./routes/qr.routes.js";
 import streamRouter from "./routes/stream.routes.js";
 import shareRouter from "./routes/share.routes.js";
+import paymentRouter from "./routes/payment.routes.js";
+import orderRouter from "./routes/order.routes.js";
 
 
 
@@ -236,6 +238,8 @@ app.use("/api/v1/feedback", feedbackRouter);
 app.use("/api/v1/qr", qrRouter);
 app.use("/api/v1/stream", streamRouter);
 app.use("/api/v1/share", shareRouter);
+app.use("/api/v1/payments", paymentRouter);
+app.use("/api/v1/orders", orderRouter);
 
 app.use(errorHandler);
 
