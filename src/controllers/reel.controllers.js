@@ -3,6 +3,7 @@ import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
+import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 import mongoose from "mongoose";
 
 
@@ -295,9 +296,15 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         console.log('🎬 Reels Debug - Match criteria:', JSON.stringify(matchCriteria, null, 2));
 
         // Execute aggregation
-        const reels = await Post.aggregate(pipeline);
+        let reels = await Post.aggregate(pipeline);
 
-        console.log('🎬 Reels Debug - Reels found:', reels.length);
+        console.log('🎬 Reels Debug - Reels found (before business filter):', reels.length);
+
+        // Filter out reels from business accounts with inactive payment plans
+        // Business posts without active payment are hidden from ALL users (including followers)
+        reels = await filterBusinessPostsByPaymentPlan(reels);
+
+        console.log('🎬 Reels Debug - Reels found (after business filter):', reels.length);
 
         if (reels.length === 0) {
             // Debug: Check if there are ANY reels in the database

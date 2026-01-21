@@ -398,14 +398,14 @@ Handles real-time signaling via Socket.IO with Redis adapter for multi-instance 
      │                                │ 6. Socket: call_accepted       │
      │                                ├───────────────────────────────>│
      │                                │                                │
-     │ 7. 200 OK                     │                                │
+     │ 7. 200 OK                      │                                │
      │ {call}                         │                                │
      │<───────────────────────────────┤                                │
      │                                │                                │
      │ 8. Initialize Stream.io SDK    │                                │
      │     with receiverToken         │                                │
      │                                │                                │
-     │ 9. Connect to Stream.io       │                                │
+     │ 9. Connect to Stream.io        │                                │
      │    (Media streaming starts)    │                                │
      │<───────────────────────────────┼───────────────────────────────>│
      │                                │                                │
@@ -460,7 +460,7 @@ Handles real-time signaling via Socket.IO with Redis adapter for multi-instance 
      │                                │ 5. Socket: call_declined       │
      │                                ├───────────────────────────────>│
      │                                │                                │
-     │ 6. 200 OK                     │                                │
+     │ 6. 200 OK                      │                                │
      │ {call}                         │                                │
      │<───────────────────────────────┤                                │
 ```
@@ -482,10 +482,10 @@ Handles real-time signaling via Socket.IO with Redis adapter for multi-instance 
      │                                │ 4. Calculate duration          │
      │                                │ 5. Set endedAt, endReason      │
      │                                │                                │
-     │                                │ 6. Socket: call_ended         │
+     │                                │ 6. Socket: call_ended          │
      │                                ├───────────────────────────────>│
      │                                │                                │
-     │ 7. 200 OK                     │                                │
+     │ 7. 200 OK                      │                                │
      │ {call, duration}               │                                │
      │<───────────────────────────────┤                                │
      │                                │                                │
