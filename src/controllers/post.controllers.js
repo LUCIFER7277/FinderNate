@@ -18,6 +18,8 @@ import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { hasActivePaymentPlan, filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import Business from "../models/business.models.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -657,6 +659,18 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Check if user can view this post
     if (!canViewPost(post, post.userId, currentUser, viewerFollowing, viewerFollowers)) {
         throw new ApiError(403, "You don't have permission to view this post");
+    }
+
+    // Check if post author is a business account with inactive payment
+    // Business posts are hidden from ALL users (including followers) if payment is inactive
+    const postAuthorId = post.userId?._id || post.userId;
+    const postAuthor = await User.findById(postAuthorId).select('isBusinessProfile').lean();
+    
+    if (postAuthor?.isBusinessProfile) {
+        const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
+        if (!hasActivePlan) {
+            throw new ApiError(403, "This content is currently unavailable");
+        }
     }
 
     // Fetch likes for this post and populate user details
@@ -1570,14 +1584,18 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
         // Filter posts based on privacy settings
         const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+        
+        // Filter out business posts without active payment plans
+        // Business posts are hidden from ALL users (including followers) if payment is inactive
+        const postsAfterBusinessFilter = await filterBusinessPostsByPaymentPlan(visiblePosts);
 
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / pageLimit);
-        const visiblePostsCount = visiblePosts.length;
+        const visiblePostsCount = postsAfterBusinessFilter.length;
 
         // Enhancement: Add isLikedBy and likedBy fields
         const currentUserId = req.user?._id?.toString();
-        const postIds = visiblePosts.map(post => post._id);
+        const postIds = postsAfterBusinessFilter.map(post => post._id);
         // Fetch all likes for these posts
         const likes = await Like.find({ postId: { $in: postIds } }).lean();
         // Map postId to array of userIds who liked it
@@ -1601,7 +1619,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
                 return acc;
             }, {});
         }
-        visiblePosts.forEach(post => {
+        postsAfterBusinessFilter.forEach(post => {
             const pid = post._id.toString();
             const likedByIds = likesByPost[pid] || [];
             post.likedBy = likedByIds.map(uid => likedUsersMap[uid]).filter(Boolean); // array of user details
@@ -1609,7 +1627,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         });
 
         // Enrich posts with review/rating data
-        const enrichedPosts = await enrichWithRatings(visiblePosts, 'userId');
+        const enrichedPosts = await enrichWithRatings(postsAfterBusinessFilter, 'userId');
         
         // Add subscription badges to post authors
         const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
