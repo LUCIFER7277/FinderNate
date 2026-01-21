@@ -49,6 +49,15 @@ import {
 } from "../controllers/adminEscrow.controllers.js";
 
 import {
+    getPaymentLogs,
+    getSubscriptionLogs,
+    getErrorLogs,
+    getMetrics,
+    testExpiryJob,
+    getDashboard as getMonitoringDashboard
+} from "../controllers/monitoring.controllers.js";
+
+import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";

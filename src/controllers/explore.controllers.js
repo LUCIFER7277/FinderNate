@@ -7,6 +7,7 @@ import { ApiResponse } from "../utlis/ApiResponse.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -216,12 +217,18 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
 
         // Enrich reels with review/rating data
         reels = await enrichWithRatings(reels, 'userId');
+        
+        // Add subscription badges to reel authors
+        reels = await addBadgesToNestedUsers(reels);
     }
 
     // Posts already have populated user details from the query
 
     // Enrich posts with review/rating data
     posts = await enrichWithRatings(posts, 'userId');
+    
+    // Add subscription badges to post authors
+    posts = await addBadgesToNestedUsers(posts);
 
     // Combine and shuffle final feed based on query type
     let feed, totalAvailable, totalPages, hasNextPage;

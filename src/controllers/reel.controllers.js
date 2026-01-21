@@ -4,6 +4,7 @@ import { User } from "../models/user.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
 import mongoose from "mongoose";
 
 
@@ -357,6 +358,9 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             // Enrich reels with review/rating data
             reels = await enrichWithRatings(reels, 'userId');
+            
+            // Add subscription badges to reel authors
+            reels = await addBadgesToNestedUsers(reels);
         }
 
         // Get total count for pagination

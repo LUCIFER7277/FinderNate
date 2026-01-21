@@ -17,6 +17,7 @@ import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -623,8 +624,11 @@ export const getAllPosts = asyncHandler(async (req, res) => {
 
     // Enrich posts with review/rating data
     visiblePosts = await enrichWithRatings(visiblePosts, 'userId');
+    
+    // Add subscription badges to post authors
+    const postsWithBadges = await addBadgesToNestedUsers(visiblePosts);
 
-    return res.status(200).json(new ApiResponse(200, visiblePosts, "Posts fetched successfully"));
+    return res.status(200).json(new ApiResponse(200, postsWithBadges, "Posts fetched successfully"));
 });
 
 // Get post by ID
@@ -672,7 +676,10 @@ export const getPostById = asyncHandler(async (req, res) => {
     post.likedBy = likedByUsers;
     post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
 
-    return res.status(200).json(new ApiResponse(200, post, "Post fetched successfully"));
+    // Add subscription badge to post author
+    const [postWithBadge] = await addBadgesToNestedUsers([post]);
+
+    return res.status(200).json(new ApiResponse(200, postWithBadge, "Post fetched successfully"));
 });
 
 // Edit post
@@ -1474,13 +1481,16 @@ export const getMyPosts = asyncHandler(async (req, res) => {
 
     // Enrich posts with review/rating data
     const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
+    
+    // Add subscription badges to post authors
+    const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
 
     return res.status(200).json(
         new ApiResponse(200, {
             totalPosts: total,
             page,
             totalPages: Math.ceil(total / limit),
-            posts: enrichedPosts
+            posts: postsWithBadges
         }, "User posts fetched successfully")
     );
 });
@@ -1600,10 +1610,13 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
         // Enrich posts with review/rating data
         const enrichedPosts = await enrichWithRatings(visiblePosts, 'userId');
+        
+        // Add subscription badges to post authors
+        const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
 
         return res.status(200).json(
             new ApiResponse(200, {
-                posts: enrichedPosts,
+                posts: postsWithBadges,
                 pagination: {
                     currentPage,
                     totalPages,

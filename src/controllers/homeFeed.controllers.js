@@ -13,6 +13,7 @@ import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
 import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
 import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utlis/reviewUtils.js';
+import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
 
 export const getHomeFeed = asyncHandler(async (req, res) => {
     try {
@@ -330,6 +331,9 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         }));
         // Enrich posts with review/rating data
         const enrichedFeedData = await enrichWithRatings(feedData, 'userId');
+        
+        // Add subscription badges to post authors
+        const feedDataWithBadges = await addBadgesToNestedUsers(enrichedFeedData);
 
         // Get total count for pagination (cached to avoid expensive count queries)
         // Need to count posts excluding unpaid business posts
@@ -358,7 +362,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         }
 
         const response = new ApiResponse(200, {
-            feed: enrichedFeedData,
+            feed: feedDataWithBadges,
             pagination: {
                 page,
                 limit,

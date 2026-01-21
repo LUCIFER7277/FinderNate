@@ -6,6 +6,7 @@ import Like from "../models/like.models.js";
 import Comment from "../models/comment.models.js";
 import Follower from "../models/follower.models.js";
 import mongoose from "mongoose";
+import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
 
 // Constants for scoring
 const LIKE_SCORE = 3;
@@ -169,7 +170,7 @@ const getSuggestedForYou = asyncHandler(async (req, res) => {
             },
             accountStatus: 'active',
             isBusinessProfile: { $ne: true }
-        }).select('username fullName profileImageUrl bio');
+        }).select('username fullName profileImageUrl bio isBusinessProfile');
 
         // Get follower/following counts
         const [followersCounts, followingCounts] = await Promise.all([
@@ -197,16 +198,20 @@ const getSuggestedForYou = asyncHandler(async (req, res) => {
                 fullName: user.fullName,
                 profileImageUrl: user.profileImageUrl,
                 bio: user.bio,
+                isBusinessProfile: user.isBusinessProfile,
                 followersCount: followersMap.get(user._id.toString()) || 0,
                 followingCount: followingMap.get(user._id.toString()) || 0,
                 isFollowing: false // All suggested users are not followed by design
             };
         }).filter(Boolean);
+        
+        // Add subscription badges to suggested users
+        const suggestionsWithBadges = await addBadgesToUsers(suggestionsWithDetails);
 
         // Final response
         return res.status(200).json(
             new ApiResponse(200, {
-                suggestions: suggestionsWithDetails,
+                suggestions: suggestionsWithBadges,
                 pagination: {
                     currentPage: page,
                     totalPages: Math.ceil(suggestionMap.size / limit),
