@@ -251,6 +251,28 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         await existingBusiness.save();
         business = existingBusiness;
     } else {
+        // Check user's subscription to determine initial plan
+        const Subscription = (await import('../models/subscription.models.js')).default;
+        const userSubscription = await Subscription.findOne({
+            userId,
+            status: 'active',
+            endDate: { $gt: new Date() }
+        });
+
+        // Map subscription plans to business plans
+        let businessPlan = 'plan1'; // Default to free
+        let businessSubscriptionStatus = 'pending'; // Default to pending for free users
+
+        if (userSubscription) {
+            if (userSubscription.plan === 'small_business') {
+                businessPlan = 'plan2';
+                businessSubscriptionStatus = 'active';
+            } else if (userSubscription.plan === 'corporate') {
+                businessPlan = 'plan3';
+                businessSubscriptionStatus = 'active';
+            }
+        }
+
         // Create new business profile using pre-generated businessProfileId if exists
         const businessData = {
             userId,
@@ -264,8 +286,8 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
             rating,
             tags: uniqueTags,
             website,
-            plan: 'plan1',
-            subscriptionStatus: 'active',
+            plan: businessPlan,
+            subscriptionStatus: businessSubscriptionStatus,
             isProfileCompleted: true // Mark as completed on creation
         };
 

@@ -5,31 +5,37 @@ import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
 import razorpay from '../config/razorpay.config.js';
 import crypto from 'crypto';
+import {
+    PaymentLogger,
+    SubscriptionLogger,
+    ErrorLogger,
+    MetricsCollector
+} from '../utlis/monitoring.utils.js';
 
-// Subscription pricing configuration (in INR, paise for Razorpay)
+// Subscription pricing configuration (in INR)
 const SUBSCRIPTION_PLANS = {
     free: {
         id: 'free',
         name: 'Free',
-        price: 0,
-        priceInPaise: 0,
+        price: 0, // ₹0
         duration: 'lifetime'
     },
     small_business: {
         id: 'small_business',
         name: 'Small Business',
-        price: 999,
-        priceInPaise: 99900, // ₹999 in paise
+        price: 999, // ₹999 per month
         duration: 'monthly'
     },
     corporate: {
         id: 'corporate',
         name: 'Corporate',
-        price: 2999,
-        priceInPaise: 299900, // ₹2999 in paise
+        price: 2999, // ₹2999 per month
         duration: 'monthly'
     }
 };
+
+// Helper function to convert rupees to paise (Razorpay requires amount in paise: 1 INR = 100 paise)
+const convertToPaise = (rupees) => rupees * 100;
 
 /**
  * Get current user's subscription status
@@ -323,31 +329,54 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
-    // Create Razorpay order
-    const razorpayOrder = await razorpay.orders.create({
-        amount: planDetails.priceInPaise,
-        currency: 'INR',
-        receipt: `sub_${userId}_${Date.now()}`,
-        notes: {
-            userId: userId.toString(),
-            plan: plan,
-            planName: planDetails.name,
-            type: 'subscription_upgrade',
-            existingPlan: existingSubscription?.plan || 'free'
-        }
-    });
+    // Verify Razorpay configuration
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+        console.error('❌ Razorpay credentials missing!');
+        throw new ApiError(500, 'Payment gateway not configured. Please contact support.');
+    }
 
-    res.status(200).json(
-        new ApiResponse(200, {
-            razorpayOrderId: razorpayOrder.id,
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-            amount: razorpayOrder.amount,
-            currency: razorpayOrder.currency,
-            plan: plan,
-            planName: planDetails.name,
-            planPrice: planDetails.price
-        }, 'Razorpay order created for subscription')
-    );
+    try {
+        // Create Razorpay order
+        // Generate a short receipt ID (max 40 chars for Razorpay)
+        const shortReceipt = `sub_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`.substring(0, 40);
+
+        const razorpayOrder = await razorpay.orders.create({
+            amount: convertToPaise(planDetails.price), // Convert ₹999 to 99900 paise
+            currency: 'INR',
+            receipt: shortReceipt,
+            notes: {
+                userId: userId.toString(),
+                plan: plan,
+                planName: planDetails.name,
+                type: 'subscription_upgrade',
+                existingPlan: existingSubscription?.plan || 'free'
+            }
+        });
+
+        // Log payment initiation
+        PaymentLogger.logPaymentInitiated(userId.toString(), razorpayOrder.id, plan, planDetails.price);
+        MetricsCollector.recordPaymentAttempt();
+
+        res.status(200).json(
+            new ApiResponse(200, {
+                razorpayOrderId: razorpayOrder.id,
+                razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+                amount: razorpayOrder.amount,
+                currency: razorpayOrder.currency,
+                plan: plan,
+                planName: planDetails.name,
+                planPrice: planDetails.price
+            }, 'Razorpay order created for subscription')
+        );
+    } catch (razorpayError) {
+        console.error('❌ Razorpay order creation failed:', razorpayError);
+        console.error('Error details:', razorpayError.error || razorpayError.message);
+
+        // Log error
+        ErrorLogger.logRazorpayError(userId.toString(), null, razorpayError);
+
+        throw new ApiError(500, `Payment gateway error: ${razorpayError.error?.description || razorpayError.message}`);
+    }
 });
 
 /**
@@ -370,7 +399,13 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         .update(body.toString())
         .digest("hex");
 
-    if (expectedSignature !== razorpay_signature) {
+    const isValid = expectedSignature === razorpay_signature;
+
+    // Log verification attempt
+    PaymentLogger.logPaymentVerification(userId.toString(), razorpay_payment_id, razorpay_order_id, isValid);
+
+    if (!isValid) {
+        MetricsCollector.recordPaymentFailure();
         throw new ApiError(400, "Invalid payment signature");
     }
 
@@ -454,6 +489,11 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
 
     // Get subscription status with features
     const hasCallingAccess = ['small_business', 'corporate'].includes(plan);
+
+    // Log successful payment and subscription creation
+    PaymentLogger.logPaymentSuccess(userId.toString(), razorpay_payment_id, razorpay_order_id, plan, SUBSCRIPTION_PLANS[plan].price);
+    SubscriptionLogger.logSubscriptionCreated(userId.toString(), plan, subscription.startDate, subscription.endDate);
+    MetricsCollector.recordPaymentSuccess(SUBSCRIPTION_PLANS[plan].price, plan);
 
     res.status(200).json(
         new ApiResponse(200, {
@@ -553,7 +593,7 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
 
     if (business) {
         business.plan = planMapping[plan];
-        business.subscriptionStatus = plan === 'free' ? 'inactive' : 'active';
+        business.subscriptionStatus = plan === 'free' ? 'pending' : 'active';
         await business.save();
         console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
     }
