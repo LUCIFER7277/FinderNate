@@ -1744,6 +1744,89 @@ const testFCMNotification = asyncHandler(async (req, res) => {
     }
 });
 
+// Update messaging privacy settings (online status, last seen)
+export const updateMessagingPrivacy = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const { onlineStatus, lastSeen } = req.body;
+
+    // Validate enum values
+    const validSettings = ['everyone', 'followers', 'nobody'];
+
+    if (onlineStatus && !validSettings.includes(onlineStatus)) {
+        throw new ApiError(400, 'Invalid onlineStatus setting. Must be: everyone, followers, or nobody');
+    }
+
+    if (lastSeen && !validSettings.includes(lastSeen)) {
+        throw new ApiError(400, 'Invalid lastSeen setting. Must be: everyone, followers, or nobody');
+    }
+
+    // Build update object
+    const updateFields = {};
+    if (onlineStatus) {
+        updateFields['messagingPrivacy.onlineStatus'] = onlineStatus;
+    }
+    if (lastSeen) {
+        updateFields['messagingPrivacy.lastSeen'] = lastSeen;
+    }
+
+    if (Object.keys(updateFields).length === 0) {
+        throw new ApiError(400, 'At least one privacy setting must be provided');
+    }
+
+    const user = await User.findByIdAndUpdate(
+        userId,
+        { $set: updateFields },
+        { new: true, runValidators: true }
+    ).select('messagingPrivacy');
+
+    if (!user) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    // Calculate canSeeOthersStatus for updated settings
+    const updatedOnlineStatus = user.messagingPrivacy?.onlineStatus || 'everyone';
+    const updatedLastSeen = user.messagingPrivacy?.lastSeen || 'everyone';
+    const canSeeOthersStatus = updatedOnlineStatus !== 'nobody' && updatedLastSeen !== 'nobody';
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            privacy: {
+                onlineStatus: updatedOnlineStatus,
+                lastSeen: updatedLastSeen,
+                canSeeOthersStatus
+            }
+        }, 'Messaging privacy settings updated successfully')
+    );
+});
+
+// Get messaging privacy settings
+export const getMessagingPrivacy = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId).select('messagingPrivacy');
+
+    if (!user) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    // Return default values if not set
+    const onlineStatus = user.messagingPrivacy?.onlineStatus || 'everyone';
+    const lastSeen = user.messagingPrivacy?.lastSeen || 'everyone';
+
+    // If user hides their status, they cannot see others' status (reciprocity)
+    const canSeeOthersStatus = onlineStatus !== 'nobody' && lastSeen !== 'nobody';
+
+    const privacy = {
+        onlineStatus,
+        lastSeen,
+        canSeeOthersStatus
+    };
+
+    return res.status(200).json(
+        new ApiResponse(200, { privacy }, 'Messaging privacy settings retrieved successfully')
+    );
+});
+
 export {
     registerUser,
     loginUser,

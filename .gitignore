@@ -5,3 +5,4 @@ logs/
 *.log
 test_user.txt
 test-user2.txt
+.vscode

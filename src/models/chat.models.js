@@ -74,6 +74,18 @@ const ChatSchema = new mongoose.Schema({
         ref: 'User'
     }],
 
+    // 🎨 Chat theme color for message bubbles
+    themeColor: {
+        type: String,
+        default: '#DBB42C',
+        validate: {
+            validator: function(v) {
+                return /^#[0-9A-F]{6}$/i.test(v);
+            },
+            message: props => `${props.value} is not a valid hex color code!`
+        }
+    },
+
     // 📊 Chat statistics
     stats: {
         totalMessages: {

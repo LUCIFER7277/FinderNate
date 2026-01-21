@@ -16,9 +16,7 @@ import { CacheManager } from "../utlis/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
-import { addBadgeToUser, addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
-
+import { enrichWithRatings } from "../utlis/reviewUtils.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -621,7 +619,10 @@ export const getAllPosts = asyncHandler(async (req, res) => {
     }
 
     // Filter posts based on privacy settings
-    const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+    let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+
+    // Enrich posts with review/rating data
+    visiblePosts = await enrichWithRatings(visiblePosts, 'userId');
 
     return res.status(200).json(new ApiResponse(200, visiblePosts, "Posts fetched successfully"));
 });
@@ -632,7 +633,8 @@ export const getPostById = asyncHandler(async (req, res) => {
     const currentUser = req.user;
 
     const post = await Post.findById(postId)
-        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate isBusinessProfile');
+        .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate')
+        .lean();
 
     if (!post) throw new ApiError(404, "Post not found");
 
@@ -653,18 +655,24 @@ export const getPostById = asyncHandler(async (req, res) => {
         throw new ApiError(403, "You don't have permission to view this post");
     }
 
-    // Filter out posts from business accounts with inactive payment plans
-    // Business posts without active payment are hidden from ALL users (including followers)
-    const [filteredPost] = await filterBusinessPostsByPaymentPlan([post.toObject()]);
+    // Fetch likes for this post and populate user details
+    const likes = await Like.find({ postId: postId }).lean();
+    const likedByUserIds = likes.map(like => like.userId.toString());
 
-    if (!filteredPost) {
-        throw new ApiError(403, "This content is currently unavailable");
+    // Fetch user details for all users who liked the post
+    let likedByUsers = [];
+    if (likedByUserIds.length > 0) {
+        likedByUsers = await Post.db.model('User').find(
+            { _id: { $in: likedByUserIds } },
+            'username fullName profileImageUrl isVerified'
+        ).lean();
     }
 
-    // Add badge to user
-    const postWithBadge = await addBadgesToNestedUsers([filteredPost]);
+    // Add likedBy array and isLikedBy flag to the post
+    post.likedBy = likedByUsers;
+    post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
 
-    return res.status(200).json(new ApiResponse(200, postWithBadge[0], "Post fetched successfully"));
+    return res.status(200).json(new ApiResponse(200, post, "Post fetched successfully"));
 });
 
 // Edit post
@@ -794,6 +802,72 @@ export const editPost = asyncHandler(async (req, res) => {
     }
 
     return res.status(200).json(new ApiResponse(200, updatedPost, "Post updated successfully"));
+});
+
+// Toggle post privacy
+export const togglePostPrivacy = asyncHandler(async (req, res) => {
+    const { postId } = req.params;
+    const userId = req.user?._id;
+    const { privacy } = req.body;
+
+    if (!userId) throw new ApiError(401, "User authentication required");
+
+    // Validate privacy value
+    if (!privacy || !['public', 'private'].includes(privacy)) {
+        throw new ApiError(400, "Invalid privacy value. Must be 'public' or 'private'");
+    }
+
+    // Find the post first to check ownership
+    const post = await Post.findById(postId);
+    if (!post) throw new ApiError(404, "Post not found");
+
+    // Check if user owns the post
+    if (post.userId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You can only modify your own posts");
+    }
+
+    // Track if privacy is changing from private to public
+    const oldPrivacy = post.settings?.privacy || 'public';
+    const isPrivacyChangingToPublic = privacy === 'public' && oldPrivacy === 'private';
+
+    // Update only the privacy settings
+    const updatedPost = await Post.findByIdAndUpdate(
+        postId,
+        {
+            $set: {
+                "settings.privacy": privacy,
+                "settings.isPrivacyTouched": true,
+                updatedAt: new Date()
+            }
+        },
+        { new: true, runValidators: true }
+    ).populate('userId', 'username fullName profileImageUrl');
+
+    // Invalidate caches if post privacy changed from private to public
+    if (isPrivacyChangingToPublic) {
+        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+
+        // Invalidate explore and trending feeds so the post can appear
+        await FeedCacheManager.invalidateExploreFeed();
+        await FeedCacheManager.invalidateTrendingFeed();
+
+        // Invalidate author's feed
+        await FeedCacheManager.invalidateUserFeed(userId);
+    }
+
+    // Invalidate share caches when privacy changes to private
+    if (privacy === 'private') {
+        await redisClient.del(`fn:share:post:${postId}`);
+        await redisClient.del(`fn:share:reel:${postId}`);
+        await redisClient.del(`fn:share:preview:${postId}`);
+        await redisClient.del(`fn:share:preview:reel:${postId}`);
+    }
+
+    return res.status(200).json(new ApiResponse(200, {
+        postId: updatedPost._id,
+        privacy: updatedPost.settings.privacy,
+        post: updatedPost
+    }, `Post privacy updated to ${privacy}`));
 });
 
 // Update post
@@ -1052,6 +1126,12 @@ const invalidatePostCaches = async (postId, userId) => {
         } catch (err) {
             console.error('Redis reel cache clear error:', err);
         }
+
+        // 3. Invalidate share caches for deleted content
+        await redisClient.del(`fn:share:post:${postId}`);
+        await redisClient.del(`fn:share:reel:${postId}`);
+        await redisClient.del(`fn:share:preview:${postId}`);
+        await redisClient.del(`fn:share:preview:reel:${postId}`);
 
         console.log(`✅ Cache invalidated for deleted content: ${postId}`);
     } catch (error) {
@@ -1392,12 +1472,15 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
     });
 
+    // Enrich posts with review/rating data
+    const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
+
     return res.status(200).json(
         new ApiResponse(200, {
             totalPosts: total,
             page,
             totalPages: Math.ceil(total / limit),
-            posts: postsWithThumbnails
+            posts: enrichedPosts
         }, "User posts fetched successfully")
     );
 });
@@ -1455,8 +1538,8 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
     try {
         const posts = await Post.find(filter)
-            .populate('userId', 'username profileImageUrl fullName isVerified location bio privacy isFullPrivate isBusinessProfile')
-            .populate('mentions', 'username fullName profileImageUrl isBusinessProfile')
+            .populate('userId', 'username profileImageUrl fullName isVerified location bio privacy isFullPrivate')
+            .populate('mentions', 'username fullName profileImageUrl')
             .sort(sortObj)
             .skip(skip)
             .limit(pageLimit)
@@ -1476,11 +1559,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         }
 
         // Filter posts based on privacy settings
-        let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
-
-        // Filter out posts from business accounts with inactive payment plans
-        // Business posts without active payment are hidden from ALL users (including followers)
-        visiblePosts = await filterBusinessPostsByPaymentPlan(visiblePosts);
+        const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
 
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / pageLimit);
@@ -1519,12 +1598,12 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
         });
 
-        // Add badges to all posts (userId and mentions)
-        const postsWithBadges = await addBadgesToNestedUsers(visiblePosts);
+        // Enrich posts with review/rating data
+        const enrichedPosts = await enrichWithRatings(visiblePosts, 'userId');
 
         return res.status(200).json(
             new ApiResponse(200, {
-                posts: postsWithBadges,
+                posts: enrichedPosts,
                 pagination: {
                     currentPage,
                     totalPages,

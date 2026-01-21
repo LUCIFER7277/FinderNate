@@ -3,7 +3,7 @@ import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import mongoose from "mongoose";
 
 
@@ -354,6 +354,9 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                     reel.profileImageUrl = null;
                 }
             });
+
+            // Enrich reels with review/rating data
+            reels = await enrichWithRatings(reels, 'userId');
         }
 
         // Get total count for pagination

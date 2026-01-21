@@ -110,8 +110,8 @@ const isValidUsername = (username) => {
     if (!username || typeof username !== 'string') return false;
     if (username.length < 3 || username.length > 30) return false;
     
-    // Check for valid characters (alphanumeric, underscore, dot)
-    const validPattern = /^[a-zA-Z0-9_.]+$/;
+    // Check for valid characters (alphanumeric, underscore, hyphen, dot)
+    const validPattern = /^[a-zA-Z0-9_.-]+$/;
     return validPattern.test(username);
 };
 

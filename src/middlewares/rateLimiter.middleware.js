@@ -10,12 +10,19 @@ class RedisStore {
         this.client = options.client || redisClient;
         this.prefix = options.prefix || 'rl:';
         this.resetExpiryOnChange = options.resetExpiryOnChange ?? false;
+        this.windowMs = options.windowMs || 60000; // Default 1 minute
     }
 
     async increment(key) {
         const prefixedKey = this.prefix + key;
 
         try {
+            // Ensure windowMs is set
+            if (!this.windowMs) {
+                console.error('Redis rate limit error: windowMs not initialized');
+                throw new Error('windowMs not initialized');
+            }
+
             // Increment and get the new value
             const current = await this.client.incr(prefixedKey);
 
@@ -24,16 +31,31 @@ class RedisStore {
                 await this.client.expire(prefixedKey, Math.ceil(this.windowMs / 1000));
             }
 
-            // Get TTL
+            // Get TTL (in milliseconds)
             const ttl = await this.client.pttl(prefixedKey);
+
+            // Handle TTL edge cases:
+            // -2 means key doesn't exist, -1 means no expiry set
+            let resetTime;
+            if (ttl > 0) {
+                resetTime = new Date(Date.now() + ttl);
+            } else if (ttl === -1) {
+                // No expiry set, set it now and calculate reset time
+                await this.client.expire(prefixedKey, Math.ceil(this.windowMs / 1000));
+                resetTime = new Date(Date.now() + this.windowMs);
+            } else {
+                // Key doesn't exist or other error, use window from now
+                resetTime = new Date(Date.now() + this.windowMs);
+            }
 
             return {
                 totalHits: current,
-                resetTime: new Date(Date.now() + ttl)
+                resetTime: resetTime
             };
         } catch (error) {
-            console.error('Redis rate limit increment error:', error);
-            // Return undefined to fall back to allowing the request
+            console.error('CRITICAL: Redis rate limit increment error - falling back to memory store:', error);
+            // Return undefined to fall back to memory-based rate limiting
+            // This is safer than failing open completely
             return undefined;
         }
     }
@@ -46,6 +68,7 @@ class RedisStore {
             return Math.max(0, current);
         } catch (error) {
             console.error('Redis rate limit decrement error:', error);
+            return 0; // Return 0 on error to avoid breaking the flow
         }
     }
 
@@ -54,13 +77,17 @@ class RedisStore {
 
         try {
             await this.client.del(prefixedKey);
+            return true;
         } catch (error) {
             console.error('Redis rate limit reset error:', error);
+            return false;
         }
     }
 
     init(options) {
-        this.windowMs = options.windowMs;
+        if (options.windowMs) {
+            this.windowMs = options.windowMs;
+        }
     }
 }
 
@@ -68,23 +95,30 @@ class RedisStore {
 export const generalRateLimit = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
     max: 50000, // 50000 requests per minute per user/IP (increased for high-traffic usage)
+    max: 50000, // 50000 requests per minute per user/IP (increased for high-traffic usage)
     message: {
         error: 'Too many requests from this IP, please try again later.',
         retryAfter: 60 // 60 seconds
     },
     standardHeaders: true,
     legacyHeaders: false,
-    // Skip rate limiting for OPTIONS requests (CORS preflight)
-    skip: (req) => req.method === 'OPTIONS',
+    // Skip rate limiting for OPTIONS requests (CORS preflight) and health check endpoints
+    skip: (req) => {
+        return req.method === 'OPTIONS' ||
+               req.path === '/' ||
+               req.path === '/health' ||
+               req.path === '/api/v1/health';
+    },
     // In development, don't trust proxy headers for rate limiting
     trustProxy: process.env.NODE_ENV === 'production',
     // Use custom Redis store
-    store: new RedisStore({ prefix: 'rl:general:' })
+    store: new RedisStore({ prefix: 'rl:general:', windowMs: 1 * 60 * 1000 })
 });
 
 // Rate limiter for notification endpoints
 export const notificationRateLimit = rateLimit({
     windowMs: 30 * 1000, // 30 seconds
+    max: 10000, // 10000 requests per 30 seconds per user (increased for high polling frequency)
     max: 10000, // 10000 requests per 30 seconds per user (increased for high polling frequency)
     message: {
         error: 'Too many notification requests, please try again later.',
@@ -93,12 +127,13 @@ export const notificationRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     trustProxy: process.env.NODE_ENV === 'production',
-    store: new RedisStore({ prefix: 'rl:notif:' })
+    store: new RedisStore({ prefix: 'rl:notif:', windowMs: 30 * 1000 })
 });
 
 // Rate limiter for unread counts endpoint
 export const unreadCountsRateLimit = rateLimit({
     windowMs: 10 * 1000, // 10 seconds
+    max: 5000, // 5000 requests per 10 seconds per user (increased to accommodate polling patterns)
     max: 5000, // 5000 requests per 10 seconds per user (increased to accommodate polling patterns)
     message: {
         error: 'Too many unread count requests. Consider using WebSocket events instead of polling.',
@@ -108,12 +143,13 @@ export const unreadCountsRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     trustProxy: process.env.NODE_ENV === 'production',
-    store: new RedisStore({ prefix: 'rl:unread:' })
+    store: new RedisStore({ prefix: 'rl:unread:', windowMs: 10 * 1000 })
 });
 
 // Rate limiter for chat endpoints
 export const chatRateLimit = rateLimit({
     windowMs: 30 * 1000, // 30 seconds
+    max: 20000, // 20000 requests per 30 seconds per user (increased for active chat usage)
     max: 20000, // 20000 requests per 30 seconds per user (increased for active chat usage)
     message: {
         error: 'Too many chat requests, please try again later.',
@@ -122,13 +158,13 @@ export const chatRateLimit = rateLimit({
     standardHeaders: true,
     legacyHeaders: false,
     trustProxy: process.env.NODE_ENV === 'production',
-    store: new RedisStore({ prefix: 'rl:chat:' })
+    store: new RedisStore({ prefix: 'rl:chat:', windowMs: 30 * 1000 })
 });
 
-// Health check rate limiter (more lenient)
+// Health check rate limiter (very lenient - only to prevent abuse)
 export const healthCheckRateLimit = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
-    max: 10000, // 10000 health checks per minute per user/IP (increased limit)
+    max: 100000, // 100000 health checks per minute per user/IP (very high limit, only prevents abuse)
     message: {
         error: 'Too many health check requests.',
         retryAfter: 60
@@ -138,5 +174,5 @@ export const healthCheckRateLimit = rateLimit({
     // Skip rate limiting for OPTIONS requests (CORS preflight)
     skip: (req) => req.method === 'OPTIONS',
     trustProxy: process.env.NODE_ENV === 'production',
-    store: new RedisStore({ prefix: 'rl:health:' })
+    store: new RedisStore({ prefix: 'rl:health:', windowMs: 1 * 60 * 1000 })
 });

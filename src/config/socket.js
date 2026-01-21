@@ -122,13 +122,22 @@ class SocketManager {
     }
 
     setupEventHandlers() {
-        this.io.on('connection', (socket) => {
+        this.io.on('connection', async (socket) => {
             // Store user connection locally AND in Redis for cross-process access
             this.connectedUsers.set(socket.userId, socket.id);
             this.userSockets.set(socket.id, socket.userId);
 
             // Track user's chat rooms for cleanup on disconnect
             socket.chatRooms = new Set();
+
+            // Update lastSeenAt in database when user comes online
+            try {
+                await User.findByIdAndUpdate(socket.userId, {
+                    lastSeenAt: new Date()
+                });
+            } catch (err) {
+                console.error('Error updating lastSeenAt on connect:', err);
+            }
 
             // Store in Redis with 24-hour expiry (auto-cleanup for stale connections)
             const PROCESS_ID = process.env.INSTANCE_ID || process.env.pm_id || `process-${process.pid}`;
@@ -247,19 +256,84 @@ class SocketManager {
                 });
             });
 
-            // Handle message deletion
-            socket.on('delete_message', (data) => {
-                const { chatId, messageId } = data;
+            // Handle message delivery confirmation
+            socket.on('confirm_delivery', async (data) => {
+                const { messageIds } = data;
+                const userId = socket.userId;
 
-                socket.to(`chat:${chatId}`).emit('message_deleted', {
-                    chatId,
-                    messageId,
-                    deletedBy: {
-                        _id: socket.userId,
-                        username: socket.user.username,
-                        fullName: socket.user.fullName
-                    }
-                });
+                try {
+                    const Message = (await import('../models/message.models.js')).default;
+
+                    // Update delivery status to 'delivered' using positional operator $
+                    await Message.updateMany(
+                        {
+                            _id: { $in: messageIds },
+                            'deliveryStatus.userId': userId,
+                            'deliveryStatus.status': 'sent'
+                        },
+                        {
+                            $set: {
+                                'deliveryStatus.$.status': 'delivered',
+                                'deliveryStatus.$.deliveredAt': new Date()
+                            }
+                        }
+                    );
+
+                    // Notify senders that messages were delivered
+                    const messages = await Message.find({ _id: { $in: messageIds } })
+                        .select('sender chatId')
+                        .lean();
+
+                    // Group by sender and emit to each unique sender
+                    const senderMap = new Map();
+                    messages.forEach(msg => {
+                        const senderId = msg.sender.toString();
+                        if (!senderMap.has(senderId)) {
+                            senderMap.set(senderId, []);
+                        }
+                        senderMap.get(senderId).push(msg._id);
+                    });
+
+                    senderMap.forEach((msgIds, senderId) => {
+                        socket.to(`user_${senderId}`).emit('messages_delivered', {
+                            messageIds: msgIds,
+                            deliveredTo: {
+                                _id: userId,
+                                username: socket.user.username,
+                                fullName: socket.user.fullName
+                            },
+                            deliveredAt: new Date()
+                        });
+                    });
+                } catch (error) {
+                    console.error('Error confirming delivery:', error);
+                }
+            });
+
+            // Handle message deletion
+            // NOTE: It's recommended to use HTTP API (DELETE /chats/:chatId/messages/:messageId) instead
+            // This socket event is kept for backward compatibility
+            socket.on('delete_message', (data) => {
+                const { chatId, messageId, deleteType = 'for_everyone' } = data;
+
+                if (deleteType === 'for_me') {
+                    // Only emit to the user who deleted it
+                    socket.emit('message_deleted_for_me', {
+                        chatId,
+                        messageId
+                    });
+                } else {
+                    // Emit to all participants in the chat
+                    socket.to(`chat:${chatId}`).emit('message_deleted_for_everyone', {
+                        chatId,
+                        messageId,
+                        deletedBy: {
+                            _id: socket.userId,
+                            username: socket.user.username,
+                            fullName: socket.user.fullName
+                        }
+                    });
+                }
             });
 
             // Handle message restoration
@@ -409,10 +483,19 @@ class SocketManager {
 
                 // Remove from Redis cross-process tracking
                 if (userId) {
+                    // Update lastSeenAt in database when user goes offline
+                    try {
+                        await User.findByIdAndUpdate(userId, {
+                            lastSeenAt: new Date()
+                        });
+                    } catch (err) {
+                        console.error('Error updating lastSeenAt on disconnect:', err);
+                    }
+
                     redisClient.hdel('fn:online_users', userId)
                         .catch(err => console.error('Redis user removal error:', err));
 
-                    // Emit offline status to relevant users
+                    // Emit offline status to relevant users with lastSeenAt
                     this.emitUserOffline(userId);
                 }
 
@@ -617,15 +700,26 @@ class SocketManager {
         });
     }
 
-    emitUserOffline(userId) {
+    async emitUserOffline(userId) {
         if (!this.io) {
             console.warn('Socket.IO not initialized, skipping emitUserOffline');
             return;
         }
+        // Get user's last seen timestamp
+        let lastSeenAt = new Date();
+        try {
+            const user = await User.findById(userId).select('lastSeenAt').lean();
+            if (user?.lastSeenAt) {
+                lastSeenAt = user.lastSeenAt;
+            }
+        } catch (err) {
+            console.error('Error fetching lastSeenAt for offline emit:', err);
+        }
         // Emit to all users who might be interested in this user's status
         this.io.emit('user_offline', {
             userId,
-            timestamp: new Date()
+            timestamp: new Date(),
+            lastSeenAt
         });
     }
 

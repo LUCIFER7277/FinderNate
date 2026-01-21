@@ -6,7 +6,7 @@ import Business from "../models/business.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -213,26 +213,15 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
                 reel.profileImageUrl = null;
             }
         });
+
+        // Enrich reels with review/rating data
+        reels = await enrichWithRatings(reels, 'userId');
     }
 
     // Posts already have populated user details from the query
 
-    // 3. Get paid business stories to intersperse in the feed
-    let paidBusinessStories = [];
-    if (contentType === "all") {
-        const now = new Date();
-        const allBusinessStories = await Story.find({
-            userId: { $in: [...activePlanUserIdsSet].map(id => new mongoose.Types.ObjectId(id)), $nin: blockedUsers },
-            isArchived: false,
-            expiresAt: { $gt: now }
-        })
-            .sort({ createdAt: -1 })
-            .limit(10) // Limit business stories per page
-            .populate('userId', 'username profileImageUrl fullName')
-            .lean();
-
-        paidBusinessStories = shuffleArray(allBusinessStories);
-    }
+    // Enrich posts with review/rating data
+    posts = await enrichWithRatings(posts, 'userId');
 
     // Combine and shuffle final feed based on query type
     let feed, totalAvailable, totalPages, hasNextPage;

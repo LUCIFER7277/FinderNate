@@ -38,6 +38,17 @@ import {
 } from "../controllers/admin.controllers.js";
 
 import {
+    getEscrowDashboard,
+    getEscrowTransactions,
+    getAllOrders,
+    getDisputedOrders,
+    resolveDispute,
+    manualReleasePayment,
+    manualRefundPayment,
+    getOrderAnalytics
+} from "../controllers/adminEscrow.controllers.js";
+
+import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";
@@ -154,5 +165,17 @@ router.route("/businesses/:businessId/documents/:documentId/verify").post(
 router.route("/create-admin").post(createAdmin);
 router.route("/all-admins").get(getAllAdmins);
 router.route("/:adminId/permissions").put(updateAdminPermissions);
+
+// ===============================
+// ESCROW & ORDER MANAGEMENT ROUTES
+// ===============================
+router.route("/escrow/dashboard").get(getEscrowDashboard);
+router.route("/escrow/transactions").get(getEscrowTransactions);
+router.route("/escrow/orders").get(getAllOrders);
+router.route("/escrow/disputes").get(getDisputedOrders);
+router.route("/escrow/disputes/:orderId/resolve").post(resolveDispute);
+router.route("/escrow/orders/:orderId/release").post(manualReleasePayment);
+router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
+router.route("/escrow/analytics").get(getOrderAnalytics);
 
 export default router;

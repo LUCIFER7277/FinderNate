@@ -9,14 +9,16 @@ import {
     addMessage,
     markMessagesRead,
     markChatAsRead,
-    deleteMessage,
+    deleteMessageForEveryone,
+    deleteMessageForMe,
     restoreMessage,
     startTyping,
     stopTyping,
     getOnlineStatus,
     searchMessages,
     acceptChatRequest,
-    declineChatRequest
+    declineChatRequest,
+    updateChatTheme
 } from '../controllers/chat.controllers.js';
 
 const router = express.Router();
@@ -37,6 +39,9 @@ router.get('/', getUserChats);
 router.patch('/:chatId/accept', acceptChatRequest);
 router.patch('/:chatId/decline', declineChatRequest);
 
+// Update chat theme color
+router.patch('/:chatId/theme', updateChatTheme);
+
 // Get messages for a chat
 router.get('/:chatId/messages', getChatMessages);
 
@@ -52,8 +57,11 @@ router.patch('/:chatId/read', markMessagesRead);
 // Mark all messages in a chat as read
 router.patch('/:chatId/read-all', markChatAsRead);
 
-// Delete a message
-router.delete('/:chatId/messages/:messageId', deleteMessage);
+// Delete a message for everyone (24-hour limit)
+router.delete('/:chatId/messages/:messageId', deleteMessageForEveryone);
+
+// Delete a message for me only (no time limit)
+router.delete('/:chatId/messages/:messageId/for-me', deleteMessageForMe);
 
 // Restore a deleted message
 router.patch('/:chatId/messages/:messageId/restore', restoreMessage);

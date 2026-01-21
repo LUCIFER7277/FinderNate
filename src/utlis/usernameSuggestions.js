@@ -7,7 +7,7 @@ import { User } from '../models/user.models.js';
  * @returns {Promise<object>} Object with availability and suggestions
  */
 export const generateRealtimeUsernameSuggestions = async (partialUsername, count = 8) => {
-    const cleanBase = partialUsername.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const cleanBase = partialUsername.toLowerCase().replace(/[^a-z0-9_-]/g, '');
     
     // Must be at least 3 characters
     if (!cleanBase || cleanBase.length < 3) {
@@ -95,7 +95,7 @@ export const generateRealtimeUsernameSuggestions = async (partialUsername, count
  */
 export const generateUsernameSuggestions = async (baseUsername, count = 5) => {
     const suggestions = [];
-    const cleanBase = baseUsername.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const cleanBase = baseUsername.toLowerCase().replace(/[^a-z0-9_-]/g, '');
     
     if (!cleanBase) {
         return [];
@@ -169,8 +169,8 @@ export const isUsernameAvailable = async (username) => {
         return false;
     }
 
-    // Check for valid format (letters, numbers, underscores, dots)
-    const validFormat = /^[a-zA-Z0-9_.]+$/.test(username);
+    // Check for valid format (letters, numbers, underscores, hyphens, dots)
+    const validFormat = /^[a-zA-Z0-9_.-]+$/.test(username);
     if (!validFormat) {
         return false;
     }
@@ -209,16 +209,24 @@ export const validateUsername = (username) => {
         errors.push('Username must be less than 30 characters');
     }
 
-    if (!/^[a-zA-Z0-9_.]+$/.test(username)) {
-        errors.push('Username can only contain letters, numbers, underscores, and dots');
+    if (!/^[a-zA-Z0-9_.-]+$/.test(username)) {
+        errors.push('Username can only contain letters, numbers, underscores, hyphens, and dots');
     }
 
     if (username.startsWith('.') || username.endsWith('.')) {
         errors.push('Username cannot start or end with a dot');
     }
 
+    if (username.startsWith('-') || username.endsWith('-')) {
+        errors.push('Username cannot start or end with a hyphen');
+    }
+
     if (username.includes('..')) {
         errors.push('Username cannot contain consecutive dots');
+    }
+
+    if (username.includes('--')) {
+        errors.push('Username cannot contain consecutive hyphens');
     }
 
     // Reserved usernames

@@ -3,6 +3,33 @@ import { ApiResponse } from '../utlis/ApiResponse.js';
 import { ApiError } from '../utlis/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
+import razorpay from '../config/razorpay.config.js';
+import crypto from 'crypto';
+
+// Subscription pricing configuration (in INR, paise for Razorpay)
+const SUBSCRIPTION_PLANS = {
+    free: {
+        id: 'free',
+        name: 'Free',
+        price: 0,
+        priceInPaise: 0,
+        duration: 'lifetime'
+    },
+    small_business: {
+        id: 'small_business',
+        name: 'Small Business',
+        price: 999,
+        priceInPaise: 99900, // ₹999 in paise
+        duration: 'monthly'
+    },
+    corporate: {
+        id: 'corporate',
+        name: 'Corporate',
+        price: 2999,
+        priceInPaise: 299900, // ₹2999 in paise
+        duration: 'monthly'
+    }
+};
 
 /**
  * Get current user's subscription status
@@ -264,9 +291,193 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
 });
 
 /**
- * TEST ONLY: Simulate subscription upgrade without payment
- * This endpoint is for testing purposes until payment integration is complete
- * It creates/updates a subscription record with active status
+ * Create Razorpay order for subscription upgrade
+ * This initiates the payment flow for upgrading to a paid plan
+ */
+export const createSubscriptionOrder = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const { plan } = req.body;
+
+    // Validate plan
+    const validPaidPlans = ['small_business', 'corporate'];
+    if (!plan || !validPaidPlans.includes(plan)) {
+        throw new ApiError(400, `Invalid plan. Must be one of: ${validPaidPlans.join(', ')}`);
+    }
+
+    // Get user
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    // Check if user already has an active subscription
+    const existingSubscription = await Subscription.findOne({
+        userId: userId,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    // Get plan details
+    const planDetails = SUBSCRIPTION_PLANS[plan];
+    if (!planDetails) {
+        throw new ApiError(400, 'Invalid subscription plan');
+    }
+
+    // Create Razorpay order
+    const razorpayOrder = await razorpay.orders.create({
+        amount: planDetails.priceInPaise,
+        currency: 'INR',
+        receipt: `sub_${userId}_${Date.now()}`,
+        notes: {
+            userId: userId.toString(),
+            plan: plan,
+            planName: planDetails.name,
+            type: 'subscription_upgrade',
+            existingPlan: existingSubscription?.plan || 'free'
+        }
+    });
+
+    res.status(200).json(
+        new ApiResponse(200, {
+            razorpayOrderId: razorpayOrder.id,
+            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+            amount: razorpayOrder.amount,
+            currency: razorpayOrder.currency,
+            plan: plan,
+            planName: planDetails.name,
+            planPrice: planDetails.price
+        }, 'Razorpay order created for subscription')
+    );
+});
+
+/**
+ * Verify Razorpay payment and activate subscription
+ * Called after successful payment on frontend
+ */
+export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan } = req.body;
+
+    // Validate required fields
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !plan) {
+        throw new ApiError(400, 'Missing required payment verification fields');
+    }
+
+    // Verify Razorpay signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(body.toString())
+        .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+        throw new ApiError(400, "Invalid payment signature");
+    }
+
+    // Validate plan
+    const validPaidPlans = ['small_business', 'corporate'];
+    if (!validPaidPlans.includes(plan)) {
+        throw new ApiError(400, 'Invalid subscription plan');
+    }
+
+    // Get user
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, 'User not found');
+    }
+
+    // Map subscription plan names to business plan names
+    const planMapping = {
+        'small_business': 'plan2',
+        'corporate': 'plan3'
+    };
+
+    // Calculate subscription dates
+    const now = new Date();
+    const endDate = new Date();
+    endDate.setMonth(endDate.getMonth() + 1); // 1 month from now
+
+    // Find existing subscription or create new one
+    let subscription = await Subscription.findOne({ userId });
+
+    if (subscription) {
+        // Update existing subscription
+        subscription.plan = plan;
+        subscription.status = 'active';
+        subscription.startDate = now;
+        subscription.endDate = endDate;
+        subscription.paymentId = razorpay_payment_id;
+        await subscription.save();
+    } else {
+        // Create new subscription
+        subscription = await Subscription.create({
+            userId: userId,
+            plan: plan,
+            status: 'active',
+            startDate: now,
+            endDate: endDate,
+            paymentId: razorpay_payment_id
+        });
+    }
+
+    // Update Business model if user has a business profile
+    const Business = (await import('../models/business.models.js')).default;
+    const business = await Business.findOne({ userId });
+
+    if (business) {
+        business.plan = planMapping[plan];
+        business.subscriptionStatus = 'active';
+        await business.save();
+        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
+    }
+
+    // Invalidate all feed caches when subscription changes
+    try {
+        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+
+        await Promise.allSettled([
+            FeedCacheManager.invalidateUserFeed(userId),
+            FeedCacheManager.invalidateExploreFeed(),
+            FeedCacheManager.invalidateTrendingFeed()
+        ]);
+
+        const { redisClient } = await import('../config/redis.config.js');
+        const feedKeys = await redisClient.keys('fn:user:*:feed:*');
+        if (feedKeys.length > 0) {
+            await redisClient.del(...feedKeys);
+        }
+
+        console.log(`✅ Cache invalidated for user ${userId} after subscription upgrade`);
+    } catch (cacheError) {
+        console.error('Cache invalidation error:', cacheError);
+    }
+
+    // Get subscription status with features
+    const hasCallingAccess = ['small_business', 'corporate'].includes(plan);
+
+    res.status(200).json(
+        new ApiResponse(200, {
+            subscription: subscription,
+            business: business ? { plan: business.plan, subscriptionStatus: business.subscriptionStatus } : null,
+            tier: plan,
+            features: {
+                calling: {
+                    hasAccess: hasCallingAccess,
+                    audioCall: hasCallingAccess,
+                    videoCall: hasCallingAccess,
+                    unlimited: hasCallingAccess
+                }
+            },
+            message: `Successfully upgraded to ${SUBSCRIPTION_PLANS[plan].name} plan!`,
+            paymentId: razorpay_payment_id
+        }, 'Subscription activated successfully')
+    );
+});
+
+/**
+ * @deprecated - TEST ONLY: Simulate subscription upgrade without payment
+ * This endpoint is for testing purposes only and should not be used in production
+ * Use createSubscriptionOrder + verifySubscriptionPayment instead
  */
 export const testUpgradeSubscription = asyncHandler(async (req, res) => {
     const userId = req.user._id;

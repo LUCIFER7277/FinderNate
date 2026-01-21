@@ -43,6 +43,8 @@ app.use(compression({
 
 const allowedOrigins = [
         "https://p0k804os4c4scowcg488800c.194.164.151.15.sslip.io",
+        "https://xos8kg4cwsk0ckgwg4wcgk48.194.164.151.15.sslip.io",
+        "https://lcks40o4goog4og4c048skgs.194.164.151.15.sslip.io",
         "https://findernate.com",
         "https://www.findernate.com",
         "https://apis.findernate.com", // API domain
@@ -212,6 +214,9 @@ import adminRouter from "./routes/admin.routes.js";
 import feedbackRouter from "./routes/feedback.routes.js";
 import qrRouter from "./routes/qr.routes.js";
 import streamRouter from "./routes/stream.routes.js";
+import shareRouter from "./routes/share.routes.js";
+import paymentRouter from "./routes/payment.routes.js";
+import orderRouter from "./routes/order.routes.js";
 
 
 
@@ -234,6 +239,9 @@ app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/feedback", feedbackRouter);
 app.use("/api/v1/qr", qrRouter);
 app.use("/api/v1/stream", streamRouter);
+app.use("/api/v1/share", shareRouter);
+app.use("/api/v1/payments", paymentRouter);
+app.use("/api/v1/orders", orderRouter);
 
 app.use(errorHandler);
 
