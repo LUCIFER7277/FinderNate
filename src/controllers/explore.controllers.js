@@ -42,6 +42,7 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
 
     // 1. Get reels (only when contentType=all, otherwise reels are included in posts query)
     let reels = [];
+    let paidBusinessStories = []; // Initialize paid business stories array
 
     if (contentType === "all") {
         // For types=all, get reels separately to avoid duplication
