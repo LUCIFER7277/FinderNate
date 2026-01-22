@@ -4,25 +4,9 @@ import mongoose from 'mongoose';
 /**
  * Get subscription badge for a user based on their subscription status
  * @param {Object|String} user - User object or userId
- * @param {Boolean} isBusinessProfile - Whether user has business profile
  * @returns {Object|null} Badge object or null if no badge
  */
-export const getUserBadge = async (user, isBusinessProfile = false) => {
-    // If user is passed as an object with isBusinessProfile, use that
-    if (typeof user === 'object' && user.isBusinessProfile !== undefined) {
-        isBusinessProfile = user.isBusinessProfile;
-    }
-
-    // Business profiles always get corporate badge
-    if (isBusinessProfile) {
-        return {
-            type: 'corporate',
-            label: 'Corporate',
-            color: '#F59E0B', // gold
-            isPaid: true
-        };
-    }
-
+export const getUserBadge = async (user) => {
     // Get userId
     const userId = typeof user === 'object' ? (user._id || user.id) : user;
 
@@ -37,18 +21,18 @@ export const getUserBadge = async (user, isBusinessProfile = false) => {
         return null; // No badge for free users
     }
 
-    // Return badge based on plan
+    // Return badge based on subscription plan
     const badgeMap = {
         small_business: {
             type: 'small_business',
             label: 'Small Business',
-            color: '#3B82F6', // blue
+            color: '#22C55E', // green tick
             isPaid: true
         },
         corporate: {
             type: 'corporate',
             label: 'Corporate',
-            color: '#F59E0B', // gold
+            color: '#3B82F6', // blue tick
             isPaid: true
         }
     };
@@ -117,18 +101,18 @@ export const addBadgesToUsers = async (users) => {
         small_business: {
             type: 'small_business',
             label: 'Small Business',
-            color: '#3B82F6', // blue
+            color: '#22C55E', // green tick
             isPaid: true
         },
         corporate: {
             type: 'corporate',
             label: 'Corporate',
-            color: '#F59E0B', // gold
+            color: '#3B82F6', // blue tick
             isPaid: true
         }
     };
 
-    // Add badges to all users
+    // Add badges to all users based on their subscription plan
     return users.map(userObj => {
         if (!userObj) return null;
 
@@ -138,16 +122,10 @@ export const addBadgesToUsers = async (users) => {
 
         if (!userId) return user;
 
-        // Business profiles get corporate badge
-        if (user.isBusinessProfile) {
-            user.subscriptionBadge = badgeMap.corporate;
-            return user;
-        }
-
         // Get subscription plan for this user
         const plan = subscriptionMap.get(userId);
 
-        // Add badge based on plan
+        // Add badge based on subscription plan (not isBusinessProfile)
         user.subscriptionBadge = plan && badgeMap[plan] ? badgeMap[plan] : null;
 
         return user;
@@ -162,13 +140,20 @@ export const addBadgesToUsers = async (users) => {
 export const addBadgesToNestedUsers = async (items) => {
     if (!items || !Array.isArray(items)) return [];
 
-    // Extract all unique users
+    // Extract all unique users (including userId and replyToUserId for comments)
     const userMap = new Map();
     items.forEach(item => {
         if (item && item.userId) {
             const userId = (item.userId._id || item.userId.id || item.userId)?.toString();
             if (userId && typeof item.userId === 'object') {
                 userMap.set(userId, item.userId);
+            }
+        }
+        // Also extract replyToUserId for comments
+        if (item && item.replyToUserId) {
+            const replyToUserId = (item.replyToUserId._id || item.replyToUserId.id || item.replyToUserId)?.toString();
+            if (replyToUserId && typeof item.replyToUserId === 'object') {
+                userMap.set(replyToUserId, item.replyToUserId);
             }
         }
     });
@@ -190,11 +175,22 @@ export const addBadgesToNestedUsers = async (items) => {
 
     // Update items with badged users
     return items.map(item => {
-        if (!item || !item.userId || typeof item.userId !== 'object') return item;
+        if (!item) return item;
 
-        const userId = (item.userId._id || item.userId.id)?.toString();
-        if (userId && badgeMap.has(userId)) {
-            item.userId = badgeMap.get(userId);
+        // Update userId with badge
+        if (item.userId && typeof item.userId === 'object') {
+            const userId = (item.userId._id || item.userId.id)?.toString();
+            if (userId && badgeMap.has(userId)) {
+                item.userId = badgeMap.get(userId);
+            }
+        }
+
+        // Update replyToUserId with badge (for comments)
+        if (item.replyToUserId && typeof item.replyToUserId === 'object') {
+            const replyToUserId = (item.replyToUserId._id || item.replyToUserId.id)?.toString();
+            if (replyToUserId && badgeMap.has(replyToUserId)) {
+                item.replyToUserId = badgeMap.get(replyToUserId);
+            }
         }
 
         return item;

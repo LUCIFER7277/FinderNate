@@ -354,14 +354,18 @@ export const getCommentById = asyncHandler(async (req, res) => {
         };
     });
 
+    // Add badges to main comment and all replies
+    const [commentWithBadges] = await addBadgesToNestedUsers([enrichedComment]);
+    const repliesWithBadges = await addBadgesToNestedUsers(enrichedReplies);
+
     return res.status(200).json(
         new ApiResponse(200, {
-            comment: enrichedComment,
+            comment: commentWithBadges,
             replies: {
                 totalReplies,
                 page: pageNum,
                 totalPages: Math.ceil(totalReplies / pageLimit),
-                comments: enrichedReplies
+                comments: repliesWithBadges
             }
         }, "Comment fetched successfully")
     );
@@ -376,9 +380,16 @@ export const updateComment = asyncHandler(async (req, res) => {
         commentId,
         { content, isEdited: true },
         { new: true }
-    );
+    )
+        .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+        .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
+        .lean();
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
-    return res.status(200).json(new ApiResponse(200, comment, "Comment updated successfully"));
+
+    // Add badges to user and replyToUser
+    const [commentWithBadges] = await addBadgesToNestedUsers([comment]);
+
+    return res.status(200).json(new ApiResponse(200, commentWithBadges, "Comment updated successfully"));
 });
 
 // Delete a comment (soft delete)

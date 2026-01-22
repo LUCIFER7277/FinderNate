@@ -171,17 +171,7 @@ UserSchema.methods.getSubscriptionTier = async function () {
 UserSchema.methods.getSubscriptionBadge = async function () {
     const Subscription = mongoose.model('Subscription');
 
-    // Business profiles always get corporate badge
-    if (this.isBusinessProfile) {
-        return {
-            type: 'corporate',
-            label: 'Corporate',
-            color: '#F59E0B', // gold
-            isPaid: true
-        };
-    }
-
-    // Check active subscription
+    // Check active subscription first
     const subscription = await Subscription.findOne({
         userId: this._id,
         status: 'active',
@@ -192,18 +182,18 @@ UserSchema.methods.getSubscriptionBadge = async function () {
         return null; // No badge for free users
     }
 
-    // Return badge based on plan
+    // Return badge based on subscription plan
     const badgeMap = {
         small_business: {
             type: 'small_business',
             label: 'Small Business',
-            color: '#3B82F6', // blue
+            color: '#22C55E', // green tick
             isPaid: true
         },
         corporate: {
             type: 'corporate',
             label: 'Corporate',
-            color: '#F59E0B', // gold
+            color: '#3B82F6', // blue tick
             isPaid: true
         }
     };
