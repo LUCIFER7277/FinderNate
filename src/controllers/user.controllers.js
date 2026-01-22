@@ -925,12 +925,15 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     // Count posts directly from Post collection
     const postsCount = await Post.countDocuments({ userId: targetUser._id });
 
-    // Get business ID if user has a business profile
+    // Get business ID and visibility status if user has a business profile
     let businessId = null;
+    let isContentVisible = true; // Non-business accounts always have visible content
     if (targetUser.isBusinessProfile) {
-        const business = await Business.findOne({ userId: targetUser._id });
+        const business = await Business.findOne({ userId: targetUser._id }).select('postSettings isVerified subscriptionStatus plan');
         if (business) {
             businessId = business._id;
+            // Check if business content is visible (active payment plan)
+            isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
         }
     }
 
@@ -953,6 +956,10 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         isPhoneVerified: targetUser.isPhoneVerified,
         isPhoneNumberHidden: targetUser.isPhoneNumberHidden,
         isAddressHidden: targetUser.isAddressHidden,
+        isContentVisible: targetUser.isBusinessProfile ? isContentVisible : true,
+        contentVisibilityMessage: targetUser.isBusinessProfile && !isContentVisible
+            ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
+            : null,
         subscriptionBadge: subscriptionBadge,
         bio: targetUser.bio || "",
         link: targetUser.link || "",
