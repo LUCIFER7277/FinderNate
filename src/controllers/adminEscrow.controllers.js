@@ -266,3 +266,39 @@ export const getOrderAnalytics = asyncHandler(async (req, res) => {
         }, "Order analytics fetched")
     );
 });
+
+// Manual confirm pending payment (Admin only - Demo/Sandbox)
+export const manualConfirmPayment = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { reason } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.paymentStatus !== 'pending') {
+        throw new ApiError(400, `Cannot confirm payment. Current status: ${order.paymentStatus}. Only pending payments can be confirmed.`);
+    }
+
+    const escrowWallet = await EscrowWallet.getWallet();
+
+    // Simulate the complete payment flow: pending -> held -> released
+    // This is for demo/sandbox purposes only
+
+    // Step 1: Hold funds (simulate payment verification)
+    await escrowWallet.holdFunds(order, order.amount, `Manual confirmation - ${reason || 'Admin demo approval'}`);
+
+    // Step 2: Release funds immediately (simulate buyer confirmation)
+    await escrowWallet.releaseFunds(order, order.amount, 0, `Instant release after manual confirmation - ${reason || 'Admin demo approval'}`);
+
+    // Update order status
+    order.paymentStatus = 'released';
+    order.orderStatus = 'confirmed';
+    order.paymentReleasedAt = new Date();
+    await order.save();
+
+    return res.status(200).json(
+        new ApiResponse(200, { order }, "Payment confirmed and released successfully")
+    );
+});
