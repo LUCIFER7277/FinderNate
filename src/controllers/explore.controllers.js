@@ -8,6 +8,7 @@ import { asyncHandler } from "../utlis/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {

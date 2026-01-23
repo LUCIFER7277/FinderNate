@@ -15,6 +15,20 @@ import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utlis/reviewUtils.js';
 import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
 
+/**
+ * ✅ HOME FEED WITH BUSINESS POST PRIORITY SYSTEM
+ *
+ * Priority Rules:
+ * 1. Business accounts with ACTIVE payment plans (plan2/plan3/plan4) get HIGHEST priority (score: 1000)
+ * 2. Their posts appear at the TOP of the feed (even above followed users)
+ * 3. Business posts WITHOUT active plans are HIDDEN from ALL users (including followers)
+ * 4. Non-business posts follow normal priority (followed users > recent > engagement)
+ *
+ * Payment Plan Criteria:
+ * - subscriptionStatus must be 'active'
+ * - plan must NOT be 'plan1' (plan1 is free)
+ * - Valid paid plans: plan2, plan3, plan4
+ */
 export const getHomeFeed = asyncHandler(async (req, res) => {
     try {
         // ✅ FIXED: Handle both Mongoose document and plain object from cache
@@ -73,17 +87,26 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             console.log('🔍 Feed Debug - feedUserIds count:', feedUserIds.length);
         }
 
-        // ✅ Get business users with active payment plans for filtering and prioritization
+        // ✅ BUSINESS POST PRIORITY SYSTEM
+        // Get business users with active payment plans (plan2, plan3, plan4 - NOT plan1 which is free)
         const activePaymentPlanUserIds = await Business.find({
             subscriptionStatus: 'active',
             plan: { $ne: 'plan1' }
         }).select('userId').lean();
+
+        // Convert to both ObjectIds and strings for aggregation compatibility
         const activePlanUserIds = activePaymentPlanUserIds.map(b => b.userId);
-        const activePlanUserIdsSet = new Set(activePlanUserIds.map(id => id.toString()));
-        
+        const activePlanUserIdsStrings = activePlanUserIds.map(id => id.toString());
+        const activePlanUserIdsSet = new Set(activePlanUserIdsStrings);
+
+        console.log('💼 Business Debug - Active paid plans count:', activePlanUserIds.length);
+        console.log('💼 Business Debug - Active plan user IDs:', activePlanUserIdsStrings);
+
         // Get all business user IDs
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+        console.log('💼 Business Debug - Total business users:', businessUsers.length);
 
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
@@ -125,20 +148,23 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                             false
                         ]
                     },
-                    userIdForCheck: '$userId'
+                    // Convert userId to string for comparison
+                    userIdString: { $toString: '$userId' }
                 }
             },
             {
+                // ✅ CRITICAL: Filter out business posts without active payment plans
+                // Rule: Business posts WITHOUT active plan are hidden from ALL users (including followers)
                 $match: {
                     $expr: {
                         $or: [
-                            // Keep non-business posts
+                            // Keep ALL non-business posts
                             { $eq: ['$isBusinessAccount', false] },
-                            // Keep business posts only if user has active payment plan
+                            // Keep business posts ONLY if user has active payment plan
                             {
                                 $and: [
                                     { $eq: ['$isBusinessAccount', true] },
-                                    { $in: ['$userIdForCheck', activePlanUserIds] }
+                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
                                 ]
                             }
                         ]
@@ -147,25 +173,27 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             },
             {
                 $addFields: {
-                    // Score posts by priority
+                    // ✅ BUSINESS POST PRIORITY SCORING SYSTEM
+                    // Priority order: Paid Business Posts > Followed Users > Recent Posts > Engagement
                     feedScore: {
                         $add: [
-                            // Paid business posts get HIGHEST priority (even higher than followed users)
+                            // ✅ HIGHEST PRIORITY: Paid business posts get score of 1000 (even higher than followed users)
+                            // This ensures business accounts with active paid plans ALWAYS appear at the top
                             {
                                 $cond: [
                                     {
                                         $and: [
                                             { $eq: ['$isBusinessAccount', true] },
-                                            { $in: ['$userIdForCheck', activePlanUserIds] }
+                                            { $in: ['$userIdString', activePlanUserIdsStrings] }
                                         ]
                                     },
-                                    200, // Highest priority for paid business posts
+                                    1000, // HIGHEST priority for paid business posts (increased from 200)
                                     0
                                 ]
                             },
                             // Followed users get high priority (but lower than paid business)
                             { $cond: [{ $in: ['$userId', feedUserIds] }, 100, 0] },
-                            // Recent posts get boost
+                            // Recent posts get boost (last 24 hours)
                             { $cond: [{ $gte: ['$createdAt', yesterday] }, 20, 0] },
                             // Engagement boost (capped at 30)
                             { $min: [
@@ -213,9 +241,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 $unwind: '$userId'
             },
             {
+                // Remove temporary fields used for filtering
                 $project: {
                     isBusinessAccount: 0,
-                    userIdForCheck: 0,
+                    userIdString: 0,
                     userInfo: 0
                 }
             },
