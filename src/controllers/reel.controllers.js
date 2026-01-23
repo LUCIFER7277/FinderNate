@@ -1,11 +1,11 @@
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
+import Follower from "../models/follower.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 import mongoose from "mongoose";
 
 
@@ -51,21 +51,55 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         console.log('🎬 Reels Debug - currentUserId:', currentUserId);
         console.log('🎬 Reels Debug - blockedUsers count:', blockedUsers.length);
 
-        // ✅ Get viewable user IDs based on privacy settings and following relationships
-        // For logged-out users (currentUserId is null), this returns only users with public privacy
-        // For logged-in users, this returns their following + their own posts + public users
-        const viewableUserIdsRaw = await getViewableUserIds(currentUserId);
-        // ✅ FIXED: Convert string IDs back to ObjectIds for MongoDB aggregation
-        const viewableUserIds = viewableUserIdsRaw.map(id =>
-            typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
+        // ✅ REELS DISCOVERY FEED LOGIC
+        // For reels (discovery feed like Instagram/TikTok), we want to show reels from ALL users
+        // Not just from people you follow - this is different from the home feed
+
+        // Get ALL public users (users with privacy: 'public' or null/undefined)
+        const publicUsers = await User.find({
+            $or: [
+                { privacy: 'public' },
+                { privacy: { $exists: false } },
+                { privacy: null }
+            ]
+        }).select('_id').lean();
+        const publicUserIds = publicUsers.map(u =>
+            typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
         );
 
-        console.log('🎬 Reels Debug - viewableUserIds count:', viewableUserIds.length);
+        console.log('🎬 Reels Debug - publicUserIds count:', publicUserIds.length);
 
-        // Build match criteria (excluding blocked users and respecting privacy)
+        // Get private users that the viewer follows (to include their private reels)
+        let allowedUserIds = [...publicUserIds];
+
+        if (currentUserId) {
+            const following = await Follower.find({ followerId: currentUserId }).select('userId').lean();
+            const followingIds = following.map(f => f.userId);
+
+            // Get which of the followed users have private accounts
+            const privateFollowedUsers = await User.find({
+                _id: { $in: followingIds },
+                privacy: 'private'
+            }).select('_id').lean();
+
+            const privateFollowedUserIds = privateFollowedUsers.map(u =>
+                typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
+            );
+
+            console.log('🎬 Reels Debug - privateFollowedUserIds count:', privateFollowedUserIds.length);
+
+            // Add private followed users to the allowed list
+            allowedUserIds = [...allowedUserIds, ...privateFollowedUserIds];
+        }
+
+        console.log('🎬 Reels Debug - Total allowedUserIds count:', allowedUserIds.length);
+
+        // Build match criteria for reels discovery feed
+        // Show reels from: ALL public users + private users that viewer follows
+        // Exclude blocked users
         const matchCriteria = {
             status: { $in: ["published", "scheduled"] },
-            userId: { $in: viewableUserIds, $nin: blockedUsers }
+            userId: { $in: allowedUserIds, $nin: blockedUsers }
         };
 
         // Filter by postType if specified (reel, photo, video, story)
@@ -300,13 +334,11 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         // Execute aggregation
         let reels = await Post.aggregate(pipeline);
 
-        console.log('🎬 Reels Debug - Reels found (before business filter):', reels.length);
+        console.log('🎬 Reels Debug - Reels found:', reels.length);
 
-        // Filter out reels from business accounts with inactive payment plans
-        // Business posts without active payment are hidden from ALL users (including followers)
-        reels = await filterBusinessPostsByPaymentPlan(reels);
-
-        console.log('🎬 Reels Debug - Reels found (after business filter):', reels.length);
+        // ✅ NOTE: Business payment plan filtering does NOT apply to reels
+        // Business accounts can post reels freely without needing a paid plan
+        // The payment plan filter ONLY applies to posts and ads
 
         if (reels.length === 0) {
             // Debug: Check if there are ANY reels in the database
@@ -315,7 +347,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             console.log('⚠️ No reels found. Debug info:');
             console.log('   - Total reels in DB:', totalReelsInDB);
             console.log('   - Published reels in DB:', publishedReels);
-            console.log('   - Viewable users count:', viewableUserIds.length);
+            console.log('   - Allowed users count:', allowedUserIds.length);
             console.log('   - Blocked users count:', blockedUsers.length);
         }
 
