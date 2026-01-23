@@ -1466,12 +1466,18 @@ export const getBankDetails = asyncHandler(async (req, res) => {
         );
     }
 
+    // Safely mask account number
+    const accountNumber = business.bankDetails.accountNumber || '';
+    const maskedAccountNumber = accountNumber.length >= 4 
+        ? '****' + accountNumber.slice(-4)
+        : accountNumber;
+
     return res.status(200).json(
         new ApiResponse(200, {
             bankDetails: {
                 accountHolderName: business.bankDetails.accountHolderName,
                 bankName: business.bankDetails.bankName,
-                accountNumber: '****' + business.bankDetails.accountNumber.slice(-4), // Mask account number
+                accountNumber: maskedAccountNumber,
                 ifscCode: business.bankDetails.ifscCode,
                 accountType: business.bankDetails.accountType,
                 upiId: business.bankDetails.upiId,
