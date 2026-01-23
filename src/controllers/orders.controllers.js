@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
@@ -375,7 +376,7 @@ export const getBuyerOrderHistory = asyncHandler(async (req, res) => {
 
     // Calculate summary statistics
     const stats = await Order.aggregate([
-        { $match: { buyerId: buyerId } },
+        { $match: { buyerId: new mongoose.Types.ObjectId(buyerId) } },
         {
             $group: {
                 _id: null,
@@ -465,7 +466,7 @@ export const getSellerOrderHistory = asyncHandler(async (req, res) => {
 
     // Calculate summary statistics
     const stats = await Order.aggregate([
-        { $match: { sellerId: sellerId } },
+        { $match: { sellerId: new mongoose.Types.ObjectId(sellerId) } },
         {
             $group: {
                 _id: null,
@@ -497,7 +498,7 @@ export const getSellerOrderHistory = asyncHandler(async (req, res) => {
 
 // Get buyer order statistics
 export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
-    const buyerId = req.user._id;
+    const buyerId = new mongoose.Types.ObjectId(req.user._id);
     const { year, month } = req.query;
 
     const matchQuery = { buyerId };
@@ -598,7 +599,7 @@ export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
 
 // Get seller order statistics
 export const getSellerOrderStatistics = asyncHandler(async (req, res) => {
-    const sellerId = req.user._id;
+    const sellerId = new mongoose.Types.ObjectId(req.user._id);
     const { year, month } = req.query;
 
     const matchQuery = { sellerId };
