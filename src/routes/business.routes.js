@@ -21,7 +21,10 @@ import {
     getBusinessRatingSummary,
     toggleProductPosts,
     toggleServicePosts,
-    uploadVerificationDocument
+    uploadVerificationDocument,
+    addOrUpdateBankDetails,
+    getBankDetails,
+    deleteBankDetails
 } from "../controllers/business.controllers.js";
 
 const router = Router();
@@ -75,6 +78,11 @@ router.route("/toggle-service-posts").post(verifyJWT, toggleServicePosts);
 // 📄 Document Upload Routes
 // Single API: Upload file + Attach to business + Appears in admin panel
 router.route("/upload-document").post(verifyJWT, upload.single("document"), uploadVerificationDocument);
+
+// 🏦 Bank Details Routes
+router.route("/bank-details").post(verifyJWT, addOrUpdateBankDetails);
+router.route("/bank-details").get(verifyJWT, getBankDetails);
+router.route("/bank-details").delete(verifyJWT, deleteBankDetails);
 
 // Helper route to update existing businesses with active subscriptions (admin only)
 router.route("/admin/update-active-businesses").post(optionalVerifyJWT, updateExistingActiveBusinesses);
