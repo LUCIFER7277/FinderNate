@@ -41,6 +41,7 @@ import {
     validateUsername
 } from "../utlis/usernameSuggestions.js";
 import { invalidateBlockedUsersCache } from "../middlewares/blocking.middleware.js";
+import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
 
 
 
@@ -663,6 +664,13 @@ const searchUsers = asyncHandler(async (req, res) => {
         user = [...user, ...validBusinessUsers];
     }
 
+    // Add subscription badges to all users
+    user = await addBadgesToUsers(user);
+    console.log('[BADGE DEBUG] After addBadgesToUsers:', user.map(u => ({
+        username: u.username,
+        subscriptionBadge: u.subscriptionBadge
+    })));
+
     // Format the response to include business information
     const formattedUsersMap = new Map();
 
@@ -677,7 +685,8 @@ const searchUsers = asyncHandler(async (req, res) => {
             fullName: rawUserObj.fullName,
             bio: rawUserObj.bio,
             location: rawUserObj.location,
-            profileImageUrl: rawUserObj.profileImageUrl
+            profileImageUrl: rawUserObj.profileImageUrl,
+            subscriptionBadge: rawUserObj.subscriptionBadge || null
         };
 
         if (businessInfo) {
@@ -711,7 +720,10 @@ const searchUsers = asyncHandler(async (req, res) => {
 
     const formattedUsers = Array.from(formattedUsersMap.values());
 
-
+    console.log('[BADGE DEBUG] Formatted users before sending:', formattedUsers.map(u => ({
+        username: u.username,
+        subscriptionBadge: u.subscriptionBadge
+    })));
 
     return res
         .status(200)
