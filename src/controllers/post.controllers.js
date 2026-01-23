@@ -200,8 +200,14 @@ export const createProductPost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in product object for validation
+    const productWithLocation = {
+        ...parsedProduct,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedProduct = await validateDeliveryAndLocation(parsedProduct, "product");
+    const validatedProduct = await validateDeliveryAndLocation(productWithLocation, "product");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
@@ -345,8 +351,14 @@ export const createServicePost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in service object for validation
+    const serviceWithLocation = {
+        ...parsedService,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedService = await validateDeliveryAndLocation(parsedService, "service");
+    const validatedService = await validateDeliveryAndLocation(serviceWithLocation, "service");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
@@ -484,8 +496,14 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in business object for validation
+    const businessWithLocation = {
+        ...parsedBusiness,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedBusiness = await validateDeliveryAndLocation(parsedBusiness, "business");
+    const validatedBusiness = await validateDeliveryAndLocation(businessWithLocation, "business");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
