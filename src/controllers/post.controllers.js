@@ -681,13 +681,32 @@ export const getPostById = asyncHandler(async (req, res) => {
 
     // Check if post author is a business account with inactive payment
     // Business posts are hidden from ALL users (including followers) if payment is inactive
+    // EXCEPT when viewing your own post
     const postAuthorId = post.userId?._id || post.userId;
     const postAuthor = await User.findById(postAuthorId).select('isBusinessProfile').lean();
-    
-    if (postAuthor?.isBusinessProfile) {
+    const isViewingOwnPost = currentUser && currentUser._id.toString() === postAuthorId.toString();
+
+    if (postAuthor?.isBusinessProfile && !isViewingOwnPost) {
         const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
         if (!hasActivePlan) {
             throw new ApiError(403, "This content is currently unavailable");
+        }
+    }
+
+    // Add visibility indicator if viewing own post on free plan
+    if (postAuthor?.isBusinessProfile && isViewingOwnPost) {
+        const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
+        if (!hasActivePlan) {
+            post.isVisibleToOthers = false;
+            post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+            post.upgradeMessage = {
+                title: "Upgrade Plan",
+                message: "These business posts are currently only visible to you. Upgrade to a paid plan for reach.",
+                ctaText: "Upgrade Now",
+                ctaUrl: "/business/select-plan"
+            };
+        } else {
+            post.isVisibleToOthers = true;
         }
     }
 
@@ -1513,16 +1532,51 @@ export const getMyPosts = asyncHandler(async (req, res) => {
 
     // Enrich posts with review/rating data
     const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
-    
+
     // Add subscription badges to post authors
     const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
+
+    // Check if user is a business account and add visibility indicators
+    let upgradeMessage = null;
+    let hiddenPostsCount = 0;
+    const { User } = await import('../models/user.models.js');
+    const currentUserData = await User.findById(userId).select('isBusinessProfile').lean();
+
+    if (currentUserData?.isBusinessProfile) {
+        const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+        const hasActivePlan = await hasActivePaymentPlan(userId);
+
+        if (!hasActivePlan) {
+            // User has free plan - add visibility indicators to all posts
+            hiddenPostsCount = postsWithBadges.length;
+            upgradeMessage = {
+                title: "Upgrade Plan",
+                message: "Your business posts are currently only visible to you. Upgrade to a paid plan.",
+                ctaText: "Upgrade Now",
+                ctaUrl: "/business/select-plan"
+            };
+
+            // Mark all posts as hidden from others
+            postsWithBadges.forEach(post => {
+                post.isVisibleToOthers = false;
+                post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+            });
+        } else {
+            // User has active plan - all posts are visible
+            postsWithBadges.forEach(post => {
+                post.isVisibleToOthers = true;
+            });
+        }
+    }
 
     return res.status(200).json(
         new ApiResponse(200, {
             totalPosts: total,
             page,
             totalPages: Math.ceil(total / limit),
-            posts: postsWithBadges
+            posts: postsWithBadges,
+            upgradeMessage: upgradeMessage,
+            hiddenPostsCount: hiddenPostsCount
         }, "User posts fetched successfully")
     );
 });
@@ -1602,10 +1656,54 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
 
         // Filter posts based on privacy settings
         const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
-        
-        // Filter out business posts without active payment plans
-        // Business posts are hidden from ALL users (including followers) if payment is inactive
-        const postsAfterBusinessFilter = await filterBusinessPostsByPaymentPlan(visiblePosts);
+
+        // Check if viewer is viewing their own profile
+        const isViewingOwnProfile = currentUser && currentUser._id.toString() === userId.toString();
+
+        let postsAfterBusinessFilter;
+        let upgradeMessage = null;
+        let hiddenPostsCount = 0;
+
+        if (isViewingOwnProfile) {
+            // User is viewing their own profile - show all posts but add visibility indicators
+            postsAfterBusinessFilter = visiblePosts;
+
+            // Check if user is a business account with free plan
+            const { User } = await import('../models/user.models.js');
+            const profileUser = await User.findById(userId).select('isBusinessProfile').lean();
+
+            if (profileUser?.isBusinessProfile) {
+                const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+                const hasActivePlan = await hasActivePaymentPlan(userId);
+
+                if (!hasActivePlan) {
+                    // User has free plan - add visibility indicators to all posts
+                    hiddenPostsCount = visiblePosts.length;
+                    upgradeMessage = {
+                        title: "Upgrade Plan",
+                        message: "Your business posts are currently only visible to you. Upgrade to a paid plan.",
+                        ctaText: "Upgrade Now",
+                        ctaUrl: "/business/select-plan"
+                    };
+
+                    // Mark all posts as hidden from others
+                    postsAfterBusinessFilter.forEach(post => {
+                        post.isVisibleToOthers = false;
+                        post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+                    });
+                } else {
+                    // User has active plan - all posts are visible
+                    postsAfterBusinessFilter.forEach(post => {
+                        post.isVisibleToOthers = true;
+                    });
+                }
+            }
+        } else {
+            // Viewing someone else's profile - apply business filter
+            // Filter out business posts without active payment plans
+            // Business posts are hidden from ALL users (including followers) if payment is inactive
+            postsAfterBusinessFilter = await filterBusinessPostsByPaymentPlan(visiblePosts);
+        }
 
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / pageLimit);
@@ -1664,7 +1762,10 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
                 filters: {
                     postType: postType || 'all',
                     contentType: contentType || 'all'
-                }
+                },
+                upgradeMessage: upgradeMessage,
+                hiddenPostsCount: hiddenPostsCount,
+                isViewingOwnProfile: isViewingOwnProfile
             }, "User profile posts fetched successfully")
         );
     } catch (error) {
