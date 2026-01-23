@@ -314,3 +314,461 @@ export const rateBuyer = asyncHandler(async (req, res) => {
         new ApiResponse(200, { order }, "Buyer rated successfully")
     );
 });
+
+// Enhanced buyer order history with advanced filtering
+export const getBuyerOrderHistory = asyncHandler(async (req, res) => {
+    const {
+        status,
+        paymentStatus,
+        startDate,
+        endDate,
+        minAmount,
+        maxAmount,
+        search,
+        sortBy = 'createdAt',
+        sortOrder = 'desc',
+        page = 1,
+        limit = 20
+    } = req.query;
+
+    const buyerId = req.user._id;
+    const query = { buyerId };
+
+    // Status filters
+    if (status) query.orderStatus = status;
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+
+    // Date range filter
+    if (startDate || endDate) {
+        query.createdAt = {};
+        if (startDate) query.createdAt.$gte = new Date(startDate);
+        if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    // Amount range filter
+    if (minAmount || maxAmount) {
+        query.amount = {};
+        if (minAmount) query.amount.$gte = parseFloat(minAmount);
+        if (maxAmount) query.amount.$lte = parseFloat(maxAmount);
+    }
+
+    // Search by order number or product name
+    if (search) {
+        query.$or = [
+            { orderNumber: { $regex: search, $options: 'i' } },
+            { 'productDetails.name': { $regex: search, $options: 'i' } }
+        ];
+    }
+
+    // Sort configuration
+    const sortConfig = {};
+    sortConfig[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
+    const orders = await Order.find(query)
+        .populate('sellerId', 'fullName username profileImageUrl')
+        .populate('postId', 'media caption')
+        .sort(sortConfig)
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit));
+
+    const total = await Order.countDocuments(query);
+
+    // Calculate summary statistics
+    const stats = await Order.aggregate([
+        { $match: { buyerId: buyerId } },
+        {
+            $group: {
+                _id: null,
+                totalOrders: { $sum: 1 },
+                totalSpent: { $sum: '$amount' },
+                completedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] }
+                },
+                pendingOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] }
+                },
+                cancelledOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] }
+                }
+            }
+        }
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            orders,
+            total,
+            page: parseInt(page),
+            totalPages: Math.ceil(total / limit),
+            stats: stats[0] || { totalOrders: 0, totalSpent: 0, completedOrders: 0, pendingOrders: 0, cancelledOrders: 0 }
+        }, "Buyer order history fetched")
+    );
+});
+
+// Enhanced seller order history with advanced filtering
+export const getSellerOrderHistory = asyncHandler(async (req, res) => {
+    const {
+        status,
+        paymentStatus,
+        startDate,
+        endDate,
+        minAmount,
+        maxAmount,
+        search,
+        sortBy = 'createdAt',
+        sortOrder = 'desc',
+        page = 1,
+        limit = 20
+    } = req.query;
+
+    const sellerId = req.user._id;
+    const query = { sellerId };
+
+    // Status filters
+    if (status) query.orderStatus = status;
+    if (paymentStatus) query.paymentStatus = paymentStatus;
+
+    // Date range filter
+    if (startDate || endDate) {
+        query.createdAt = {};
+        if (startDate) query.createdAt.$gte = new Date(startDate);
+        if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    // Amount range filter
+    if (minAmount || maxAmount) {
+        query.amount = {};
+        if (minAmount) query.amount.$gte = parseFloat(minAmount);
+        if (maxAmount) query.amount.$lte = parseFloat(maxAmount);
+    }
+
+    // Search by order number or product name
+    if (search) {
+        query.$or = [
+            { orderNumber: { $regex: search, $options: 'i' } },
+            { 'productDetails.name': { $regex: search, $options: 'i' } }
+        ];
+    }
+
+    // Sort configuration
+    const sortConfig = {};
+    sortConfig[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
+    const orders = await Order.find(query)
+        .populate('buyerId', 'fullName username profileImageUrl')
+        .populate('postId', 'media caption')
+        .sort(sortConfig)
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit));
+
+    const total = await Order.countDocuments(query);
+
+    // Calculate summary statistics
+    const stats = await Order.aggregate([
+        { $match: { sellerId: sellerId } },
+        {
+            $group: {
+                _id: null,
+                totalOrders: { $sum: 1 },
+                totalEarned: { $sum: '$sellerAmount' },
+                completedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] }
+                },
+                pendingOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] }
+                },
+                cancelledOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] }
+                }
+            }
+        }
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            orders,
+            total,
+            page: parseInt(page),
+            totalPages: Math.ceil(total / limit),
+            stats: stats[0] || { totalOrders: 0, totalEarned: 0, completedOrders: 0, pendingOrders: 0, cancelledOrders: 0 }
+        }, "Seller order history fetched")
+    );
+});
+
+// Get buyer order statistics
+export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
+    const buyerId = req.user._id;
+    const { year, month } = req.query;
+
+    const matchQuery = { buyerId };
+
+    // Optional date filtering for specific year/month
+    if (year) {
+        const startDate = new Date(year, month ? month - 1 : 0, 1);
+        const endDate = month
+            ? new Date(year, month, 0, 23, 59, 59)
+            : new Date(year, 11, 31, 23, 59, 59);
+
+        matchQuery.createdAt = { $gte: startDate, $lte: endDate };
+    }
+
+    // Overall statistics
+    const overallStats = await Order.aggregate([
+        { $match: { buyerId: buyerId } },
+        {
+            $group: {
+                _id: null,
+                totalOrders: { $sum: 1 },
+                totalSpent: { $sum: '$amount' },
+                averageOrderValue: { $avg: '$amount' },
+                completedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] }
+                },
+                pendingOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] }
+                },
+                disputedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'disputed'] }, 1, 0] }
+                },
+                cancelledOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] }
+                }
+            }
+        }
+    ]);
+
+    // Category-wise spending
+    const categoryStats = await Order.aggregate([
+        { $match: matchQuery },
+        {
+            $group: {
+                _id: '$productDetails.category',
+                totalSpent: { $sum: '$amount' },
+                orderCount: { $sum: 1 }
+            }
+        },
+        { $sort: { totalSpent: -1 } },
+        { $limit: 10 }
+    ]);
+
+    // Monthly spending trend (last 6 months)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+    const monthlyTrend = await Order.aggregate([
+        {
+            $match: {
+                buyerId: buyerId,
+                createdAt: { $gte: sixMonthsAgo }
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    year: { $year: '$createdAt' },
+                    month: { $month: '$createdAt' }
+                },
+                totalSpent: { $sum: '$amount' },
+                orderCount: { $sum: 1 }
+            }
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1 } }
+    ]);
+
+    // Status breakdown
+    const statusBreakdown = await Order.aggregate([
+        { $match: { buyerId: buyerId } },
+        {
+            $group: {
+                _id: '$orderStatus',
+                count: { $sum: 1 }
+            }
+        }
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            overall: overallStats[0] || {},
+            categoryStats,
+            monthlyTrend,
+            statusBreakdown
+        }, "Buyer order statistics fetched")
+    );
+});
+
+// Get seller order statistics
+export const getSellerOrderStatistics = asyncHandler(async (req, res) => {
+    const sellerId = req.user._id;
+    const { year, month } = req.query;
+
+    const matchQuery = { sellerId };
+
+    // Optional date filtering for specific year/month
+    if (year) {
+        const startDate = new Date(year, month ? month - 1 : 0, 1);
+        const endDate = month
+            ? new Date(year, month, 0, 23, 59, 59)
+            : new Date(year, 11, 31, 23, 59, 59);
+
+        matchQuery.createdAt = { $gte: startDate, $lte: endDate };
+    }
+
+    // Overall statistics
+    const overallStats = await Order.aggregate([
+        { $match: { sellerId: sellerId } },
+        {
+            $group: {
+                _id: null,
+                totalOrders: { $sum: 1 },
+                totalRevenue: { $sum: '$amount' },
+                totalEarned: { $sum: '$sellerAmount' },
+                platformFees: { $sum: '$platformFee' },
+                averageOrderValue: { $avg: '$amount' },
+                completedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] }
+                },
+                pendingOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] }
+                },
+                disputedOrders: {
+                    $sum: { $cond: [{ $eq: ['$orderStatus', 'disputed'] }, 1, 0] }
+                },
+                cancelledOrders: {
+                    $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] }
+                }
+            }
+        }
+    ]);
+
+    // Product-wise sales
+    const productStats = await Order.aggregate([
+        { $match: matchQuery },
+        {
+            $group: {
+                _id: '$productDetails.name',
+                totalRevenue: { $sum: '$amount' },
+                orderCount: { $sum: 1 },
+                averagePrice: { $avg: '$amount' }
+            }
+        },
+        { $sort: { orderCount: -1 } },
+        { $limit: 10 }
+    ]);
+
+    // Monthly revenue trend (last 6 months)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+
+    const monthlyTrend = await Order.aggregate([
+        {
+            $match: {
+                sellerId: sellerId,
+                createdAt: { $gte: sixMonthsAgo }
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    year: { $year: '$createdAt' },
+                    month: { $month: '$createdAt' }
+                },
+                totalRevenue: { $sum: '$amount' },
+                totalEarned: { $sum: '$sellerAmount' },
+                orderCount: { $sum: 1 }
+            }
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1 } }
+    ]);
+
+    // Status breakdown
+    const statusBreakdown = await Order.aggregate([
+        { $match: { sellerId: sellerId } },
+        {
+            $group: {
+                _id: '$orderStatus',
+                count: { $sum: 1 }
+            }
+        }
+    ]);
+
+    // Average ratings
+    const ratingStats = await Order.aggregate([
+        {
+            $match: {
+                sellerId: sellerId,
+                buyerRating: { $exists: true, $ne: null }
+            }
+        },
+        {
+            $group: {
+                _id: null,
+                averageRating: { $avg: '$buyerRating' },
+                totalRatings: { $sum: 1 }
+            }
+        }
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            overall: overallStats[0] || {},
+            productStats,
+            monthlyTrend,
+            statusBreakdown,
+            ratings: ratingStats[0] || { averageRating: 0, totalRatings: 0 }
+        }, "Seller order statistics fetched")
+    );
+});
+
+// Export orders to CSV
+export const exportOrdersToCSV = asyncHandler(async (req, res) => {
+    const { type = 'buyer', status, startDate, endDate } = req.query;
+    const userId = req.user._id;
+
+    const query = type === 'buyer' ? { buyerId: userId } : { sellerId: userId };
+
+    if (status) query.orderStatus = status;
+    if (startDate || endDate) {
+        query.createdAt = {};
+        if (startDate) query.createdAt.$gte = new Date(startDate);
+        if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+
+    const orders = await Order.find(query)
+        .populate('buyerId', 'fullName username')
+        .populate('sellerId', 'fullName username')
+        .sort({ createdAt: -1 });
+
+    // Generate CSV content
+    const headers = [
+        'Order Number',
+        'Date',
+        'Product',
+        type === 'buyer' ? 'Seller' : 'Buyer',
+        'Amount',
+        'Order Status',
+        'Payment Status'
+    ].join(',');
+
+    const rows = orders.map(order => {
+        const counterParty = type === 'buyer'
+            ? (order.sellerId?.fullName || order.sellerId?.username || 'N/A')
+            : (order.buyerId?.fullName || order.buyerId?.username || order.buyerDetails?.fullName || 'Guest');
+
+        return [
+            order.orderNumber,
+            new Date(order.createdAt).toLocaleDateString(),
+            `"${order.productDetails.name}"`,
+            counterParty,
+            order.amount,
+            order.orderStatus,
+            order.paymentStatus
+        ].join(',');
+    });
+
+    const csv = [headers, ...rows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="orders_${type}_${Date.now()}.csv"`);
+
+    return res.status(200).send(csv);
+});

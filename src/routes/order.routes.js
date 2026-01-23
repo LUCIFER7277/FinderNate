@@ -11,16 +11,34 @@ import {
     uploadPaymentProof,
     uploadPackingMedia,
     uploadOpeningVideo,
-    rateBuyer
+    rateBuyer,
+    getBuyerOrderHistory,
+    getSellerOrderHistory,
+    getBuyerOrderStatistics,
+    getSellerOrderStatistics,
+    exportOrdersToCSV
 } from "../controllers/orders.controllers.js";
 
 const router = Router();
 
 router.use(verifyJWT);
 
-// Get orders
+// Order statistics (must come before generic /buyer and /seller routes)
+router.get("/buyer/statistics", getBuyerOrderStatistics);
+router.get("/seller/statistics", getSellerOrderStatistics);
+
+// Enhanced order history with advanced filtering
+router.get("/buyer/history", getBuyerOrderHistory);
+router.get("/seller/history", getSellerOrderHistory);
+
+// Export orders
+router.get("/export", exportOrdersToCSV);
+
+// Get orders (basic - kept for backward compatibility)
 router.get("/buyer", getBuyerOrders);
 router.get("/seller", getSellerOrders);
+
+// Get specific order details
 router.get("/:orderId", getOrderDetails);
 
 // Seller actions
