@@ -1,0 +1,49 @@
+services:
+  # Primary service - Current Standard plan configuration
+  - type: web
+    name: findernate-backend
+    env: node
+    plan: standard  # Standard: 2GB RAM, 1 vCPU
+    region: singapore  # Nearest to India
+    buildCommand: npm ci --only=production
+    startCommand: npm start
+    
+    # Optimized scaling for Standard plan + 100K users goal
+    scaling:
+      minInstances: 25     # Need more instances due to lower resources per instance
+      maxInstances: 100    # Scale up to 100 instances for 100K users
+      targetCPU: 50        # Lower CPU threshold for single vCPU
+      targetMemory: 60     # Conservative memory threshold for 2GB
+      scaleUpCooldown: 30s # Scale up quickly
+      scaleDownCooldown: 300s # Scale down slowly
+    
+    # Health and monitoring
+    healthCheckPath: /health
+    healthCheckInterval: 30s
+    healthCheckTimeout: 10s
+    healthCheckThreshold: 3
+    
+    # Environment variables optimized for Standard plan (2GB RAM, 1 CPU)
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: PM2_INSTANCES
+        value: 2  # 2 PM2 processes per instance (optimal for 1 CPU)
+      - key: MAX_MEMORY_RESTART
+        value: 1800M  # Conservative for 2GB RAM (leaving buffer)
+      - key: UV_THREADPOOL_SIZE
+        value: 32  # Reduced for single CPU
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=1536 --max-http-header-size=16384"
+        
+    # Deployment settings
+    autoDeploy: true
+    branch: main
+    
+    # Disk storage
+    disk:
+      name: findernate-disk
+      size: 1GB
+      mount: /opt/render/project/storage
