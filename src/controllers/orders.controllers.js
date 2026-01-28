@@ -83,7 +83,7 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
     }
 
     if (order.sellerId.toString() !== sellerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the seller can mark order as shipped");
     }
 
     if (order.orderStatus !== 'payment_received' && order.orderStatus !== 'processing') {
@@ -92,16 +92,25 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
 
     order.orderStatus = 'shipped';
     order.shippingInfo = {
-        trackingId,
-        carrier,
+        ...order.shippingInfo,
+        trackingId: trackingId || order.shippingInfo?.trackingId,
+        carrier: carrier || order.shippingInfo?.carrier,
         shippedAt: new Date(),
-        packingVideoUrl,
-        packingImages
+        packingVideoUrl: packingVideoUrl || order.shippingInfo?.packingVideoUrl,
+        packingImages: packingImages && packingImages.length > 0
+            ? [...(order.shippingInfo?.packingImages || []), ...packingImages].slice(0, 10)
+            : order.shippingInfo?.packingImages
     };
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Order marked as shipped")
+        new ApiResponse(200, { order: updatedOrder }, "Order marked as shipped")
     );
 });
 
@@ -116,7 +125,7 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
     }
 
     if (order.sellerId.toString() !== sellerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the seller can mark order as delivered");
     }
 
     if (order.orderStatus !== 'shipped') {
@@ -124,11 +133,20 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
     }
 
     order.orderStatus = 'delivered';
+    if (!order.shippingInfo) {
+        order.shippingInfo = {};
+    }
     order.shippingInfo.deliveredAt = new Date();
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Order marked as delivered")
+        new ApiResponse(200, { order: updatedOrder }, "Order marked as delivered")
     );
 });
 
@@ -144,11 +162,11 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     }
 
     if (order.buyerId.toString() !== buyerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the buyer can confirm delivery");
     }
 
     if (order.orderStatus !== 'delivered' && order.orderStatus !== 'shipped') {
-        throw new ApiError(400, "Order must be delivered first");
+        throw new ApiError(400, "Order must be shipped or delivered first");
     }
 
     order.orderStatus = 'confirmed';
@@ -168,8 +186,14 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     // No platform fee - release full amount to seller
     await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released for order ${order.orderNumber}`);
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Delivery confirmed and payment released to seller")
+        new ApiResponse(200, { order: updatedOrder }, "Delivery confirmed and payment released to seller")
     );
 });
 
@@ -213,13 +237,23 @@ export const uploadPaymentProof = asyncHandler(async (req, res) => {
     const { paymentScreenshot } = req.body;
     const buyerId = req.user._id;
 
+    if (!paymentScreenshot) {
+        throw new ApiError(400, "Payment screenshot URL is required");
+    }
+
     const order = await Order.findById(orderId);
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.buyerId.toString() !== buyerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the buyer can upload payment proof");
+    }
+
+    // Validate order status
+    const allowedStatuses = ['payment_received', 'processing', 'shipped', 'delivered'];
+    if (!allowedStatuses.includes(order.orderStatus)) {
+        throw new ApiError(400, "Cannot upload payment proof for this order status");
     }
 
     order.buyerProof = {
@@ -229,8 +263,14 @@ export const uploadPaymentProof = asyncHandler(async (req, res) => {
     };
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Payment proof uploaded")
+        new ApiResponse(200, { order: updatedOrder }, "Payment proof uploaded successfully")
     );
 });
 
@@ -240,24 +280,52 @@ export const uploadPackingMedia = asyncHandler(async (req, res) => {
     const { packingVideoUrl, packingImages } = req.body;
     const sellerId = req.user._id;
 
+    if (!packingVideoUrl && (!packingImages || packingImages.length === 0)) {
+        throw new ApiError(400, "At least one media file (video or images) is required");
+    }
+
     const order = await Order.findById(orderId);
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.sellerId.toString() !== sellerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the seller can upload packing media");
     }
 
-    order.shippingInfo = {
-        ...order.shippingInfo,
-        packingVideoUrl: packingVideoUrl || order.shippingInfo?.packingVideoUrl,
-        packingImages: packingImages || order.shippingInfo?.packingImages
-    };
+    // Validate order status
+    const allowedStatuses = ['payment_received', 'processing', 'shipped'];
+    if (!allowedStatuses.includes(order.orderStatus)) {
+        throw new ApiError(400, "Cannot upload packing media for this order status");
+    }
+
+    // Initialize shippingInfo if it doesn't exist
+    if (!order.shippingInfo) {
+        order.shippingInfo = {};
+    }
+
+    // Update packing video if provided
+    if (packingVideoUrl) {
+        order.shippingInfo.packingVideoUrl = packingVideoUrl;
+    }
+
+    // Append new images to existing ones (limit to 10 total)
+    if (packingImages && packingImages.length > 0) {
+        const existingImages = order.shippingInfo.packingImages || [];
+        const allImages = [...existingImages, ...packingImages].slice(0, 10);
+        order.shippingInfo.packingImages = allImages;
+    }
+
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Packing media uploaded")
+        new ApiResponse(200, { order: updatedOrder }, "Packing media uploaded successfully")
     );
 });
 
@@ -267,24 +335,40 @@ export const uploadOpeningVideo = asyncHandler(async (req, res) => {
     const { openingVideoUrl } = req.body;
     const buyerId = req.user._id;
 
+    if (!openingVideoUrl) {
+        throw new ApiError(400, "Opening video URL is required");
+    }
+
     const order = await Order.findById(orderId);
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.buyerId.toString() !== buyerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the buyer can upload opening video");
+    }
+
+    // Validate order status - only allow after shipment
+    const allowedStatuses = ['shipped', 'delivered'];
+    if (!allowedStatuses.includes(order.orderStatus)) {
+        throw new ApiError(400, "Can only upload opening video after shipment");
     }
 
     order.buyerProof = {
         ...order.buyerProof,
         openingVideoUrl,
-        uploadedAt: new Date()
+        uploadedAt: order.buyerProof?.uploadedAt || new Date()
     };
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Opening video uploaded")
+        new ApiResponse(200, { order: updatedOrder }, "Opening video uploaded successfully")
     );
 });
 
