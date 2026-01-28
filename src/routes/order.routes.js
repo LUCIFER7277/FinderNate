@@ -12,6 +12,7 @@ import {
     uploadPackingMedia,
     uploadOpeningVideo,
     rateBuyer,
+    rateSeller,
     getBuyerOrderHistory,
     getSellerOrderHistory,
     getBuyerOrderStatistics,
@@ -49,6 +50,7 @@ router.post("/:orderId/rate-buyer", rateBuyer);
 
 // Buyer actions
 router.patch("/:orderId/confirm", confirmDelivery);
+router.post("/:orderId/rate-seller", rateSeller);
 router.post("/:orderId/report", reportIssue);
 router.post("/:orderId/payment-proof", uploadPaymentProof);
 router.post("/:orderId/opening-video", uploadOpeningVideo);
