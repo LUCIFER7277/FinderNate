@@ -14,6 +14,7 @@ import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
 import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utlis/reviewUtils.js';
 import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
+import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
 
 /**
  * ✅ HOME FEED WITH BUSINESS POST PRIORITY SYSTEM
@@ -316,6 +317,31 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             likedPostIds = new Set(userLikes.map(like => like.postId.toString()));
         }
 
+        // ✅ 3.5. Get all likes for posts with user details for "Liked by" preview
+        const allLikes = await Like.find({
+            postId: { $in: postIds }
+        })
+        .populate('userId', 'username fullName profileImageUrl')
+        .select('postId userId')
+        .lean();
+
+        // Group likes by postId
+        const likesByPost = new Map();
+        allLikes.forEach(like => {
+            if (like.userId) { // Filter out likes from deleted users
+                const postId = like.postId.toString();
+                if (!likesByPost.has(postId)) {
+                    likesByPost.set(postId, []);
+                }
+                likesByPost.get(postId).push({
+                    _id: like.userId._id,
+                    username: like.userId.username,
+                    fullName: like.userId.fullName,
+                    profileImageUrl: like.userId.profileImageUrl
+                });
+            }
+        });
+
         // ✅ 4. Get top comments efficiently (no nested queries)
         const allComments = await Comment.find({
             postId: { $in: postIds },
@@ -353,11 +379,40 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         });
 
         // ✅ 5. Format final response
-        const feedData = posts.map(post => ({
-            ...post,
-            comments: commentsByPost.get(post._id.toString()) || [],
-            isLikedBy: likedPostIds.has(post._id.toString())
-        }));
+        // Get user's followers and following for "Liked by" preview (reuse from earlier fetch if available)
+        let userFollowing = [];
+        let userFollowers = [];
+        if (userId) {
+            const user = await User.findById(userId)
+                .select('following followers')
+                .lean();
+            userFollowing = user?.following || [];
+            userFollowers = user?.followers || [];
+        }
+
+        const feedData = posts.map(post => {
+            const postIdStr = post._id.toString();
+            const likedByUsers = likesByPost.get(postIdStr) || [];
+
+            // Generate "Liked by" preview
+            const likedByPreview = getLikedByPreview(
+                likedByUsers,
+                userId,
+                userFollowing,
+                userFollowers
+            );
+
+            return {
+                ...post,
+                comments: commentsByPost.get(postIdStr) || [],
+                isLikedBy: likedPostIds.has(postIdStr),
+                likedByPreview: likedByPreview.likedByText ? {
+                    text: likedByPreview.likedByText,
+                    previewUser: likedByPreview.previewUser,
+                    othersCount: likedByPreview.othersCount
+                } : null
+            };
+        });
         // Enrich posts with review/rating data
         const enrichedFeedData = await enrichWithRatings(feedData, 'userId');
         

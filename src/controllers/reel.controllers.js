@@ -6,6 +6,8 @@ import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
+import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
+import Like from "../models/like.models.js";
 import mongoose from "mongoose";
 
 
@@ -391,9 +393,69 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             // Enrich reels with review/rating data
             reels = await enrichWithRatings(reels, 'userId');
-            
+
             // Add subscription badges to reel authors
             reels = await addBadgesToNestedUsers(reels);
+
+            // ✅ Get all likes for reels with user details for "Liked by" preview
+            const reelIds = reels.map(reel => reel._id);
+            const allLikes = await Like.find({
+                postId: { $in: reelIds }
+            })
+            .populate('userId', 'username fullName profileImageUrl')
+            .select('postId userId')
+            .lean();
+
+            // Group likes by reelId
+            const likesByReel = new Map();
+            allLikes.forEach(like => {
+                if (like.userId) { // Filter out likes from deleted users
+                    const reelId = like.postId.toString();
+                    if (!likesByReel.has(reelId)) {
+                        likesByReel.set(reelId, []);
+                    }
+                    likesByReel.get(reelId).push({
+                        _id: like.userId._id,
+                        username: like.userId.username,
+                        fullName: like.userId.fullName,
+                        profileImageUrl: like.userId.profileImageUrl
+                    });
+                }
+            });
+
+            // Get user's followers and following for "Liked by" preview
+            let userFollowing = [];
+            let userFollowers = [];
+            if (currentUserId) {
+                const user = await User.findById(currentUserId)
+                    .select('following followers')
+                    .lean();
+                userFollowing = user?.following || [];
+                userFollowers = user?.followers || [];
+            }
+
+            // Add "Liked by" preview to each reel
+            reels = reels.map(reel => {
+                const reelIdStr = reel._id.toString();
+                const likedByUsers = likesByReel.get(reelIdStr) || [];
+
+                // Generate "Liked by" preview
+                const likedByPreview = getLikedByPreview(
+                    likedByUsers,
+                    currentUserId,
+                    userFollowing,
+                    userFollowers
+                );
+
+                return {
+                    ...reel,
+                    likedByPreview: likedByPreview.likedByText ? {
+                        text: likedByPreview.likedByText,
+                        previewUser: likedByPreview.previewUser,
+                        othersCount: likedByPreview.othersCount
+                    } : null
+                };
+            });
         }
 
         // Get total count for pagination

@@ -18,6 +18,7 @@ import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
 import { hasActivePaymentPlan, filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 import Business from "../models/business.models.js";
 
@@ -726,6 +727,26 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Add likedBy array and isLikedBy flag to the post
     post.likedBy = likedByUsers;
     post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
+
+    // Add "Liked by" preview
+    if (currentUser) {
+        const user = await User.findById(currentUser._id).select('following followers').lean();
+        const userFollowing = user?.following || [];
+        const userFollowers = user?.followers || [];
+
+        const likedByPreview = getLikedByPreview(
+            likedByUsers,
+            currentUser._id.toString(),
+            userFollowing,
+            userFollowers
+        );
+
+        post.likedByPreview = likedByPreview.likedByText ? {
+            text: likedByPreview.likedByText,
+            previewUser: likedByPreview.previewUser,
+            othersCount: likedByPreview.othersCount
+        } : null;
+    }
 
     // Add subscription badge to post author
     const [postWithBadge] = await addBadgesToNestedUsers([post]);
@@ -1530,6 +1551,27 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
     });
 
+    // Add "Liked by" preview to each post
+    const currentUserFollowData = await User.findById(userId).select('following followers').lean();
+    const userFollowing = currentUserFollowData?.following || [];
+    const userFollowers = currentUserFollowData?.followers || [];
+
+    postsWithThumbnails.forEach(post => {
+        const likedByUsers = post.likedBy || [];
+        const likedByPreview = getLikedByPreview(
+            likedByUsers,
+            currentUserId,
+            userFollowing,
+            userFollowers
+        );
+
+        post.likedByPreview = likedByPreview.likedByText ? {
+            text: likedByPreview.likedByText,
+            previewUser: likedByPreview.previewUser,
+            othersCount: likedByPreview.othersCount
+        } : null;
+    });
+
     // Enrich posts with review/rating data
     const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
 
@@ -1741,6 +1783,29 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             post.likedBy = likedByIds.map(uid => likedUsersMap[uid]).filter(Boolean); // array of user details
             post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
         });
+
+        // Add "Liked by" preview to each post
+        if (currentUser) {
+            const currentUserData = await User.findById(currentUser._id).select('following followers').lean();
+            const userFollowing = currentUserData?.following || [];
+            const userFollowers = currentUserData?.followers || [];
+
+            postsAfterBusinessFilter.forEach(post => {
+                const likedByUsers = post.likedBy || [];
+                const likedByPreview = getLikedByPreview(
+                    likedByUsers,
+                    currentUserId,
+                    userFollowing,
+                    userFollowers
+                );
+
+                post.likedByPreview = likedByPreview.likedByText ? {
+                    text: likedByPreview.likedByText,
+                    previewUser: likedByPreview.previewUser,
+                    othersCount: likedByPreview.othersCount
+                } : null;
+            });
+        }
 
         // Enrich posts with review/rating data
         const enrichedPosts = await enrichWithRatings(postsAfterBusinessFilter, 'userId');
