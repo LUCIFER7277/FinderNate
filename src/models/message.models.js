@@ -91,7 +91,27 @@ const MessageSchema = new mongoose.Schema({
             type: Date,
             default: Date.now
         }
-    }]
+    }],
+    // 🏷️ Product/Business reference for contact-initiated chats
+    productReference: {
+        postId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Post'
+        },
+        businessId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Business'
+        },
+        productName: String,
+        productImage: String,
+        productPrice: Number,
+        productType: {
+            type: String,
+            enum: ['product', 'service', 'business']
+        },
+        productDescription: String,
+        location: String
+    }
 }, {
     timestamps: true,
     toJSON: { virtuals: true },

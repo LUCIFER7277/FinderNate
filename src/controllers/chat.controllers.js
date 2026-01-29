@@ -45,7 +45,7 @@ const checkFollowStatus = async (followerId, userId) => {
 // Create a new chat (1-on-1 or group)
 export const createChat = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
-    const { participants, chatType = 'direct', groupName, groupDescription } = req.body;
+    const { participants, chatType = 'direct', groupName, groupDescription, productContext } = req.body;
 
     if (!participants || !Array.isArray(participants) || participants.length < 2) {
         throw new ApiError(400, 'At least two participants required');
@@ -198,6 +198,11 @@ export const createChat = asyncHandler(async (req, res) => {
         chatData.groupName = groupName;
         chatData.groupDescription = groupDescription;
         chatData.admins = [currentUserId];
+    }
+
+    // 🏷️ Add product context if provided (for business/product chats)
+    if (productContext) {
+        chatData.productContext = productContext;
     }
 
     const chat = await Chat.create(chatData);
@@ -683,7 +688,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
             .sort({ timestamp: -1 })
             .skip(skip)
             .limit(pageLimit)
-            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone')
+            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone productReference')
             .populate('sender', 'username fullName profileImageUrl')
             .populate({
                 path: 'replyTo',
@@ -753,6 +758,13 @@ export const addMessage = asyncHandler(async (req, res) => {
     const replyTo = body.replyTo;
     const mediaFile = req.file; // File uploaded via FormData
 
+    // 🏷️ Handle product reference for business/product-related chats
+    const productReference = body.productReference ? (
+        typeof body.productReference === 'string'
+            ? JSON.parse(body.productReference)
+            : body.productReference
+    ) : null;
+
 
 
     // For media messages, allow empty message if file is present
@@ -809,6 +821,11 @@ export const addMessage = asyncHandler(async (req, res) => {
             seenAt: null
         }))
     };
+
+    // 🏷️ Add product reference if provided (for business/product chats)
+    if (productReference) {
+        messageData.productReference = productReference;
+    }
 
     // ✅ Handle file upload if present
     if (mediaFile) {

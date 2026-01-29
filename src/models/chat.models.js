@@ -96,6 +96,27 @@ const ChatSchema = new mongoose.Schema({
             type: Number,
             default: 0
         }
+    },
+
+    // 🏷️ Product/Business context for business-initiated chats
+    productContext: {
+        postId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Post'
+        },
+        businessId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Business'
+        },
+        productName: String,
+        productImage: String,
+        productPrice: Number,
+        productType: {
+            type: String,
+            enum: ['product', 'service', 'business']
+        },
+        productDescription: String,
+        location: String
     }
 
 }, {
