@@ -1000,15 +1000,15 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
         Report.countDocuments(),
         Report.countDocuments({ status: 'pending' }),
         Business.countDocuments({
-            aadhaarNumber: { $exists: true, $ne: null, $ne: "" },
-            isVerified: false
+            $or: [
+                { 'documents': { $elemMatch: { documentType: 'aadhaar', verified: false } } },
+                { aadhaarNumber: { $exists: true, $ne: null, $ne: "" }, isVerified: false }
+            ]
         }),
         Business.countDocuments({
-            verificationStatus: 'pending',
             $or: [
-                { businessName: { $exists: true, $ne: null, $ne: "" } },
-                { aadhaarNumber: { $exists: true, $ne: null, $ne: "" } },
-                { gstNumber: { $exists: true, $ne: null, $ne: "" } }
+                { verificationStatus: 'pending' },
+                { 'documents': { $elemMatch: { verified: false, documentType: { $ne: 'aadhaar' } } } }
             ]
         }),
         User.countDocuments({ accountStatus: 'active' }),
