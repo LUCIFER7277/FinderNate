@@ -765,6 +765,16 @@ export const addMessage = asyncHandler(async (req, res) => {
             : body.productReference
     ) : null;
 
+    // 🐛 Debug: Log received product reference
+    if (productReference) {
+        console.log('📦 Backend received productReference:', {
+            hasProductImage: !!productReference.productImage,
+            productImage: productReference.productImage,
+            productName: productReference.productName,
+            fullReference: productReference
+        });
+    }
+
 
 
     // For media messages, allow empty message if file is present
@@ -862,6 +872,15 @@ export const addMessage = asyncHandler(async (req, res) => {
 
     // Create new message using Message model
     const newMessage = await Message.create(messageData);
+
+    // 🐛 Debug: Verify product reference was saved
+    if (newMessage.productReference) {
+        console.log('✅ Message saved with productReference:', {
+            messageId: newMessage._id,
+            hasProductImage: !!newMessage.productReference.productImage,
+            productImage: newMessage.productReference.productImage
+        });
+    }
 
     // Update chat's last message info
     chat.lastMessageAt = new Date();
