@@ -449,6 +449,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
                 return {
                     ...reel,
+                    likedBy: likedByUsers, // Include likedBy array for frontend fallback
                     likedByPreview: likedByPreview.likedByText ? {
                         text: likedByPreview.likedByText,
                         previewUser: likedByPreview.previewUser,
