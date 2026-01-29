@@ -43,6 +43,7 @@ app.use(compression({
 
 const allowedOrigins = [
         "https://p0k804os4c4scowcg488800c.194.164.151.15.sslip.io",
+        "https://ywcsg0kokg00gwcowoogggwg.194.164.151.15.sslip.io",
         "https://xos8kg4cwsk0ckgwg4wcgk48.194.164.151.15.sslip.io",
         "http://xgoow8wg8wgso0k0g8o48ckc.194.164.151.15.sslip.io",
         "https://xgoow8wg8wgso0k0g8o48ckc.194.164.151.15.sslip.io",
