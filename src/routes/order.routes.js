@@ -4,6 +4,7 @@ import {
     getOrderDetails,
     getBuyerOrders,
     getSellerOrders,
+    getSellerNewOrdersCount,
     markOrderShipped,
     markOrderDelivered,
     confirmDelivery,
@@ -26,6 +27,7 @@ router.use(verifyJWT);
 // Order statistics (must come before generic /buyer and /seller routes)
 router.get("/buyer/statistics", getBuyerOrderStatistics);
 router.get("/seller/statistics", getSellerOrderStatistics);
+router.get("/seller/new-count", getSellerNewOrdersCount);
 
 // Enhanced order history with advanced filtering
 router.get("/buyer/history", getBuyerOrderHistory);

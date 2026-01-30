@@ -50,6 +50,21 @@ export const getBuyerOrders = asyncHandler(async (req, res) => {
     );
 });
 
+// Get count of new orders for seller (orders that need to be shipped)
+export const getSellerNewOrdersCount = asyncHandler(async (req, res) => {
+    const sellerId = req.user._id;
+
+    // Count orders with 'payment_received' status - these need seller action (shipping)
+    const newOrdersCount = await Order.countDocuments({
+        sellerId,
+        orderStatus: 'payment_received'
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, { newOrdersCount }, "New orders count fetched")
+    );
+});
+
 // Get seller's orders
 export const getSellerOrders = asyncHandler(async (req, res) => {
     const { status, page = 1, limit = 20 } = req.query;
