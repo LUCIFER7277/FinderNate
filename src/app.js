@@ -43,7 +43,11 @@ app.use(compression({
 
 const allowedOrigins = [
         "https://p0k804os4c4scowcg488800c.194.164.151.15.sslip.io",
+        "https://ywcsg0kokg00gwcowoogggwg.194.164.151.15.sslip.io",
         "https://xos8kg4cwsk0ckgwg4wcgk48.194.164.151.15.sslip.io",
+        "http://xgoow8wg8wgso0k0g8o48ckc.194.164.151.15.sslip.io",
+        "https://xgoow8wg8wgso0k0g8o48ckc.194.164.151.15.sslip.io",
+        "http://ywcsg0kokg00gwcowoogggwg.194.164.151.15.sslip.io",
         "https://lcks40o4goog4og4c048skgs.194.164.151.15.sslip.io",
         "https://findernate.com",
         "https://www.findernate.com",
@@ -218,6 +222,7 @@ import streamRouter from "./routes/stream.routes.js";
 import shareRouter from "./routes/share.routes.js";
 import paymentRouter from "./routes/payment.routes.js";
 import orderRouter from "./routes/order.routes.js";
+import invoiceRouter from "./routes/invoice.routes.js";
 
 
 
@@ -244,6 +249,7 @@ app.use("/api/v1/stream", streamRouter);
 app.use("/api/v1/share", shareRouter);
 app.use("/api/v1/payments", paymentRouter);
 app.use("/api/v1/orders", orderRouter);
+app.use("/api/v1/invoices", invoiceRouter);
 
 app.use(errorHandler);
 

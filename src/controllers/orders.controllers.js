@@ -378,25 +378,81 @@ export const rateBuyer = asyncHandler(async (req, res) => {
     const { rating, review } = req.body;
     const sellerId = req.user._id;
 
+    if (!rating || rating < 1 || rating > 5) {
+        throw new ApiError(400, "Rating must be between 1 and 5");
+    }
+
     const order = await Order.findById(orderId);
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.sellerId.toString() !== sellerId.toString()) {
-        throw new ApiError(403, "Not authorized");
+        throw new ApiError(403, "Only the seller can rate the buyer");
     }
 
-    if (order.orderStatus !== 'confirmed') {
-        throw new ApiError(400, "Order must be confirmed to rate");
+    if (!['confirmed', 'delivered'].includes(order.orderStatus)) {
+        throw new ApiError(400, "Order must be delivered or confirmed to rate the buyer");
+    }
+
+    if (order.sellerRating) {
+        throw new ApiError(400, "You have already rated this buyer");
     }
 
     order.sellerRating = rating;
     order.sellerReview = review;
     await order.save();
 
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Buyer rated successfully")
+        new ApiResponse(200, { order: updatedOrder }, "Buyer rated successfully")
+    );
+});
+
+// Buyer rates seller (dedicated endpoint, separate from confirmDelivery)
+export const rateSeller = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { rating, review } = req.body;
+    const buyerId = req.user._id;
+
+    if (!rating || rating < 1 || rating > 5) {
+        throw new ApiError(400, "Rating must be between 1 and 5");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.buyerId.toString() !== buyerId.toString()) {
+        throw new ApiError(403, "Only the buyer can rate the seller");
+    }
+
+    if (!['confirmed', 'delivered'].includes(order.orderStatus)) {
+        throw new ApiError(400, "Order must be delivered or confirmed to rate the seller");
+    }
+
+    if (order.buyerRating) {
+        throw new ApiError(400, "You have already rated this seller");
+    }
+
+    order.buyerRating = rating;
+    order.buyerReview = review;
+    await order.save();
+
+    // Populate and return updated order
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Seller rated successfully")
     );
 });
 
