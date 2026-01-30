@@ -702,26 +702,47 @@ export const getChatMessages = asyncHandler(async (req, res) => {
         Message.countDocuments(messageQuery)
     ]);
 
-    // If this is the first page, update chat's last message if needed
-    if (pageNum === 1 && messages.length > 0) {
-        const latestMessage = messages[0];
-
-        // Update chat's last message if it's out of sync
-        if (!chat.lastMessageId ||
-            (latestMessage._id.toString() !== chat.lastMessageId.toString())) {
-
-            chat.lastMessage = {
-                sender: latestMessage.sender._id,
-                message: latestMessage.message,
-                timestamp: latestMessage.timestamp
+    // Process messages: hide content for deleted messages (WhatsApp-like behavior)
+    const processedMessages = messages.map(msg => {
+        if (msg.deletedForEveryone) {
+            // Return message with deletion info but hide actual content
+            return {
+                ...msg,
+                message: '', // Clear the message content
+                mediaUrl: null, // Clear media
+                fileName: null,
+                fileSize: null,
+                // Keep these for UI to show "This message was deleted"
+                deletedForEveryone: true,
+                deletedForEveryoneAt: msg.deletedForEveryoneAt
             };
-            chat.lastMessageId = latestMessage._id;
-            await chat.save();
+        }
+        return msg;
+    });
+
+    // If this is the first page, update chat's last message if needed
+    // Find the latest non-deleted message for chat preview
+    if (pageNum === 1 && processedMessages.length > 0) {
+        const latestNonDeletedMessage = processedMessages.find(msg => !msg.deletedForEveryone);
+
+        if (latestNonDeletedMessage) {
+            // Update chat's last message if it's out of sync
+            if (!chat.lastMessageId ||
+                (latestNonDeletedMessage._id.toString() !== chat.lastMessageId.toString())) {
+
+                chat.lastMessage = {
+                    sender: latestNonDeletedMessage.sender._id,
+                    message: latestNonDeletedMessage.message,
+                    timestamp: latestNonDeletedMessage.timestamp
+                };
+                chat.lastMessageId = latestNonDeletedMessage._id;
+                await chat.save();
+            }
         }
     }
 
     // Add message status for sender's messages
-    const messagesWithStatus = messages.map(msg => {
+    const messagesWithStatus = processedMessages.map(msg => {
         // Only add status info if the current user is the sender
         if (msg.sender._id.toString() === currentUserId.toString()) {
             return {
@@ -1230,7 +1251,8 @@ export const deleteMessageForEveryone = asyncHandler(async (req, res) => {
             _id: currentUserId,
             username: req.user.username,
             fullName: req.user.fullName
-        }
+        },
+        deletedAt: message.deletedForEveryoneAt.toISOString()
     });
 
     // Invalidate caches asynchronously (don't block response)
