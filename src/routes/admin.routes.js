@@ -45,8 +45,18 @@ import {
     resolveDispute,
     manualReleasePayment,
     manualRefundPayment,
-    getOrderAnalytics
+    getOrderAnalytics,
+    manualConfirmPayment
 } from "../controllers/adminEscrow.controllers.js";
+
+import {
+    getPaymentLogs,
+    getSubscriptionLogs,
+    getErrorLogs,
+    getMetrics,
+    testExpiryJob,
+    getDashboard as getMonitoringDashboard
+} from "../controllers/monitoring.controllers.js";
 
 import {
     verifyAdminJWT,
@@ -176,6 +186,7 @@ router.route("/escrow/disputes").get(getDisputedOrders);
 router.route("/escrow/disputes/:orderId/resolve").post(resolveDispute);
 router.route("/escrow/orders/:orderId/release").post(manualReleasePayment);
 router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
+router.route("/escrow/orders/:orderId/confirm").post(manualConfirmPayment);
 router.route("/escrow/analytics").get(getOrderAnalytics);
 
 export default router;

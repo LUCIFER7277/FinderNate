@@ -4,15 +4,25 @@ import { ApiError } from "../utlis/ApiError.js";
 import PushSubscription from "../models/pushSubscription.models.js";
 import webpush from 'web-push';
 
-// Configure web-push with VAPID keys
-webpush.setVapidDetails(
-  'mailto:support@findernate.com', // Replace with your email
-  process.env.VAPID_PUBLIC_KEY,
-  process.env.VAPID_PRIVATE_KEY
-);
+// Lazy initialization flag
+let vapidInitialized = false;
+
+// Configure web-push with VAPID keys (lazy initialization)
+const initializeVapid = () => {
+  if (!vapidInitialized) {
+    webpush.setVapidDetails(
+      'mailto:support@findernate.com',
+      process.env.VAPID_PUBLIC_KEY,
+      process.env.VAPID_PRIVATE_KEY
+    );
+    vapidInitialized = true;
+  }
+};
 
 // Subscribe to push notifications
 export const subscribeToPush = asyncHandler(async (req, res) => {
+  initializeVapid();
+  
   const { subscription } = req.body;
   const userId = req.user._id;
 
@@ -73,6 +83,8 @@ export const unsubscribeFromPush = asyncHandler(async (req, res) => {
 // Send push notification to user(s)
 export const sendPushNotification = async (userIds, notificationData) => {
   try {
+    initializeVapid();
+    
     if (!Array.isArray(userIds)) {
       userIds = [userIds];
     }

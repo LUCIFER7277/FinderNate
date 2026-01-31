@@ -251,6 +251,28 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         await existingBusiness.save();
         business = existingBusiness;
     } else {
+        // Check user's subscription to determine initial plan
+        const Subscription = (await import('../models/subscription.models.js')).default;
+        const userSubscription = await Subscription.findOne({
+            userId,
+            status: 'active',
+            endDate: { $gt: new Date() }
+        });
+
+        // Map subscription plans to business plans
+        let businessPlan = 'plan1'; // Default to free
+        let businessSubscriptionStatus = 'pending'; // Default to pending for free users
+
+        if (userSubscription) {
+            if (userSubscription.plan === 'small_business') {
+                businessPlan = 'plan2';
+                businessSubscriptionStatus = 'active';
+            } else if (userSubscription.plan === 'corporate') {
+                businessPlan = 'plan3';
+                businessSubscriptionStatus = 'active';
+            }
+        }
+
         // Create new business profile using pre-generated businessProfileId if exists
         const businessData = {
             userId,
@@ -264,8 +286,8 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
             rating,
             tags: uniqueTags,
             website,
-            plan: 'plan1',
-            subscriptionStatus: 'active',
+            plan: businessPlan,
+            subscriptionStatus: businessSubscriptionStatus,
             isProfileCompleted: true // Mark as completed on creation
         };
 
@@ -462,8 +484,20 @@ export const getBusinessProfile = asyncHandler(async (req, res) => {
         delete businessObj.rating;
     }
 
+    // Check if content is currently visible to others
+    // Content is visible only if subscriptionStatus is 'active' and plan is not 'plan1'
+    const isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
+
     return res.status(200).json(
-        new ApiResponse(200, { business: businessObj }, "Business profile fetched successfully")
+        new ApiResponse(200, {
+            business: businessObj,
+            visibility: {
+                isContentVisible,
+                message: isContentVisible
+                    ? 'Your business content is visible to all users'
+                    : 'Your business content is currently hidden. Activate your payment plan to make it visible.'
+            }
+        }, "Business profile fetched successfully")
     );
 });
 
@@ -508,6 +542,10 @@ export const getBusinessById = asyncHandler(async (req, res) => {
         totalRatings: 0
     };
 
+    // Check if content is currently visible
+    // Content is visible only if subscriptionStatus is 'active' and plan is not 'plan1'
+    const isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
+
     return res.status(200).json(
         new ApiResponse(200, {
             business: {
@@ -515,7 +553,13 @@ export const getBusinessById = asyncHandler(async (req, res) => {
                 rating: ratingInfo.averageRating,
                 totalRatings: ratingInfo.totalRatings
             },
-            owner
+            owner,
+            visibility: {
+                isContentVisible,
+                message: isContentVisible
+                    ? 'Business content is visible'
+                    : 'Business content is currently hidden due to inactive payment plan'
+            }
         }, "Business profile fetched successfully")
     );
 });
@@ -1315,6 +1359,166 @@ export const toggleServicePosts = asyncHandler(async (req, res) => {
             allowServicePosts: business.postSettings.allowServicePosts,
             businessId: business._id
         }, `Service posts ${business.postSettings.allowServicePosts ? 'enabled' : 'disabled'} successfully`)
+    );
+});
+
+// ✅ POST /api/v1/business/bank-details - Add or update bank details
+export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+    const {
+        accountHolderName,
+        bankName,
+        accountNumber,
+        ifscCode,
+        accountType,
+        upiId,
+        branchName
+    } = req.body;
+
+    // Validate required fields
+    if (!accountHolderName || !bankName || !accountNumber || !ifscCode || !accountType) {
+        throw new ApiError(400, "Account holder name, bank name, account number, IFSC code, and account type are required");
+    }
+
+    // Validate account type
+    if (!['savings', 'current'].includes(accountType.toLowerCase())) {
+        throw new ApiError(400, "Account type must be either 'savings' or 'current'");
+    }
+
+    // Validate IFSC code format (basic validation)
+    const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+    if (!ifscRegex.test(ifscCode.toUpperCase())) {
+        throw new ApiError(400, "Invalid IFSC code format");
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    if (!user.businessProfileId) {
+        throw new ApiError(400, "User does not have a business profile. Please create a business profile first.");
+    }
+
+    const business = await Business.findById(user.businessProfileId);
+    if (!business) {
+        throw new ApiError(404, "Business profile not found");
+    }
+
+    // Update bank details
+    business.bankDetails = {
+        accountHolderName: accountHolderName.trim(),
+        bankName: bankName.trim(),
+        accountNumber: accountNumber,
+        ifscCode: ifscCode.toUpperCase(),
+        accountType: accountType.toLowerCase(),
+        upiId: upiId ? upiId.toLowerCase() : business.bankDetails?.upiId,
+        branchName: branchName ? branchName.trim() : business.bankDetails?.branchName,
+        isVerified: false, // Reset verification status when details are updated
+        verifiedAt: null,
+        verifiedBy: null,
+        updatedAt: new Date()
+    };
+
+    await business.save();
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            bankDetails: {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: '****' + business.bankDetails.accountNumber.slice(-4), // Mask account number
+                ifscCode: business.bankDetails.ifscCode,
+                accountType: business.bankDetails.accountType,
+                upiId: business.bankDetails.upiId,
+                branchName: business.bankDetails.branchName,
+                isVerified: business.bankDetails.isVerified,
+                updatedAt: business.bankDetails.updatedAt
+            }
+        }, "Bank details updated successfully")
+    );
+});
+
+// ✅ GET /api/v1/business/bank-details - Get bank details
+export const getBankDetails = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    if (!user.businessProfileId) {
+        throw new ApiError(400, "User does not have a business profile");
+    }
+
+    const business = await Business.findById(user.businessProfileId);
+    if (!business) {
+        throw new ApiError(404, "Business profile not found");
+    }
+
+    if (!business.bankDetails || !business.bankDetails.accountNumber) {
+        return res.status(200).json(
+            new ApiResponse(200, {
+                bankDetails: null,
+                hasBankDetails: false
+            }, "No bank details found")
+        );
+    }
+
+    // Safely mask account number
+    const accountNumber = business.bankDetails.accountNumber || '';
+    const maskedAccountNumber = accountNumber.length >= 4 
+        ? '****' + accountNumber.slice(-4)
+        : accountNumber;
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            bankDetails: {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: maskedAccountNumber,
+                ifscCode: business.bankDetails.ifscCode,
+                accountType: business.bankDetails.accountType,
+                upiId: business.bankDetails.upiId,
+                branchName: business.bankDetails.branchName,
+                isVerified: business.bankDetails.isVerified,
+                verifiedAt: business.bankDetails.verifiedAt,
+                updatedAt: business.bankDetails.updatedAt
+            },
+            hasBankDetails: true
+        }, "Bank details retrieved successfully")
+    );
+});
+
+// ✅ DELETE /api/v1/business/bank-details - Delete bank details
+export const deleteBankDetails = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
+
+    const user = await User.findById(userId);
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    if (!user.businessProfileId) {
+        throw new ApiError(400, "User does not have a business profile");
+    }
+
+    const business = await Business.findById(user.businessProfileId);
+    if (!business) {
+        throw new ApiError(404, "Business profile not found");
+    }
+
+    if (!business.bankDetails || !business.bankDetails.accountNumber) {
+        throw new ApiError(400, "No bank details to delete");
+    }
+
+    // Clear bank details
+    business.bankDetails = undefined;
+    await business.save();
+
+    return res.status(200).json(
+        new ApiResponse(200, {}, "Bank details deleted successfully")
     );
 });
 

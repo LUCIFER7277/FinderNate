@@ -41,6 +41,8 @@ import {
     validateUsername
 } from "../utlis/usernameSuggestions.js";
 import { invalidateBlockedUsersCache } from "../middlewares/blocking.middleware.js";
+import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
+
 
 
 const generateAcessAndRefreshToken = async (userId) => {
@@ -221,9 +223,17 @@ const getUserProfile = asyncHandler(async (req, res) => {
 
     // Get business profile information if user is a business profile
     let businessInfo = null;
+    let isContentVisible = true; // Non-business accounts always have visible content
     if (user.isBusinessProfile) {
-        businessInfo = await Business.findOne({ userId }).select('postSettings isVerified');
+        businessInfo = await Business.findOne({ userId }).select('postSettings isVerified subscriptionStatus plan');
+        // Check if business content is visible (active payment plan)
+        if (businessInfo) {
+            isContentVisible = businessInfo.subscriptionStatus === 'active' && businessInfo.plan !== 'plan1';
+        }
     }
+
+    // Get subscription badge
+    const subscriptionBadge = await user.getSubscriptionBadge();
 
     const userProfile = {
         _id: user._id,
@@ -247,6 +257,12 @@ const getUserProfile = asyncHandler(async (req, res) => {
         productEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowProductPosts ?? true) : null,
         serviceEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowServicePosts ?? true) : null,
         isVerified: user.isBusinessProfile ? (businessInfo?.isVerified ?? false) : null,
+        isContentVisible: user.isBusinessProfile ? isContentVisible : true,
+        contentVisibilityMessage: user.isBusinessProfile && !isContentVisible
+            ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
+            : null,
+        // Add subscription badge
+        subscriptionBadge: subscriptionBadge,
         createdAt: user.createdAt,
         bio: user.bio,
         link: user.link,
@@ -648,6 +664,13 @@ const searchUsers = asyncHandler(async (req, res) => {
         user = [...user, ...validBusinessUsers];
     }
 
+    // Add subscription badges to all users
+    user = await addBadgesToUsers(user);
+    console.log('[BADGE DEBUG] After addBadgesToUsers:', user.map(u => ({
+        username: u.username,
+        subscriptionBadge: u.subscriptionBadge
+    })));
+
     // Format the response to include business information
     const formattedUsersMap = new Map();
 
@@ -662,7 +685,8 @@ const searchUsers = asyncHandler(async (req, res) => {
             fullName: rawUserObj.fullName,
             bio: rawUserObj.bio,
             location: rawUserObj.location,
-            profileImageUrl: rawUserObj.profileImageUrl
+            profileImageUrl: rawUserObj.profileImageUrl,
+            subscriptionBadge: rawUserObj.subscriptionBadge || null
         };
 
         if (businessInfo) {
@@ -696,7 +720,10 @@ const searchUsers = asyncHandler(async (req, res) => {
 
     const formattedUsers = Array.from(formattedUsersMap.values());
 
-
+    console.log('[BADGE DEBUG] Formatted users before sending:', formattedUsers.map(u => ({
+        username: u.username,
+        subscriptionBadge: u.subscriptionBadge
+    })));
 
     return res
         .status(200)
@@ -910,14 +937,20 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     // Count posts directly from Post collection
     const postsCount = await Post.countDocuments({ userId: targetUser._id });
 
-    // Get business ID if user has a business profile
+    // Get business ID and visibility status if user has a business profile
     let businessId = null;
+    let isContentVisible = true; // Non-business accounts always have visible content
     if (targetUser.isBusinessProfile) {
-        const business = await Business.findOne({ userId: targetUser._id });
+        const business = await Business.findOne({ userId: targetUser._id }).select('postSettings isVerified subscriptionStatus plan');
         if (business) {
             businessId = business._id;
+            // Check if business content is visible (active payment plan)
+            isContentVisible = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
         }
     }
+
+    // Get subscription badge
+    const subscriptionBadge = await targetUser.getSubscriptionBadge();
 
     // Prepare user data with counts (respecting privacy settings)
     const userWithCounts = {
@@ -935,6 +968,11 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         isPhoneVerified: targetUser.isPhoneVerified,
         isPhoneNumberHidden: targetUser.isPhoneNumberHidden,
         isAddressHidden: targetUser.isAddressHidden,
+        isContentVisible: targetUser.isBusinessProfile ? isContentVisible : true,
+        contentVisibilityMessage: targetUser.isBusinessProfile && !isContentVisible
+            ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
+            : null,
+        subscriptionBadge: subscriptionBadge,
         bio: targetUser.bio || "",
         link: targetUser.link || "",
         location: targetUser.location || "",

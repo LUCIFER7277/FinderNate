@@ -3,3 +3,6 @@ node_modules/
 Test_data_json
 logs/
 *.log
+test_user.txt
+test-user2.txt
+.vscode/

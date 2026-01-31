@@ -125,11 +125,64 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Order is not in disputed status");
     }
 
+    // Handle edge case: payment already released or refunded
+    // In this case, just resolve the dispute without moving funds
+    if (order.paymentStatus === 'released' || order.paymentStatus === 'refunded') {
+        // Payment already processed, just update dispute status
+        if (order.dispute) {
+            order.dispute.status = 'resolved';
+            order.dispute.resolution = resolution || `Dispute resolved - payment was already ${order.paymentStatus}`;
+            order.dispute.resolvedAt = new Date();
+        }
+
+        // Update order status based on current payment status
+        order.orderStatus = order.paymentStatus === 'released' ? 'confirmed' : 'refunded';
+        await order.save();
+
+        return res.status(200).json(
+            new ApiResponse(200, { order }, `Dispute resolved - payment was already ${order.paymentStatus}`)
+        );
+    }
+
     if (order.paymentStatus !== 'held') {
         throw new ApiError(400, "Payment is not in held status - cannot resolve");
     }
 
     const escrowWallet = await EscrowWallet.getWallet();
+    const { forceResolve = false } = req.body;
+
+    // Check for insufficient balance and handle accordingly
+    const requiredAmount = action === 'partial_refund'
+        ? Math.round(order.amount * (refundPercentage / 100))
+        : order.amount;
+
+    if (escrowWallet.heldBalance < requiredAmount) {
+        if (!forceResolve) {
+            throw new ApiError(400, `Insufficient escrow balance. Wallet has ${escrowWallet.heldBalance} held, but order requires ${requiredAmount}. Use forceResolve: true to resolve without fund movement.`);
+        }
+
+        // Force resolve - just update statuses without moving funds
+        if (order.dispute) {
+            order.dispute.status = 'resolved';
+            order.dispute.resolution = resolution || `Force resolved due to insufficient escrow balance`;
+            order.dispute.resolvedAt = new Date();
+        }
+
+        // Update order status based on action
+        if (action === 'refund_buyer' || action === 'partial_refund') {
+            order.paymentStatus = 'refunded';
+            order.orderStatus = 'refunded';
+        } else {
+            order.paymentStatus = 'released';
+            order.orderStatus = 'confirmed';
+        }
+
+        await order.save();
+
+        return res.status(200).json(
+            new ApiResponse(200, { order, warning: 'Force resolved without fund movement due to insufficient escrow balance' }, "Dispute force resolved")
+        );
+    }
 
     if (action === 'refund_buyer') {
         const refundAmount = Math.round(order.amount * (refundPercentage / 100));
@@ -264,5 +317,41 @@ export const getOrderAnalytics = asyncHandler(async (req, res) => {
             orderStatusBreakdown: statusCounts,
             paymentStatusBreakdown: paymentStatusCounts
         }, "Order analytics fetched")
+    );
+});
+
+// Manual confirm pending payment (Admin only - Demo/Sandbox)
+export const manualConfirmPayment = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { reason } = req.body;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.paymentStatus !== 'pending') {
+        throw new ApiError(400, `Cannot confirm payment. Current status: ${order.paymentStatus}. Only pending payments can be confirmed.`);
+    }
+
+    const escrowWallet = await EscrowWallet.getWallet();
+
+    // Simulate the complete payment flow: pending -> held -> released
+    // This is for demo/sandbox purposes only
+
+    // Step 1: Hold funds (simulate payment verification)
+    await escrowWallet.holdFunds(order, order.amount, `Manual confirmation - ${reason || 'Admin demo approval'}`);
+
+    // Step 2: Release funds immediately (simulate buyer confirmation)
+    await escrowWallet.releaseFunds(order, order.amount, 0, `Instant release after manual confirmation - ${reason || 'Admin demo approval'}`);
+
+    // Update order status
+    order.paymentStatus = 'released';
+    order.orderStatus = 'confirmed';
+    order.paymentReleasedAt = new Date();
+    await order.save();
+
+    return res.status(200).json(
+        new ApiResponse(200, { order }, "Payment confirmed and released successfully")
     );
 });

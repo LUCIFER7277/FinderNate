@@ -75,6 +75,25 @@ const BusinessSchema = new mongoose.Schema({
     // Array of verification documents
     documents: [DocumentSchema],
 
+    // Bank details for payment settlement
+    bankDetails: {
+        accountHolderName: { type: String, trim: true },
+        bankName: { type: String, trim: true },
+        accountNumber: { type: String },
+        ifscCode: { type: String, uppercase: true },
+        accountType: {
+            type: String,
+            enum: ['savings', 'current'],
+            lowercase: true
+        },
+        upiId: { type: String, lowercase: true },
+        branchName: { type: String, trim: true },
+        isVerified: { type: Boolean, default: false },
+        verifiedAt: { type: Date },
+        verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+        updatedAt: { type: Date }
+    },
+
     logoUrl: { type: String },
     isVerified: { type: Boolean, default: false },
     followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],

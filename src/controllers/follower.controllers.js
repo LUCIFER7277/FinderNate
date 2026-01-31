@@ -6,6 +6,7 @@ import { ApiResponse } from "../utlis/ApiResponse.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { createFollowNotification } from "./notification.controllers.js";
 import { redisClient } from "../config/redis.config.js";
+import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
 
 // Follow a user (with privacy support)
 export const followUser = asyncHandler(async (req, res) => {
@@ -165,15 +166,25 @@ export const unfollowUser = asyncHandler(async (req, res) => {
 // Get followers of a user
 export const getFollowers = asyncHandler(async (req, res) => {
     const { userId } = req.params;
-    const followers = await Follower.find({ userId }).populate("followerId", "username profileImageUrl fullName isVerified bio");
-    res.status(200).json(new ApiResponse(200, followers.map(f => f.followerId).filter(user => user !== null), "Followers fetched successfully"));
+    const followers = await Follower.find({ userId }).populate("followerId", "username profileImageUrl fullName isVerified bio isBusinessProfile");
+    const followerUsers = followers.map(f => f.followerId).filter(user => user !== null);
+    
+    // Add subscription badges
+    const followersWithBadges = await addBadgesToUsers(followerUsers);
+    
+    res.status(200).json(new ApiResponse(200, followersWithBadges, "Followers fetched successfully"));
 });
 
 // Get following of a user
 export const getFollowing = asyncHandler(async (req, res) => {
     const { userId } = req.params;
-    const following = await Follower.find({ followerId: userId }).populate("userId", "username profileImageUrl fullName isVerified bio");
-    res.status(200).json(new ApiResponse(200, following.map(f => f.userId).filter(user => user !== null), "Following fetched successfully"));
+    const following = await Follower.find({ followerId: userId }).populate("userId", "username profileImageUrl fullName isVerified bio isBusinessProfile");
+    const followingUsers = following.map(f => f.userId).filter(user => user !== null);
+    
+    // Add subscription badges
+    const followingWithBadges = await addBadgesToUsers(followingUsers);
+    
+    res.status(200).json(new ApiResponse(200, followingWithBadges, "Following fetched successfully"));
 });
 
 // Approve follow request
@@ -267,11 +278,15 @@ export const getPendingFollowRequests = asyncHandler(async (req, res) => {
         recipientId: userId, 
         status: 'pending' 
     });
+    
+    // Add badges to requesters
+    const requestsWithBadges = await addBadgesToUsers(requests.map(req => req.requesterId));
+    const requestersMap = new Map(requestsWithBadges.map(user => [user._id.toString(), user]));
 
     res.status(200).json(new ApiResponse(200, {
         requests: requests.map(req => ({
             _id: req._id,
-            requester: req.requesterId,
+            requester: requestersMap.get(req.requesterId._id.toString()) || req.requesterId,
             timestamp: req.createdAt
         })),
         pagination: {
@@ -302,11 +317,15 @@ export const getSentFollowRequests = asyncHandler(async (req, res) => {
         requesterId: userId, 
         status: 'pending' 
     });
+    
+    // Add badges to recipients
+    const recipientsWithBadges = await addBadgesToUsers(requests.map(req => req.recipientId));
+    const recipientsMap = new Map(recipientsWithBadges.map(user => [user._id.toString(), user]));
 
     res.status(200).json(new ApiResponse(200, {
         requests: requests.map(req => ({
             _id: req._id,
-            recipient: req.recipientId,
+            recipient: recipientsMap.get(req.recipientId._id.toString()) || req.recipientId,
             timestamp: req.createdAt
         })),
         pagination: {

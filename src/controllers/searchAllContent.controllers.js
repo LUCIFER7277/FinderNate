@@ -6,6 +6,8 @@ import SearchSuggestion from '../models/searchSuggestion.models.js';
 import { ApiResponse } from '../utlis/ApiResponse.js';
 import { ApiError } from '../utlis/ApiError.js';
 import { getCoordinates } from '../utlis/getCoordinates.js';
+import { filterBusinessPostsByPaymentPlan } from '../utlis/businessPlan.utils.js';
+import { addBadgesToNestedUsers, addBadgesToUsers } from '../utlis/userBadge.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {
@@ -26,16 +28,6 @@ export const searchAllContent = async (req, res) => {
         const blockedUsers = req.blockedUsers || [];
 
         if (!q) throw new ApiError(400, "Search query 'q' is required");
-
-        // 🎯 Smart query preprocessing
-        const isHashtagSearch = q.startsWith('#');
-        const cleanQuery = q.replace(/^#/, '').trim();
-        const queryVariations = [
-            q.trim(),
-            cleanQuery,
-            q.toLowerCase().trim(),
-            cleanQuery.toLowerCase()
-        ].filter(Boolean);
 
         // Track search keyword if it's 3+ characters
         if (q.trim().length >= 3) {
@@ -241,10 +233,78 @@ export const searchAllContent = async (req, res) => {
             ...basePostFilters,
             userId: { $nin: blockedUsers }
         })
-            .populate('userId', 'username profileImageUrl bio location')
+            .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
             .lean();
 
-        const scoredPosts = rawPosts.map(post => {
+        // Get active payment plan user IDs and business user IDs for prioritization
+        const activePaymentPlanUserIds = await Business.find({
+            subscriptionStatus: 'active',
+            plan: { $ne: 'plan1' }
+        }).select('userId').lean();
+        const activePlanUserIdsSet = new Set(activePaymentPlanUserIds.map(b => b.userId.toString()));
+
+        const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
+        const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+        // BUSINESS POST PRIORITY SYSTEM:
+        // Rule 1: Unpaid business posts are hidden from ALL users (including followers)
+        // Rule 2: If paid and unpaid posts share tags/categories, only paid post is visible
+
+        // First, categorize all posts
+        const postsWithMeta = rawPosts.map(post => {
+            const userId = post.userId?._id || post.userId;
+            const userIdStr = userId ? userId.toString() : null;
+            const isBusiness = userIdStr && businessUserIdsSet.has(userIdStr);
+            const hasActivePlan = userIdStr && activePlanUserIdsSet.has(userIdStr);
+
+            // Extract tags and categories for conflict detection
+            const tags = (post.hashtags || []).map(t => t.toLowerCase());
+            let categories = [];
+
+            if (post.contentType === 'business' && post.customization?.business?.category) {
+                categories.push(post.customization.business.category.toLowerCase());
+                if (post.customization.business.subcategory) {
+                    categories.push(post.customization.business.subcategory.toLowerCase());
+                }
+            } else if (post.contentType === 'product' && post.customization?.product?.category) {
+                categories.push(post.customization.product.category.toLowerCase());
+                if (post.customization.product.subcategory) {
+                    categories.push(post.customization.product.subcategory.toLowerCase());
+                }
+            } else if (post.contentType === 'service' && post.customization?.service?.category) {
+                categories.push(post.customization.service.category.toLowerCase());
+                if (post.customization.service.subcategory) {
+                    categories.push(post.customization.service.subcategory.toLowerCase());
+                }
+            }
+
+            return { post, isBusiness, hasActivePlan, tags, categories };
+        });
+
+        // Filter posts based on business priority rules
+        const filteredPosts = postsWithMeta.filter(({ isBusiness, hasActivePlan }) => {
+            // Rule 1: Always hide unpaid business posts from ALL users
+            if (isBusiness && !hasActivePlan) {
+                return false;
+            }
+
+            // Rule 2: For non-business posts, check if they conflict with paid business posts
+            // If a normal user's post shares tags/categories with a paid business post,
+            // the normal post is still visible (only business vs business conflict matters)
+            // This rule only hides unpaid business posts when paid ones exist with same tags
+
+            return true;
+        });
+
+        // Extract the post objects
+        const finalPosts = filteredPosts.map(({ post }) => post);
+
+        const scoredPosts = finalPosts.map(post => {
+            const userId = post.userId?._id || post.userId;
+            const userIdStr = userId ? userId.toString() : null;
+            const isBusiness = userIdStr && businessUserIdsSet.has(userIdStr);
+            const hasActivePlan = userIdStr && activePlanUserIdsSet.has(userIdStr);
+            
             const engagement = post.engagement || {};
             const score =
                 (engagement.likes || 0) * 1 +
@@ -258,6 +318,11 @@ export const searchAllContent = async (req, res) => {
                 case 'service': base = 1.2; break;
                 case 'business': base = 1.0; break;
                 case 'normal': base = 0.8; break;
+            }
+            
+            // Boost score for paid business posts
+            if (isBusiness && hasActivePlan) {
+                base += 2.0; // Significant boost for paid business posts
             }
 
             return {
@@ -316,10 +381,22 @@ export const searchAllContent = async (req, res) => {
             }
 
             const rawReels = await Reel.find(reelFilters)
-                .populate('userId', 'username profileImageUrl bio location')
+                .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
                 .lean();
 
-            scoredReels = rawReels.map(reel => {
+            // Filter out unpaid business reels
+            const filteredReels = await filterBusinessPostsByPaymentPlan(rawReels);
+            
+            // Get active payment plan user IDs for reels
+            const reelActivePlanUserIdsSet = new Set(activePaymentPlanUserIds.map(b => b.userId.toString()));
+            const reelBusinessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+            scoredReels = filteredReels.map(reel => {
+                const userId = reel.userId?._id || reel.userId;
+                const userIdStr = userId ? userId.toString() : null;
+                const isBusiness = userIdStr && reelBusinessUserIdsSet.has(userIdStr);
+                const hasActivePlan = userIdStr && reelActivePlanUserIdsSet.has(userIdStr);
+                
                 const engagement = reel.engagement || {};
                 const score =
                     (engagement.likes || 0) * 1 +
@@ -327,9 +404,15 @@ export const searchAllContent = async (req, res) => {
                     (engagement.views || 0) * 1.5 +
                     (engagement.shares || 0) * 0.5;
 
+                let baseScore = 2;
+                // Boost score for paid business reels
+                if (isBusiness && hasActivePlan) {
+                    baseScore += 2.0; // Significant boost for paid business reels
+                }
+
                 return {
                     ...reel,
-                    _score: 2 + score + (new Date(reel.createdAt).getTime() / 10000000000000),
+                    _score: baseScore + score + (new Date(reel.createdAt).getTime() / 10000000000000),
                     _type: 'reel'
                 };
             });
@@ -356,7 +439,8 @@ export const searchAllContent = async (req, res) => {
             _id: { $nin: blockedUsers }
         })
             .limit(limit)
-            .select('username fullName profileImageUrl bio location');
+            .select('username fullName profileImageUrl bio location isBusinessProfile')
+            .lean();
 
         // Also find users through business category and subcategory search
         const businessUsersByCategory = await Business.find({
@@ -369,7 +453,7 @@ export const searchAllContent = async (req, res) => {
             ],
             userId: { $nin: blockedUsers }
         })
-            .populate('userId', 'username fullName profileImageUrl bio location')
+            .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
             .limit(limit)
             .lean();
 
@@ -423,10 +507,26 @@ export const searchAllContent = async (req, res) => {
             };
         }));
 
+        // Add badges to posts/reels in search results
+        const contentWithBadges = await addBadgesToNestedUsers(paginatedContent);
+
+        // Add badges to user search results
+        console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({
+            username: u.username,
+            _id: u._id,
+            hasSubscriptionBadge: !!u.subscriptionBadge
+        })));
+        const usersWithBadges = await addBadgesToUsers(usersWithPosts);
+        console.log('[BADGE DEBUG searchAllContent] After addBadgesToUsers:', usersWithBadges.map(u => ({
+            username: u.username,
+            _id: u._id,
+            subscriptionBadge: u.subscriptionBadge
+        })));
+
         return res.status(200).json(
             new ApiResponse(200, {
-                results: paginatedContent,
-                users: usersWithPosts,
+                results: contentWithBadges,
+                users: usersWithBadges,
                 pagination: {
                     page: parseInt(page),
                     limit: parseInt(limit),

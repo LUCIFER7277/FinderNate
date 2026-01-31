@@ -129,5 +129,77 @@ UserSchema.methods.generateRefreshToken = function () {
     );
 };
 
+// 📞 Check if user has calling features access
+UserSchema.methods.hasCallingAccess = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    // Business profiles always have calling access
+    if (this.isBusinessProfile) {
+        return true;
+    }
+
+    // Check if user has an active paid subscription
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    // Free users don't have calling access
+    if (!subscription || subscription.plan === 'free') {
+        return false;
+    }
+
+    // All paid plans (basic, pro, premium, business) have calling access
+    return true;
+};
+
+// 📋 Get user subscription tier
+UserSchema.methods.getSubscriptionTier = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    return subscription ? subscription.plan : 'free';
+};
+
+// 🏅 Get user subscription badge
+UserSchema.methods.getSubscriptionBadge = async function () {
+    const Subscription = mongoose.model('Subscription');
+
+    // Check active subscription first
+    const subscription = await Subscription.findOne({
+        userId: this._id,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    if (!subscription || subscription.plan === 'free') {
+        return null; // No badge for free users
+    }
+
+    // Return badge based on subscription plan
+    const badgeMap = {
+        small_business: {
+            type: 'small_business',
+            label: 'Small Business',
+            color: '#22C55E', // green tick
+            isPaid: true
+        },
+        corporate: {
+            type: 'corporate',
+            label: 'Corporate',
+            color: '#3B82F6', // blue tick
+            isPaid: true
+        }
+    };
+
+    return badgeMap[subscription.plan] || null;
+};
+
 
 export const User = mongoose.model("User", UserSchema);

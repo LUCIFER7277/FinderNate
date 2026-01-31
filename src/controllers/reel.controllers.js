@@ -1,9 +1,13 @@
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
+import Follower from "../models/follower.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
+import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
+import Like from "../models/like.models.js";
 import mongoose from "mongoose";
 
 
@@ -49,21 +53,55 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         console.log('🎬 Reels Debug - currentUserId:', currentUserId);
         console.log('🎬 Reels Debug - blockedUsers count:', blockedUsers.length);
 
-        // ✅ Get viewable user IDs based on privacy settings and following relationships
-        // For logged-out users (currentUserId is null), this returns only users with public privacy
-        // For logged-in users, this returns their following + their own posts + public users
-        const viewableUserIdsRaw = await getViewableUserIds(currentUserId);
-        // ✅ FIXED: Convert string IDs back to ObjectIds for MongoDB aggregation
-        const viewableUserIds = viewableUserIdsRaw.map(id =>
-            typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
+        // ✅ REELS DISCOVERY FEED LOGIC
+        // For reels (discovery feed like Instagram/TikTok), we want to show reels from ALL users
+        // Not just from people you follow - this is different from the home feed
+
+        // Get ALL public users (users with privacy: 'public' or null/undefined)
+        const publicUsers = await User.find({
+            $or: [
+                { privacy: 'public' },
+                { privacy: { $exists: false } },
+                { privacy: null }
+            ]
+        }).select('_id').lean();
+        const publicUserIds = publicUsers.map(u =>
+            typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
         );
 
-        console.log('🎬 Reels Debug - viewableUserIds count:', viewableUserIds.length);
+        console.log('🎬 Reels Debug - publicUserIds count:', publicUserIds.length);
 
-        // Build match criteria (excluding blocked users and respecting privacy)
+        // Get private users that the viewer follows (to include their private reels)
+        let allowedUserIds = [...publicUserIds];
+
+        if (currentUserId) {
+            const following = await Follower.find({ followerId: currentUserId }).select('userId').lean();
+            const followingIds = following.map(f => f.userId);
+
+            // Get which of the followed users have private accounts
+            const privateFollowedUsers = await User.find({
+                _id: { $in: followingIds },
+                privacy: 'private'
+            }).select('_id').lean();
+
+            const privateFollowedUserIds = privateFollowedUsers.map(u =>
+                typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
+            );
+
+            console.log('🎬 Reels Debug - privateFollowedUserIds count:', privateFollowedUserIds.length);
+
+            // Add private followed users to the allowed list
+            allowedUserIds = [...allowedUserIds, ...privateFollowedUserIds];
+        }
+
+        console.log('🎬 Reels Debug - Total allowedUserIds count:', allowedUserIds.length);
+
+        // Build match criteria for reels discovery feed
+        // Show reels from: ALL public users + private users that viewer follows
+        // Exclude blocked users
         const matchCriteria = {
             status: { $in: ["published", "scheduled"] },
-            userId: { $in: viewableUserIds, $nin: blockedUsers }
+            userId: { $in: allowedUserIds, $nin: blockedUsers }
         };
 
         // Filter by postType if specified (reel, photo, video, story)
@@ -300,6 +338,10 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
         console.log('🎬 Reels Debug - Reels found:', reels.length);
 
+        // ✅ NOTE: Business payment plan filtering does NOT apply to reels
+        // Business accounts can post reels freely without needing a paid plan
+        // The payment plan filter ONLY applies to posts and ads
+
         if (reels.length === 0) {
             // Debug: Check if there are ANY reels in the database
             const totalReelsInDB = await Post.countDocuments({ postType: { $in: ["reel", "video"] } });
@@ -307,7 +349,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             console.log('⚠️ No reels found. Debug info:');
             console.log('   - Total reels in DB:', totalReelsInDB);
             console.log('   - Published reels in DB:', publishedReels);
-            console.log('   - Viewable users count:', viewableUserIds.length);
+            console.log('   - Allowed users count:', allowedUserIds.length);
             console.log('   - Blocked users count:', blockedUsers.length);
         }
 
@@ -351,6 +393,70 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             // Enrich reels with review/rating data
             reels = await enrichWithRatings(reels, 'userId');
+
+            // Add subscription badges to reel authors
+            reels = await addBadgesToNestedUsers(reels);
+
+            // ✅ Get all likes for reels with user details for "Liked by" preview
+            const reelIds = reels.map(reel => reel._id);
+            const allLikes = await Like.find({
+                postId: { $in: reelIds }
+            })
+            .populate('userId', 'username fullName profileImageUrl')
+            .select('postId userId')
+            .lean();
+
+            // Group likes by reelId
+            const likesByReel = new Map();
+            allLikes.forEach(like => {
+                if (like.userId) { // Filter out likes from deleted users
+                    const reelId = like.postId.toString();
+                    if (!likesByReel.has(reelId)) {
+                        likesByReel.set(reelId, []);
+                    }
+                    likesByReel.get(reelId).push({
+                        _id: like.userId._id,
+                        username: like.userId.username,
+                        fullName: like.userId.fullName,
+                        profileImageUrl: like.userId.profileImageUrl
+                    });
+                }
+            });
+
+            // Get user's followers and following for "Liked by" preview
+            let userFollowing = [];
+            let userFollowers = [];
+            if (currentUserId) {
+                const user = await User.findById(currentUserId)
+                    .select('following followers')
+                    .lean();
+                userFollowing = user?.following || [];
+                userFollowers = user?.followers || [];
+            }
+
+            // Add "Liked by" preview to each reel
+            reels = reels.map(reel => {
+                const reelIdStr = reel._id.toString();
+                const likedByUsers = likesByReel.get(reelIdStr) || [];
+
+                // Generate "Liked by" preview
+                const likedByPreview = getLikedByPreview(
+                    likedByUsers,
+                    currentUserId,
+                    userFollowing,
+                    userFollowers
+                );
+
+                return {
+                    ...reel,
+                    likedBy: likedByUsers, // Include likedBy array for frontend fallback
+                    likedByPreview: likedByPreview.likedByText ? {
+                        text: likedByPreview.likedByText,
+                        previewUser: likedByPreview.previewUser,
+                        othersCount: likedByPreview.othersCount
+                    } : null
+                };
+            });
         }
 
         // Get total count for pagination

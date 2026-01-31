@@ -4,6 +4,7 @@ import {
     getOrderDetails,
     getBuyerOrders,
     getSellerOrders,
+    getSellerNewOrdersCount,
     markOrderShipped,
     markOrderDelivered,
     confirmDelivery,
@@ -11,16 +12,36 @@ import {
     uploadPaymentProof,
     uploadPackingMedia,
     uploadOpeningVideo,
-    rateBuyer
+    rateBuyer,
+    rateSeller,
+    getBuyerOrderHistory,
+    getSellerOrderHistory,
+    getBuyerOrderStatistics,
+    getSellerOrderStatistics,
+    exportOrdersToCSV
 } from "../controllers/orders.controllers.js";
 
 const router = Router();
 
 router.use(verifyJWT);
 
-// Get orders
+// Order statistics (must come before generic /buyer and /seller routes)
+router.get("/buyer/statistics", getBuyerOrderStatistics);
+router.get("/seller/statistics", getSellerOrderStatistics);
+router.get("/seller/new-count", getSellerNewOrdersCount);
+
+// Enhanced order history with advanced filtering
+router.get("/buyer/history", getBuyerOrderHistory);
+router.get("/seller/history", getSellerOrderHistory);
+
+// Export orders
+router.get("/export", exportOrdersToCSV);
+
+// Get orders (basic - kept for backward compatibility)
 router.get("/buyer", getBuyerOrders);
 router.get("/seller", getSellerOrders);
+
+// Get specific order details
 router.get("/:orderId", getOrderDetails);
 
 // Seller actions
@@ -31,6 +52,7 @@ router.post("/:orderId/rate-buyer", rateBuyer);
 
 // Buyer actions
 router.patch("/:orderId/confirm", confirmDelivery);
+router.post("/:orderId/rate-seller", rateSeller);
 router.post("/:orderId/report", reportIssue);
 router.post("/:orderId/payment-proof", uploadPaymentProof);
 router.post("/:orderId/opening-video", uploadOpeningVideo);

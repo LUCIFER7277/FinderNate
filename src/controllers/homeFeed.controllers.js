@@ -10,9 +10,26 @@ import PostInteraction from '../models/postInteraction.models.js';
 import { setCache } from '../middlewares/cache.middleware.js';
 import { redisClient } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
+import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
 import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utlis/reviewUtils.js';
+import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
+import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
 
+/**
+ * ✅ HOME FEED WITH BUSINESS POST PRIORITY SYSTEM
+ *
+ * Priority Rules:
+ * 1. Business accounts with ACTIVE payment plans (plan2/plan3/plan4) get HIGHEST priority (score: 1000)
+ * 2. Their posts appear at the TOP of the feed (even above followed users)
+ * 3. Business posts WITHOUT active plans are HIDDEN from ALL users (including followers)
+ * 4. Non-business posts follow normal priority (followed users > recent > engagement)
+ *
+ * Payment Plan Criteria:
+ * - subscriptionStatus must be 'active'
+ * - plan must NOT be 'plan1' (plan1 is free)
+ * - Valid paid plans: plan2, plan3, plan4
+ */
 export const getHomeFeed = asyncHandler(async (req, res) => {
     try {
         // ✅ FIXED: Handle both Mongoose document and plain object from cache
@@ -71,6 +88,27 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             console.log('🔍 Feed Debug - feedUserIds count:', feedUserIds.length);
         }
 
+        // ✅ BUSINESS POST PRIORITY SYSTEM
+        // Get business users with active payment plans (plan2, plan3, plan4 - NOT plan1 which is free)
+        const activePaymentPlanUserIds = await Business.find({
+            subscriptionStatus: 'active',
+            plan: { $ne: 'plan1' }
+        }).select('userId').lean();
+
+        // Convert to both ObjectIds and strings for aggregation compatibility
+        const activePlanUserIds = activePaymentPlanUserIds.map(b => b.userId);
+        const activePlanUserIdsStrings = activePlanUserIds.map(id => id.toString());
+        const activePlanUserIdsSet = new Set(activePlanUserIdsStrings);
+
+        console.log('💼 Business Debug - Active paid plans count:', activePlanUserIds.length);
+        console.log('💼 Business Debug - Active plan user IDs:', activePlanUserIdsStrings);
+
+        // Get all business user IDs
+        const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
+        const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+        console.log('💼 Business Debug - Total business users:', businessUsers.length);
+
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
@@ -92,13 +130,71 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 $match: matchQuery
             },
             {
+                $lookup: {
+                    from: 'users',
+                    localField: 'userId',
+                    foreignField: '_id',
+                    as: 'userInfo',
+                    pipeline: [
+                        { $project: { isBusinessProfile: 1 } }
+                    ]
+                }
+            },
+            {
                 $addFields: {
-                    // Score posts by priority
+                    isBusinessAccount: {
+                        $cond: [
+                            { $gt: [{ $size: '$userInfo' }, 0] },
+                            { $arrayElemAt: ['$userInfo.isBusinessProfile', 0] },
+                            false
+                        ]
+                    },
+                    // Convert userId to string for comparison
+                    userIdString: { $toString: '$userId' }
+                }
+            },
+            {
+                // ✅ CRITICAL: Filter out business posts without active payment plans
+                // Rule: Business posts WITHOUT active plan are hidden from ALL users (including followers)
+                $match: {
+                    $expr: {
+                        $or: [
+                            // Keep ALL non-business posts
+                            { $eq: ['$isBusinessAccount', false] },
+                            // Keep business posts ONLY if user has active payment plan
+                            {
+                                $and: [
+                                    { $eq: ['$isBusinessAccount', true] },
+                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+            {
+                $addFields: {
+                    // ✅ BUSINESS POST PRIORITY SCORING SYSTEM
+                    // Priority order: Paid Business Posts > Followed Users > Recent Posts > Engagement
                     feedScore: {
                         $add: [
-                            // Followed users get highest priority
+                            // ✅ HIGHEST PRIORITY: Paid business posts get score of 1000 (even higher than followed users)
+                            // This ensures business accounts with active paid plans ALWAYS appear at the top
+                            {
+                                $cond: [
+                                    {
+                                        $and: [
+                                            { $eq: ['$isBusinessAccount', true] },
+                                            { $in: ['$userIdString', activePlanUserIdsStrings] }
+                                        ]
+                                    },
+                                    1000, // HIGHEST priority for paid business posts (increased from 200)
+                                    0
+                                ]
+                            },
+                            // Followed users get high priority (but lower than paid business)
                             { $cond: [{ $in: ['$userId', feedUserIds] }, 100, 0] },
-                            // Recent posts get boost
+                            // Recent posts get boost (last 24 hours)
                             { $cond: [{ $gte: ['$createdAt', yesterday] }, 20, 0] },
                             // Engagement boost (capped at 30)
                             { $min: [
@@ -144,6 +240,14 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             },
             {
                 $unwind: '$userId'
+            },
+            {
+                // Remove temporary fields used for filtering
+                $project: {
+                    isBusinessAccount: 0,
+                    userIdString: 0,
+                    userInfo: 0
+                }
             },
             {
                 // Project only necessary fields to reduce payload size
@@ -213,6 +317,31 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             likedPostIds = new Set(userLikes.map(like => like.postId.toString()));
         }
 
+        // ✅ 3.5. Get all likes for posts with user details for "Liked by" preview
+        const allLikes = await Like.find({
+            postId: { $in: postIds }
+        })
+        .populate('userId', 'username fullName profileImageUrl')
+        .select('postId userId')
+        .lean();
+
+        // Group likes by postId
+        const likesByPost = new Map();
+        allLikes.forEach(like => {
+            if (like.userId) { // Filter out likes from deleted users
+                const postId = like.postId.toString();
+                if (!likesByPost.has(postId)) {
+                    likesByPost.set(postId, []);
+                }
+                likesByPost.get(postId).push({
+                    _id: like.userId._id,
+                    username: like.userId.username,
+                    fullName: like.userId.fullName,
+                    profileImageUrl: like.userId.profileImageUrl
+                });
+            }
+        });
+
         // ✅ 4. Get top comments efficiently (no nested queries)
         const allComments = await Comment.find({
             postId: { $in: postIds },
@@ -250,30 +379,74 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         });
 
         // ✅ 5. Format final response
-        const feedData = posts.map(post => ({
-            ...post,
-            comments: commentsByPost.get(post._id.toString()) || [],
-            isLikedBy: likedPostIds.has(post._id.toString())
-        }));
+        // Get user's followers and following for "Liked by" preview (reuse from earlier fetch if available)
+        let userFollowing = [];
+        let userFollowers = [];
+        if (userId) {
+            const user = await User.findById(userId)
+                .select('following followers')
+                .lean();
+            userFollowing = user?.following || [];
+            userFollowers = user?.followers || [];
+        }
+
+        const feedData = posts.map(post => {
+            const postIdStr = post._id.toString();
+            const likedByUsers = likesByPost.get(postIdStr) || [];
+
+            // Generate "Liked by" preview
+            const likedByPreview = getLikedByPreview(
+                likedByUsers,
+                userId,
+                userFollowing,
+                userFollowers
+            );
+
+            return {
+                ...post,
+                comments: commentsByPost.get(postIdStr) || [],
+                isLikedBy: likedPostIds.has(postIdStr),
+                likedByPreview: likedByPreview.likedByText ? {
+                    text: likedByPreview.likedByText,
+                    previewUser: likedByPreview.previewUser,
+                    othersCount: likedByPreview.othersCount
+                } : null
+            };
+        });
         // Enrich posts with review/rating data
         const enrichedFeedData = await enrichWithRatings(feedData, 'userId');
+        
+        // Add subscription badges to post authors
+        const feedDataWithBadges = await addBadgesToNestedUsers(enrichedFeedData);
 
         // Get total count for pagination (cached to avoid expensive count queries)
+        // Need to count posts excluding unpaid business posts
         let totalCount = posts.length; // Simplified - use actual count for better pagination
         if (page === 1 && posts.length === limit) {
             // Only do count query for first page if it's full
             try {
-                totalCount = await Post.countDocuments({
+                // Count all posts, then filter out unpaid business posts
+                const allPostsForCount = await Post.find({
                     contentType: { $in: ['normal', 'service', 'product', 'business'] },
-                    userId: { $nin: blockedUsers }
+                    userId: { $nin: blockedUsers, $in: viewableUserIds }
+                }).select('userId').lean();
+                
+                // Filter out unpaid business posts
+                const filteredPosts = allPostsForCount.filter(post => {
+                    const userIdStr = post.userId.toString();
+                    const isBusiness = businessUserIdsSet.has(userIdStr);
+                    if (!isBusiness) return true; // Keep non-business posts
+                    return activePlanUserIdsSet.has(userIdStr); // Keep only paid business posts
                 });
+                
+                totalCount = filteredPosts.length;
             } catch (error) {
                 totalCount = posts.length; // Fallback
             }
         }
 
         const response = new ApiResponse(200, {
-            feed: enrichedFeedData,
+            feed: feedDataWithBadges,
             pagination: {
                 page,
                 limit,

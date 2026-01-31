@@ -17,6 +17,10 @@ import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
+import { hasActivePaymentPlan, filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import Business from "../models/business.models.js";
 
 const extractMediaFiles = (files) => {
     const allFiles = [];
@@ -197,8 +201,14 @@ export const createProductPost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in product object for validation
+    const productWithLocation = {
+        ...parsedProduct,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedProduct = await validateDeliveryAndLocation(parsedProduct, "product");
+    const validatedProduct = await validateDeliveryAndLocation(productWithLocation, "product");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
@@ -342,8 +352,14 @@ export const createServicePost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in service object for validation
+    const serviceWithLocation = {
+        ...parsedService,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedService = await validateDeliveryAndLocation(parsedService, "service");
+    const validatedService = await validateDeliveryAndLocation(serviceWithLocation, "service");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
@@ -481,8 +497,14 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
     const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
 
+    // Include location in business object for validation
+    const businessWithLocation = {
+        ...parsedBusiness,
+        location: parsedLocation
+    };
+
     // Validate delivery options and location requirements
-    const validatedBusiness = await validateDeliveryAndLocation(parsedBusiness, "business");
+    const validatedBusiness = await validateDeliveryAndLocation(businessWithLocation, "business");
 
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
@@ -623,8 +645,11 @@ export const getAllPosts = asyncHandler(async (req, res) => {
 
     // Enrich posts with review/rating data
     visiblePosts = await enrichWithRatings(visiblePosts, 'userId');
+    
+    // Add subscription badges to post authors
+    const postsWithBadges = await addBadgesToNestedUsers(visiblePosts);
 
-    return res.status(200).json(new ApiResponse(200, visiblePosts, "Posts fetched successfully"));
+    return res.status(200).json(new ApiResponse(200, postsWithBadges, "Posts fetched successfully"));
 });
 
 // Get post by ID
@@ -655,6 +680,37 @@ export const getPostById = asyncHandler(async (req, res) => {
         throw new ApiError(403, "You don't have permission to view this post");
     }
 
+    // Check if post author is a business account with inactive payment
+    // Business posts are hidden from ALL users (including followers) if payment is inactive
+    // EXCEPT when viewing your own post
+    const postAuthorId = post.userId?._id || post.userId;
+    const postAuthor = await User.findById(postAuthorId).select('isBusinessProfile').lean();
+    const isViewingOwnPost = currentUser && currentUser._id.toString() === postAuthorId.toString();
+
+    if (postAuthor?.isBusinessProfile && !isViewingOwnPost) {
+        const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
+        if (!hasActivePlan) {
+            throw new ApiError(403, "This content is currently unavailable");
+        }
+    }
+
+    // Add visibility indicator if viewing own post on free plan
+    if (postAuthor?.isBusinessProfile && isViewingOwnPost) {
+        const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
+        if (!hasActivePlan) {
+            post.isVisibleToOthers = false;
+            post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+            post.upgradeMessage = {
+                title: "Upgrade Plan",
+                message: "These business posts are currently only visible to you. Upgrade to a paid plan for reach.",
+                ctaText: "Upgrade Now",
+                ctaUrl: "/business/select-plan"
+            };
+        } else {
+            post.isVisibleToOthers = true;
+        }
+    }
+
     // Fetch likes for this post and populate user details
     const likes = await Like.find({ postId: postId }).lean();
     const likedByUserIds = likes.map(like => like.userId.toString());
@@ -672,7 +728,30 @@ export const getPostById = asyncHandler(async (req, res) => {
     post.likedBy = likedByUsers;
     post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
 
-    return res.status(200).json(new ApiResponse(200, post, "Post fetched successfully"));
+    // Add "Liked by" preview
+    if (currentUser) {
+        const user = await User.findById(currentUser._id).select('following followers').lean();
+        const userFollowing = user?.following || [];
+        const userFollowers = user?.followers || [];
+
+        const likedByPreview = getLikedByPreview(
+            likedByUsers,
+            currentUser._id.toString(),
+            userFollowing,
+            userFollowers
+        );
+
+        post.likedByPreview = likedByPreview.likedByText ? {
+            text: likedByPreview.likedByText,
+            previewUser: likedByPreview.previewUser,
+            othersCount: likedByPreview.othersCount
+        } : null;
+    }
+
+    // Add subscription badge to post author
+    const [postWithBadge] = await addBadgesToNestedUsers([post]);
+
+    return res.status(200).json(new ApiResponse(200, postWithBadge, "Post fetched successfully"));
 });
 
 // Edit post
@@ -1472,15 +1551,74 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
     });
 
+    // Add "Liked by" preview to each post
+    const currentUserFollowData = await User.findById(userId).select('following followers').lean();
+    const userFollowing = currentUserFollowData?.following || [];
+    const userFollowers = currentUserFollowData?.followers || [];
+
+    postsWithThumbnails.forEach(post => {
+        const likedByUsers = post.likedBy || [];
+        const likedByPreview = getLikedByPreview(
+            likedByUsers,
+            currentUserId,
+            userFollowing,
+            userFollowers
+        );
+
+        post.likedByPreview = likedByPreview.likedByText ? {
+            text: likedByPreview.likedByText,
+            previewUser: likedByPreview.previewUser,
+            othersCount: likedByPreview.othersCount
+        } : null;
+    });
+
     // Enrich posts with review/rating data
     const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
+
+    // Add subscription badges to post authors
+    const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
+
+    // Check if user is a business account and add visibility indicators
+    let upgradeMessage = null;
+    let hiddenPostsCount = 0;
+    const { User } = await import('../models/user.models.js');
+    const currentUserData = await User.findById(userId).select('isBusinessProfile').lean();
+
+    if (currentUserData?.isBusinessProfile) {
+        const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+        const hasActivePlan = await hasActivePaymentPlan(userId);
+
+        if (!hasActivePlan) {
+            // User has free plan - add visibility indicators to all posts
+            hiddenPostsCount = postsWithBadges.length;
+            upgradeMessage = {
+                title: "Upgrade Plan",
+                message: "Your business posts are currently only visible to you. Upgrade to a paid plan.",
+                ctaText: "Upgrade Now",
+                ctaUrl: "/business/select-plan"
+            };
+
+            // Mark all posts as hidden from others
+            postsWithBadges.forEach(post => {
+                post.isVisibleToOthers = false;
+                post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+            });
+        } else {
+            // User has active plan - all posts are visible
+            postsWithBadges.forEach(post => {
+                post.isVisibleToOthers = true;
+            });
+        }
+    }
 
     return res.status(200).json(
         new ApiResponse(200, {
             totalPosts: total,
             page,
             totalPages: Math.ceil(total / limit),
-            posts: enrichedPosts
+            posts: postsWithBadges,
+            upgradeMessage: upgradeMessage,
+            hiddenPostsCount: hiddenPostsCount
         }, "User posts fetched successfully")
     );
 });
@@ -1561,13 +1699,61 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         // Filter posts based on privacy settings
         const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
 
+        // Check if viewer is viewing their own profile
+        const isViewingOwnProfile = currentUser && currentUser._id.toString() === userId.toString();
+
+        let postsAfterBusinessFilter;
+        let upgradeMessage = null;
+        let hiddenPostsCount = 0;
+
+        if (isViewingOwnProfile) {
+            // User is viewing their own profile - show all posts but add visibility indicators
+            postsAfterBusinessFilter = visiblePosts;
+
+            // Check if user is a business account with free plan
+            const { User } = await import('../models/user.models.js');
+            const profileUser = await User.findById(userId).select('isBusinessProfile').lean();
+
+            if (profileUser?.isBusinessProfile) {
+                const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+                const hasActivePlan = await hasActivePaymentPlan(userId);
+
+                if (!hasActivePlan) {
+                    // User has free plan - add visibility indicators to all posts
+                    hiddenPostsCount = visiblePosts.length;
+                    upgradeMessage = {
+                        title: "Upgrade Plan",
+                        message: "Your business posts are currently only visible to you. Upgrade to a paid plan.",
+                        ctaText: "Upgrade Now",
+                        ctaUrl: "/business/select-plan"
+                    };
+
+                    // Mark all posts as hidden from others
+                    postsAfterBusinessFilter.forEach(post => {
+                        post.isVisibleToOthers = false;
+                        post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+                    });
+                } else {
+                    // User has active plan - all posts are visible
+                    postsAfterBusinessFilter.forEach(post => {
+                        post.isVisibleToOthers = true;
+                    });
+                }
+            }
+        } else {
+            // Viewing someone else's profile - apply business filter
+            // Filter out business posts without active payment plans
+            // Business posts are hidden from ALL users (including followers) if payment is inactive
+            postsAfterBusinessFilter = await filterBusinessPostsByPaymentPlan(visiblePosts);
+        }
+
         const totalPosts = await Post.countDocuments(filter);
         const totalPages = Math.ceil(totalPosts / pageLimit);
-        const visiblePostsCount = visiblePosts.length;
+        const visiblePostsCount = postsAfterBusinessFilter.length;
 
         // Enhancement: Add isLikedBy and likedBy fields
         const currentUserId = req.user?._id?.toString();
-        const postIds = visiblePosts.map(post => post._id);
+        const postIds = postsAfterBusinessFilter.map(post => post._id);
         // Fetch all likes for these posts
         const likes = await Like.find({ postId: { $in: postIds } }).lean();
         // Map postId to array of userIds who liked it
@@ -1591,19 +1777,45 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
                 return acc;
             }, {});
         }
-        visiblePosts.forEach(post => {
+        postsAfterBusinessFilter.forEach(post => {
             const pid = post._id.toString();
             const likedByIds = likesByPost[pid] || [];
             post.likedBy = likedByIds.map(uid => likedUsersMap[uid]).filter(Boolean); // array of user details
             post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
         });
 
+        // Add "Liked by" preview to each post
+        if (currentUser) {
+            const currentUserData = await User.findById(currentUser._id).select('following followers').lean();
+            const userFollowing = currentUserData?.following || [];
+            const userFollowers = currentUserData?.followers || [];
+
+            postsAfterBusinessFilter.forEach(post => {
+                const likedByUsers = post.likedBy || [];
+                const likedByPreview = getLikedByPreview(
+                    likedByUsers,
+                    currentUserId,
+                    userFollowing,
+                    userFollowers
+                );
+
+                post.likedByPreview = likedByPreview.likedByText ? {
+                    text: likedByPreview.likedByText,
+                    previewUser: likedByPreview.previewUser,
+                    othersCount: likedByPreview.othersCount
+                } : null;
+            });
+        }
+
         // Enrich posts with review/rating data
-        const enrichedPosts = await enrichWithRatings(visiblePosts, 'userId');
+        const enrichedPosts = await enrichWithRatings(postsAfterBusinessFilter, 'userId');
+        
+        // Add subscription badges to post authors
+        const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
 
         return res.status(200).json(
             new ApiResponse(200, {
-                posts: enrichedPosts,
+                posts: postsWithBadges,
                 pagination: {
                     currentPage,
                     totalPages,
@@ -1615,7 +1827,10 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
                 filters: {
                     postType: postType || 'all',
                     contentType: contentType || 'all'
-                }
+                },
+                upgradeMessage: upgradeMessage,
+                hiddenPostsCount: hiddenPostsCount,
+                isViewingOwnProfile: isViewingOwnProfile
             }, "User profile posts fetched successfully")
         );
     } catch (error) {

@@ -1,10 +1,14 @@
 import Post from "../models/userPost.models.js";
 import Reel from "../models/reels.models.js";
+import Story from "../models/story.models.js";
 import { User } from "../models/user.models.js";
+import Business from "../models/business.models.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -39,6 +43,7 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
 
     // 1. Get reels (only when contentType=all, otherwise reels are included in posts query)
     let reels = [];
+    let paidBusinessStories = []; // Initialize paid business stories array
 
     if (contentType === "all") {
         // For types=all, get reels separately to avoid duplication
@@ -76,7 +81,38 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         .populate('userId', 'username profileImageUrl')
         .select('-analytics -__v -settings.customAudience');
 
-    // Shuffle all posts for variety
+    // Filter out unpaid business posts
+    const filteredPosts = await filterBusinessPostsByPaymentPlan(allPosts);
+
+    // Separate paid business posts and regular posts for interspersing
+    const paidBusinessPosts = [];
+    const regularPosts = [];
+    
+    // Get active payment plan user IDs
+    const activePaymentPlanUserIds = await Business.find({
+        subscriptionStatus: 'active',
+        plan: { $ne: 'plan1' }
+    }).select('userId').lean();
+    const activePlanUserIdsSet = new Set(activePaymentPlanUserIds.map(b => b.userId.toString()));
+    
+    // Get business user IDs
+    const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
+    const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+    filteredPosts.forEach(post => {
+        const userId = post.userId?._id || post.userId;
+        const userIdStr = userId ? userId.toString() : null;
+        const isBusiness = userIdStr && businessUserIdsSet.has(userIdStr);
+        const hasActivePlan = userIdStr && activePlanUserIdsSet.has(userIdStr);
+        
+        if (isBusiness && hasActivePlan) {
+            paidBusinessPosts.push(post);
+        } else {
+            regularPosts.push(post);
+        }
+    });
+
+    // Shuffle arrays separately
     function shuffleArray(arr) {
         return arr
             .map(value => ({ value, sort: Math.random() }))
@@ -84,7 +120,34 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
             .map(({ value }) => value);
     }
 
-    let posts = shuffleArray(allPosts);
+    const shuffledRegularPosts = shuffleArray(regularPosts);
+    const shuffledPaidBusinessPosts = shuffleArray(paidBusinessPosts);
+
+    // Intersperse paid business posts between regular posts
+    // Insert 1 paid business post every 3-5 regular posts
+    let posts = [];
+    let regularIndex = 0;
+    let paidIndex = 0;
+    const insertInterval = 4; // Insert paid post every 4 regular posts
+    
+    while (regularIndex < shuffledRegularPosts.length || paidIndex < shuffledPaidBusinessPosts.length) {
+        // Add regular posts
+        const regularBatch = shuffledRegularPosts.slice(regularIndex, regularIndex + insertInterval);
+        posts.push(...regularBatch);
+        regularIndex += insertInterval;
+        
+        // Add one paid business post if available
+        if (paidIndex < shuffledPaidBusinessPosts.length) {
+            posts.push(shuffledPaidBusinessPosts[paidIndex]);
+            paidIndex++;
+        }
+        
+        // Break if we've added enough posts
+        if (posts.length >= EXPLORE_LIMIT) {
+            posts = posts.slice(0, EXPLORE_LIMIT);
+            break;
+        }
+    }
 
     // Apply sorting if requested (but keep shuffled by default)
     if (sortBy !== "time") {
@@ -156,20 +219,32 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
 
         // Enrich reels with review/rating data
         reels = await enrichWithRatings(reels, 'userId');
+        
+        // Add subscription badges to reel authors
+        reels = await addBadgesToNestedUsers(reels);
     }
 
     // Posts already have populated user details from the query
 
     // Enrich posts with review/rating data
     posts = await enrichWithRatings(posts, 'userId');
+    
+    // Add subscription badges to post authors
+    posts = await addBadgesToNestedUsers(posts);
 
     // Combine and shuffle final feed based on query type
     let feed, totalAvailable, totalPages, hasNextPage;
 
     if (contentType === "all") {
-        // For contentType=all, combine reels and posts separately
+        // For contentType=all, combine reels, posts, and business stories
         feed = [
             ...reels.map(r => ({ ...r, _type: "reel", location: null })), // Legacy reels don't have location
+            ...paidBusinessStories.map(s => ({
+                ...s,
+                _type: "business_story",
+                postType: s.mediaType,
+                location: null
+            })),
             ...posts.map(p => {
                 const post = p.toObject ? p.toObject() : p;
 
@@ -262,6 +337,7 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
             limit,
             reelsCount: contentType === "all" ? reels.length : feed.filter(item => item._type === "reel").length,
             postsCount: contentType === "all" ? posts.length : feed.filter(item => item._type === "post").length,
+            businessStoriesCount: contentType === "all" ? paidBusinessStories.length : 0,
             total: feed.length,
             totalAvailable,
             totalPages,

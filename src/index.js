@@ -4,6 +4,7 @@ import { app } from './app.js';
 import http from 'http';
 import socketManager from './config/socket.js';
 import './config/firebase-admin.config.js'; // Initialize Firebase Admin on startup
+import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
 
 dotenv.config({
     path: './.env'
@@ -58,6 +59,10 @@ connectDB()
             console.log(`🌐 Health check: http://localhost:${PORT}/health`);
             console.log(`🌐 Debug endpoint: http://localhost:${PORT}/debug`);
             console.log('🎯 FinderNate Backend is ready to accept connections!');
+
+            // Start subscription expiry cron jobs
+            console.log('\n⏰ Starting subscription management cron jobs...');
+            startSubscriptionExpiryJob();
         });
 
         server.on('error', (error) => {

@@ -5,6 +5,7 @@ import Comment from "../models/comment.models.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
 import { createCommentNotification } from "./notification.controllers.js";
+import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
 
 // Create a new comment (or reply)
 export const createComment = asyncHandler(async (req, res) => {
@@ -72,11 +73,14 @@ export const createComment = asyncHandler(async (req, res) => {
 
     // Populate user and replyToUser before returning
     const populatedComment = await Comment.findById(comment._id)
-        .populate('userId', 'username fullName profileImageUrl bio location')
-        .populate('replyToUserId', 'username fullName profileImageUrl')
+        .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+        .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
         .lean();
 
-    return res.status(201).json(new ApiResponse(201, populatedComment, "Comment created successfully"));
+    // Add badges to user and replyToUser
+    const [commentWithBadges] = await addBadgesToNestedUsers([populatedComment]);
+
+    return res.status(201).json(new ApiResponse(201, commentWithBadges, "Comment created successfully"));
 });
 
 // Get all comments for a post
@@ -93,8 +97,8 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     // ✅ OPTIMIZED: Only fetch top-level comments (parentCommentId: null)
     const [comments, total] = await Promise.all([
         Comment.find({ postId, parentCommentId: null, isDeleted: false })
-            .populate('userId', 'username fullName profileImageUrl bio location')
-            .populate('replyToUserId', 'username fullName profileImageUrl')
+            .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+            .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
             .sort({ createdAt: 1 })
             .skip(skip)
             .limit(pageLimit)
@@ -162,12 +166,15 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
         };
     });
 
+    // Add badges to all comments
+    const commentsWithBadges = await addBadgesToNestedUsers(enrichedComments);
+
     return res.status(200).json(
         new ApiResponse(200, {
             totalComments: total,
             page: pageNum,
             totalPages: Math.ceil(total / pageLimit),
-            comments: enrichedComments
+            comments: commentsWithBadges
         }, "Comments fetched successfully")
     );
 });
@@ -347,14 +354,18 @@ export const getCommentById = asyncHandler(async (req, res) => {
         };
     });
 
+    // Add badges to main comment and all replies
+    const [commentWithBadges] = await addBadgesToNestedUsers([enrichedComment]);
+    const repliesWithBadges = await addBadgesToNestedUsers(enrichedReplies);
+
     return res.status(200).json(
         new ApiResponse(200, {
-            comment: enrichedComment,
+            comment: commentWithBadges,
             replies: {
                 totalReplies,
                 page: pageNum,
                 totalPages: Math.ceil(totalReplies / pageLimit),
-                comments: enrichedReplies
+                comments: repliesWithBadges
             }
         }, "Comment fetched successfully")
     );
@@ -369,9 +380,16 @@ export const updateComment = asyncHandler(async (req, res) => {
         commentId,
         { content, isEdited: true },
         { new: true }
-    );
+    )
+        .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+        .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
+        .lean();
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
-    return res.status(200).json(new ApiResponse(200, comment, "Comment updated successfully"));
+
+    // Add badges to user and replyToUser
+    const [commentWithBadges] = await addBadgesToNestedUsers([comment]);
+
+    return res.status(200).json(new ApiResponse(200, commentWithBadges, "Comment updated successfully"));
 });
 
 // Delete a comment (soft delete)
