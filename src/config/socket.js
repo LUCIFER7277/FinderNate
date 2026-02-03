@@ -352,6 +352,111 @@ class SocketManager {
                 });
             });
 
+            // ===== ENHANCED MESSAGING EVENTS =====
+
+            // Handle message reaction events (real-time sync)
+            socket.on('add_reaction', (data) => {
+                const { chatId, messageId, emoji, reaction } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_reaction_added', {
+                    chatId,
+                    messageId,
+                    emoji,
+                    reaction: reaction || {
+                        emoji,
+                        userId: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName,
+                        profileImageUrl: socket.user.profileImageUrl,
+                        createdAt: new Date()
+                    }
+                });
+            });
+
+            socket.on('remove_reaction', (data) => {
+                const { chatId, messageId, emoji } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_reaction_removed', {
+                    chatId,
+                    messageId,
+                    emoji,
+                    userId: socket.userId
+                });
+            });
+
+            // Handle message edit events (real-time sync)
+            socket.on('edit_message', (data) => {
+                const { chatId, messageId, newContent, editedAt, originalContent } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_edited', {
+                    chatId,
+                    messageId,
+                    newContent,
+                    editedAt: editedAt || new Date(),
+                    editedBy: {
+                        _id: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName
+                    },
+                    originalContent
+                });
+            });
+
+            // Handle message forward events (real-time notification)
+            socket.on('forward_message', (data) => {
+                const { targetChatIds, originalMessage, newMessages } = data;
+                
+                // Emit to each target chat
+                targetChatIds.forEach((targetChatId, index) => {
+                    socket.to(`chat:${targetChatId}`).emit('message_forwarded', {
+                        chatId: targetChatId,
+                        originalMessage,
+                        newMessage: newMessages?.[index],
+                        forwardedBy: {
+                            _id: socket.userId,
+                            username: socket.user.username,
+                            fullName: socket.user.fullName,
+                            profileImageUrl: socket.user.profileImageUrl
+                        },
+                        timestamp: new Date()
+                    });
+                });
+            });
+
+            // Handle message pin events (real-time sync)
+            socket.on('pin_message', (data) => {
+                const { chatId, messageId, isPinned, pinnedMessage } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_pin_toggled', {
+                    chatId,
+                    messageId,
+                    isPinned,
+                    pinnedMessage,
+                    pinnedBy: isPinned ? {
+                        _id: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName
+                    } : null,
+                    timestamp: new Date()
+                });
+            });
+
+            // Handle voice message recording notification (optional UX enhancement)
+            socket.on('recording_voice', (data) => {
+                const { chatId, isRecording } = data;
+                
+                socket.to(`chat:${chatId}`).emit('user_recording_voice', {
+                    chatId,
+                    userId: socket.userId,
+                    username: socket.user.username,
+                    fullName: socket.user.fullName,
+                    isRecording,
+                    timestamp: new Date()
+                });
+            });
+
+            // ===== END ENHANCED MESSAGING EVENTS =====
+
             // Handle online status
             socket.on('set_online_status', (status) => {
                 socket.to(`user_${socket.userId}`).emit('user_status_changed', {
