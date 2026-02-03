@@ -111,6 +111,54 @@ const MessageSchema = new mongoose.Schema({
         },
         productDescription: String,
         location: String
+    },
+    // 📤 Forwarding support
+    forwardedFrom: {
+        messageId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Message'
+        },
+        chatId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Chat'
+        },
+        originalSender: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        }
+    },
+    isForwarded: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    // 📌 Pinning support
+    isPinned: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    pinnedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
+    pinnedAt: Date,
+    // ✏️ Editing support
+    isEdited: {
+        type: Boolean,
+        default: false
+    },
+    originalContent: String, // Original content before edit
+    // 🎤 Voice message metadata
+    waveform: [Number], // For voice message visualization
+    // 🔗 Link preview cache
+    linkPreview: {
+        url: String,
+        title: String,
+        description: String,
+        image: String,
+        siteName: String,
+        fetchedAt: Date
     }
 }, {
     timestamps: true,
@@ -125,6 +173,8 @@ MessageSchema.index({ chatId: 1, isDeleted: 1, readBy: 1 }); // For unread count
 MessageSchema.index({ sender: 1, timestamp: -1 }); // For user's sent messages
 MessageSchema.index({ chatId: 1, 'deliveryStatus.userId': 1, 'deliveryStatus.status': 1 }); // For delivery status queries
 MessageSchema.index({ chatId: 1, deletedForEveryone: 1 }); // For deleted messages filtering
+MessageSchema.index({ chatId: 1, isPinned: 1, pinnedAt: -1 }); // For pinned messages queries
+MessageSchema.index({ chatId: 1, isForwarded: 1 }); // For forwarded messages queries
 
 // Virtual for unread status (per user)
 MessageSchema.virtual('isUnread').get(function () {

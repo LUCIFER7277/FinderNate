@@ -18,7 +18,14 @@ import {
     searchMessages,
     acceptChatRequest,
     declineChatRequest,
-    updateChatTheme
+    updateChatTheme,
+    // Enhanced messaging features
+    addReaction,
+    removeReaction,
+    editMessage,
+    forwardMessage,
+    togglePinMessage,
+    getPinnedMessages
 } from '../controllers/chat.controllers.js';
 
 const router = express.Router();
@@ -65,6 +72,24 @@ router.delete('/:chatId/messages/:messageId/for-me', deleteMessageForMe);
 
 // Restore a deleted message
 router.patch('/:chatId/messages/:messageId/restore', restoreMessage);
+
+// ==================== ENHANCED MESSAGING FEATURES ====================
+
+// Message reactions
+router.post('/:chatId/messages/:messageId/reactions', addReaction);
+router.delete('/:chatId/messages/:messageId/reactions', removeReaction);
+
+// Edit message (within 24 hours)
+router.patch('/:chatId/messages/:messageId/edit', editMessage);
+
+// Forward message to other chats
+router.post('/:chatId/messages/:messageId/forward', forwardMessage);
+
+// Pin/Unpin messages
+router.patch('/:chatId/messages/:messageId/pin', togglePinMessage);
+router.get('/:chatId/pinned', getPinnedMessages);
+
+// ==================== END ENHANCED MESSAGING FEATURES ====================
 
 // Typing indicators
 router.post('/:chatId/typing/start', startTyping);

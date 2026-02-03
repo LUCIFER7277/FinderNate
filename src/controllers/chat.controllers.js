@@ -1812,4 +1812,418 @@ export const updateChatTheme = asyncHandler(async (req, res) => {
     return res.status(200).json(
         new ApiResponse(200, populatedChat, 'Chat theme updated successfully')
     );
+});
+
+// ==================== ENHANCED MESSAGING FEATURES ====================
+
+// Add reaction to a message
+export const addReaction = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+    const { emoji } = req.body;
+
+    if (!emoji) {
+        throw new ApiError(400, 'Emoji is required');
+    }
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // Find the message
+    const message = await Message.findOne({
+        _id: messageId,
+        chatId,
+        deletedForEveryone: { $ne: true }
+    });
+
+    if (!message) {
+        throw new ApiError(404, 'Message not found');
+    }
+
+    // Check if user already reacted with this emoji
+    const existingReactionIndex = message.reactions.findIndex(
+        r => r.user.toString() === currentUserId.toString()
+    );
+
+    if (existingReactionIndex !== -1) {
+        // Update existing reaction
+        message.reactions[existingReactionIndex].emoji = emoji;
+        message.reactions[existingReactionIndex].timestamp = new Date();
+    } else {
+        // Add new reaction
+        message.reactions.push({
+            user: currentUserId,
+            emoji,
+            timestamp: new Date()
+        });
+    }
+
+    await message.save();
+
+    // Populate and return
+    const populatedMessage = await Message.findById(messageId)
+        .populate('sender', 'username fullName profileImageUrl')
+        .populate('reactions.user', 'username fullName profileImageUrl')
+        .lean();
+
+    // Emit real-time event
+    safeEmitToChat(chatId, 'message_reaction_added', {
+        chatId,
+        messageId,
+        reaction: {
+            user: {
+                _id: currentUserId,
+                username: req.user.username,
+                fullName: req.user.fullName,
+                profileImageUrl: req.user.profileImageUrl
+            },
+            emoji,
+            timestamp: new Date()
+        }
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, populatedMessage, 'Reaction added successfully')
+    );
+});
+
+// Remove reaction from a message
+export const removeReaction = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // Find the message and remove the user's reaction
+    const message = await Message.findOneAndUpdate(
+        {
+            _id: messageId,
+            chatId
+        },
+        {
+            $pull: { reactions: { user: currentUserId } }
+        },
+        { new: true }
+    ).populate('sender', 'username fullName profileImageUrl')
+     .populate('reactions.user', 'username fullName profileImageUrl');
+
+    if (!message) {
+        throw new ApiError(404, 'Message not found');
+    }
+
+    // Emit real-time event
+    safeEmitToChat(chatId, 'message_reaction_removed', {
+        chatId,
+        messageId,
+        userId: currentUserId.toString()
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, message, 'Reaction removed successfully')
+    );
+});
+
+// Edit a message (within 24 hours)
+export const editMessage = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+    const { message: newContent } = req.body;
+
+    if (!newContent || newContent.trim().length === 0) {
+        throw new ApiError(400, 'Message content is required');
+    }
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // Find the message
+    const message = await Message.findOne({
+        _id: messageId,
+        chatId,
+        sender: currentUserId,
+        deletedForEveryone: { $ne: true }
+    });
+
+    if (!message) {
+        throw new ApiError(404, 'Message not found or you are not the sender');
+    }
+
+    // Check if message is within 24 hours
+    const messageAge = Date.now() - new Date(message.timestamp).getTime();
+    const twentyFourHours = 24 * 60 * 60 * 1000;
+
+    if (messageAge > twentyFourHours) {
+        throw new ApiError(400, 'Cannot edit messages older than 24 hours');
+    }
+
+    // Store original message if not already stored
+    if (!message.originalMessage) {
+        message.originalMessage = message.message;
+    }
+
+    // Update message
+    message.message = newContent.trim();
+    message.editedAt = new Date();
+
+    await message.save();
+
+    // Populate and return
+    const populatedMessage = await Message.findById(messageId)
+        .populate('sender', 'username fullName profileImageUrl')
+        .populate('reactions.user', 'username fullName profileImageUrl')
+        .lean();
+
+    // Update chat's last message if this was the last message
+    if (chat.lastMessageId && chat.lastMessageId.toString() === messageId) {
+        chat.lastMessage.message = newContent.trim();
+        await chat.save();
+    }
+
+    // Emit real-time event
+    safeEmitToChat(chatId, 'message_edited', {
+        chatId,
+        messageId,
+        newContent: newContent.trim(),
+        editedAt: message.editedAt,
+        editedBy: {
+            _id: currentUserId,
+            username: req.user.username,
+            fullName: req.user.fullName
+        }
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, populatedMessage, 'Message edited successfully')
+    );
+});
+
+// Forward a message to another chat
+export const forwardMessage = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+    const { targetChatIds } = req.body;
+
+    if (!targetChatIds || !Array.isArray(targetChatIds) || targetChatIds.length === 0) {
+        throw new ApiError(400, 'Target chat IDs are required');
+    }
+
+    // Verify user is participant in the source chat
+    const sourceChat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!sourceChat) {
+        throw new ApiError(404, 'Source chat not found or access denied');
+    }
+
+    // Find the original message
+    const originalMessage = await Message.findOne({
+        _id: messageId,
+        chatId,
+        deletedForEveryone: { $ne: true }
+    }).populate('sender', 'username fullName');
+
+    if (!originalMessage) {
+        throw new ApiError(404, 'Message not found');
+    }
+
+    const forwardedMessages = [];
+
+    for (const targetChatId of targetChatIds) {
+        // Verify user is participant in the target chat
+        const targetChat = await Chat.findOne({
+            _id: targetChatId,
+            participants: currentUserId
+        });
+
+        if (!targetChat) {
+            continue; // Skip chats where user is not a participant
+        }
+
+        // Get all recipients in target chat (participants except sender)
+        const recipients = targetChat.participants.filter(
+            p => p.toString() !== currentUserId.toString()
+        );
+
+        // Create forwarded message
+        const forwardedMessage = await Message.create({
+            chatId: targetChatId,
+            sender: currentUserId,
+            message: originalMessage.message,
+            messageType: originalMessage.messageType,
+            mediaUrl: originalMessage.mediaUrl,
+            fileName: originalMessage.fileName,
+            fileSize: originalMessage.fileSize,
+            duration: originalMessage.duration,
+            timestamp: new Date(),
+            readBy: [currentUserId],
+            deliveryStatus: recipients.map(recipientId => ({
+                userId: recipientId,
+                status: 'sent',
+                deliveredAt: null,
+                seenAt: null
+            })),
+            forwardedFrom: {
+                messageId: originalMessage._id,
+                chatId: chatId,
+                originalSender: originalMessage.sender._id
+            }
+        });
+
+        // Update target chat's last message
+        targetChat.lastMessageAt = new Date();
+        targetChat.lastMessage = {
+            sender: currentUserId,
+            message: originalMessage.message,
+            timestamp: new Date()
+        };
+        targetChat.lastMessageId = forwardedMessage._id;
+        await targetChat.save();
+
+        // Populate the message
+        const populatedMessage = await Message.findById(forwardedMessage._id)
+            .populate('sender', 'username fullName profileImageUrl')
+            .lean();
+
+        forwardedMessages.push(populatedMessage);
+
+        // Emit to target chat
+        safeEmitToChat(targetChatId, 'new_message', {
+            chatId: targetChatId,
+            message: {
+                ...populatedMessage,
+                isForwarded: true
+            }
+        });
+    }
+
+    return res.status(201).json(
+        new ApiResponse(201, {
+            forwardedCount: forwardedMessages.length,
+            messages: forwardedMessages
+        }, 'Message forwarded successfully')
+    );
+});
+
+// Pin/Unpin a message
+export const togglePinMessage = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, messageId } = req.params;
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // Find the message
+    const message = await Message.findOne({
+        _id: messageId,
+        chatId,
+        deletedForEveryone: { $ne: true }
+    });
+
+    if (!message) {
+        throw new ApiError(404, 'Message not found');
+    }
+
+    // Initialize pinnedMessages if not exists
+    if (!chat.pinnedMessages) {
+        chat.pinnedMessages = [];
+    }
+
+    const isPinned = chat.pinnedMessages.some(id => id.toString() === messageId);
+
+    if (isPinned) {
+        // Unpin
+        chat.pinnedMessages = chat.pinnedMessages.filter(id => id.toString() !== messageId);
+    } else {
+        // Pin (limit to 3 pinned messages)
+        if (chat.pinnedMessages.length >= 3) {
+            throw new ApiError(400, 'Maximum 3 messages can be pinned. Unpin a message first.');
+        }
+        chat.pinnedMessages.push(messageId);
+    }
+
+    await chat.save();
+
+    // Emit real-time event
+    safeEmitToChat(chatId, 'message_pin_toggled', {
+        chatId,
+        messageId,
+        isPinned: !isPinned,
+        pinnedBy: {
+            _id: currentUserId,
+            username: req.user.username,
+            fullName: req.user.fullName
+        }
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            messageId,
+            isPinned: !isPinned,
+            pinnedMessages: chat.pinnedMessages
+        }, isPinned ? 'Message unpinned successfully' : 'Message pinned successfully')
+    );
+});
+
+// Get pinned messages in a chat
+export const getPinnedMessages = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+
+    // Verify user is participant in the chat
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: currentUserId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    if (!chat.pinnedMessages || chat.pinnedMessages.length === 0) {
+        return res.status(200).json(
+            new ApiResponse(200, { messages: [] }, 'No pinned messages')
+        );
+    }
+
+    const pinnedMessages = await Message.find({
+        _id: { $in: chat.pinnedMessages },
+        deletedForEveryone: { $ne: true }
+    })
+        .populate('sender', 'username fullName profileImageUrl')
+        .lean();
+
+    return res.status(200).json(
+        new ApiResponse(200, { messages: pinnedMessages }, 'Pinned messages fetched successfully')
+    );
 }); 
