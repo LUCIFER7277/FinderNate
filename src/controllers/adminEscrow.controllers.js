@@ -227,13 +227,33 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
     const { reason } = req.body;
 
-    const order = await Order.findById(orderId);
+    const order = await Order.findById(orderId)
+        .populate('sellerId', 'fullName username profileImageUrl businessProfileId');
+
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.paymentStatus !== 'held') {
         throw new ApiError(400, "Payment is not in held status");
+    }
+
+    // Get seller's bank details including QR code
+    let sellerBankDetails = null;
+    if (order.sellerId?.businessProfileId) {
+        const Business = (await import('../models/business.models.js')).default;
+        const business = await Business.findById(order.sellerId.businessProfileId).select('bankDetails');
+
+        if (business?.bankDetails) {
+            sellerBankDetails = {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: business.bankDetails.accountNumber,
+                ifscCode: business.bankDetails.ifscCode,
+                upiId: business.bankDetails.upiId,
+                paymentQRCode: business.bankDetails.paymentQRCode
+            };
+        }
     }
 
     const escrowWallet = await EscrowWallet.getWallet();
@@ -246,7 +266,10 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
     await order.save();
 
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Payment released manually")
+        new ApiResponse(200, {
+            order,
+            sellerBankDetails
+        }, "Payment released manually")
     );
 });
 
@@ -275,6 +298,54 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { order }, "Payment refunded manually")
+    );
+});
+
+// Get seller bank details by order ID (Admin only)
+export const getSellerBankDetailsByOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId)
+        .populate('sellerId', 'fullName username businessProfileId');
+
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (!order.sellerId) {
+        throw new ApiError(404, "Seller not found for this order");
+    }
+
+    // Get seller's bank details including QR code
+    let bankDetails = null;
+    if (order.sellerId.businessProfileId) {
+        const Business = (await import('../models/business.models.js')).default;
+        const business = await Business.findById(order.sellerId.businessProfileId).select('bankDetails');
+
+        if (business?.bankDetails) {
+            bankDetails = {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: business.bankDetails.accountNumber,
+                ifscCode: business.bankDetails.ifscCode,
+                accountType: business.bankDetails.accountType,
+                upiId: business.bankDetails.upiId,
+                branchName: business.bankDetails.branchName,
+                paymentQRCode: business.bankDetails.paymentQRCode,
+                isVerified: business.bankDetails.isVerified
+            };
+        }
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            sellerInfo: {
+                fullName: order.sellerId.fullName,
+                username: order.sellerId.username
+            },
+            bankDetails,
+            hasBankDetails: !!bankDetails
+        }, "Seller bank details fetched successfully")
     );
 });
 

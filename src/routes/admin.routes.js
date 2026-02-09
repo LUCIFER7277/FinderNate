@@ -46,7 +46,8 @@ import {
     manualReleasePayment,
     manualRefundPayment,
     getOrderAnalytics,
-    manualConfirmPayment
+    manualConfirmPayment,
+    getSellerBankDetailsByOrder
 } from "../controllers/adminEscrow.controllers.js";
 
 import {
@@ -187,6 +188,7 @@ router.route("/escrow/disputes/:orderId/resolve").post(resolveDispute);
 router.route("/escrow/orders/:orderId/release").post(manualReleasePayment);
 router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
 router.route("/escrow/orders/:orderId/confirm").post(manualConfirmPayment);
+router.route("/escrow/orders/:orderId/seller-bank-details").get(getSellerBankDetailsByOrder);
 router.route("/escrow/analytics").get(getOrderAnalytics);
 
 export default router;
