@@ -1405,6 +1405,32 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Business profile not found");
     }
 
+    // Handle QR code upload if file is provided
+    let paymentQRCodeUrl = business.bankDetails?.paymentQRCode; // Keep existing QR code by default
+    if (req.file) {
+        // Import upload service
+        const { uploadBufferToBunny } = await import('../utlis/bunny.js');
+
+        // Validate file type (only images)
+        const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        if (!allowedImageTypes.includes(req.file.mimetype)) {
+            throw new ApiError(400, "Payment QR code must be an image (JPEG, PNG, or WebP)");
+        }
+
+        // Upload to Bunny CDN
+        const folder = 'payment-qr-codes';
+        const fileExtension = req.file.originalname.split('.').pop();
+        const fileName = `qr-${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExtension}`;
+
+        const uploadResult = await uploadBufferToBunny(req.file.buffer, folder, fileName);
+
+        if (!uploadResult || !uploadResult.url) {
+            throw new ApiError(500, "Failed to upload payment QR code to storage");
+        }
+
+        paymentQRCodeUrl = uploadResult.url;
+    }
+
     // Update bank details
     business.bankDetails = {
         accountHolderName: accountHolderName.trim(),
@@ -1414,6 +1440,7 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
         accountType: accountType.toLowerCase(),
         upiId: upiId ? upiId.toLowerCase() : business.bankDetails?.upiId,
         branchName: branchName ? branchName.trim() : business.bankDetails?.branchName,
+        paymentQRCode: paymentQRCodeUrl,
         isVerified: false, // Reset verification status when details are updated
         verifiedAt: null,
         verifiedBy: null,
@@ -1425,15 +1452,16 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
     return res.status(200).json(
         new ApiResponse(200, {
             bankDetails: {
-                accountHolderName: business.bankDetails.accountHolderName,
-                bankName: business.bankDetails.bankName,
+                accountHolderName: business.bankDetails.accountHolderName || '',
+                bankName: business.bankDetails.bankName || '',
                 accountNumber: '****' + business.bankDetails.accountNumber.slice(-4), // Mask account number
-                ifscCode: business.bankDetails.ifscCode,
-                accountType: business.bankDetails.accountType,
-                upiId: business.bankDetails.upiId,
-                branchName: business.bankDetails.branchName,
-                isVerified: business.bankDetails.isVerified,
-                updatedAt: business.bankDetails.updatedAt
+                ifscCode: business.bankDetails.ifscCode || '',
+                accountType: business.bankDetails.accountType || '',
+                upiId: business.bankDetails.upiId || '',
+                branchName: business.bankDetails.branchName || '',
+                paymentQRCode: business.bankDetails.paymentQRCode || null,
+                isVerified: business.bankDetails.isVerified || false,
+                updatedAt: business.bankDetails.updatedAt || null
             }
         }, "Bank details updated successfully")
     );
@@ -1468,23 +1496,24 @@ export const getBankDetails = asyncHandler(async (req, res) => {
 
     // Safely mask account number
     const accountNumber = business.bankDetails.accountNumber || '';
-    const maskedAccountNumber = accountNumber.length >= 4 
+    const maskedAccountNumber = accountNumber.length >= 4
         ? '****' + accountNumber.slice(-4)
         : accountNumber;
 
     return res.status(200).json(
         new ApiResponse(200, {
             bankDetails: {
-                accountHolderName: business.bankDetails.accountHolderName,
-                bankName: business.bankDetails.bankName,
+                accountHolderName: business.bankDetails.accountHolderName || '',
+                bankName: business.bankDetails.bankName || '',
                 accountNumber: maskedAccountNumber,
-                ifscCode: business.bankDetails.ifscCode,
-                accountType: business.bankDetails.accountType,
-                upiId: business.bankDetails.upiId,
-                branchName: business.bankDetails.branchName,
-                isVerified: business.bankDetails.isVerified,
-                verifiedAt: business.bankDetails.verifiedAt,
-                updatedAt: business.bankDetails.updatedAt
+                ifscCode: business.bankDetails.ifscCode || '',
+                accountType: business.bankDetails.accountType || '',
+                upiId: business.bankDetails.upiId || '',
+                branchName: business.bankDetails.branchName || '',
+                paymentQRCode: business.bankDetails.paymentQRCode || null,
+                isVerified: business.bankDetails.isVerified || false,
+                verifiedAt: business.bankDetails.verifiedAt || null,
+                updatedAt: business.bankDetails.updatedAt || null
             },
             hasBankDetails: true
         }, "Bank details retrieved successfully")

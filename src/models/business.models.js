@@ -88,6 +88,7 @@ const BusinessSchema = new mongoose.Schema({
         },
         upiId: { type: String, lowercase: true },
         branchName: { type: String, trim: true },
+        paymentQRCode: { type: String }, // URL to QR code image for manual payments
         isVerified: { type: Boolean, default: false },
         verifiedAt: { type: Date },
         verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
