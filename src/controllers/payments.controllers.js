@@ -136,16 +136,23 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
         paymentStatus: 'pending'
     });
 
-    const razorpayOrder = await razorpay.orders.create({
-        amount: paymentLink.amount * 100,
-        currency: 'INR',
-        receipt: order.orderNumber,
-        notes: {
-            orderId: order._id.toString(),
-            buyerId: buyerId.toString(),
-            sellerId: paymentLink.sellerId.toString()
-        }
-    });
+    let razorpayOrder;
+    try {
+        razorpayOrder = await razorpay.orders.create({
+            amount: paymentLink.amount * 100,
+            currency: 'INR',
+            receipt: order.orderNumber,
+            notes: {
+                orderId: order._id.toString(),
+                buyerId: buyerId.toString(),
+                sellerId: paymentLink.sellerId.toString()
+            }
+        });
+    } catch (razorpayError) {
+        await Order.findByIdAndDelete(order._id);
+        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
+        throw new ApiError(400, errorMsg);
+    }
 
     order.razorpayOrderId = razorpayOrder.id;
     await order.save();
@@ -554,18 +561,26 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
     });
 
     // Create Razorpay order
-    const razorpayOrder = await razorpay.orders.create({
-        amount: numericAmount * 100, // Razorpay expects amount in paise
-        currency: 'INR',
-        receipt: order.orderNumber,
-        notes: {
-            orderId: order._id.toString(),
-            buyerId: buyerId?.toString() || 'guest',
-            sellerId: seller._id.toString(),
-            postId: postId,
-            isShareable: 'true'
-        }
-    });
+    let razorpayOrder;
+    try {
+        razorpayOrder = await razorpay.orders.create({
+            amount: numericAmount * 100, // Razorpay expects amount in paise
+            currency: 'INR',
+            receipt: order.orderNumber,
+            notes: {
+                orderId: order._id.toString(),
+                buyerId: buyerId?.toString() || 'guest',
+                sellerId: seller._id.toString(),
+                postId: postId,
+                isShareable: 'true'
+            }
+        });
+    } catch (razorpayError) {
+        // Clean up the order since Razorpay failed
+        await Order.findByIdAndDelete(order._id);
+        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
+        throw new ApiError(400, errorMsg);
+    }
 
     order.razorpayOrderId = razorpayOrder.id;
     await order.save();
