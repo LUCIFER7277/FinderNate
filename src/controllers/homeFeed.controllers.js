@@ -256,6 +256,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     userId: 1,
                     contentType: 1,
                     caption: 1,
+                    description: 1,
                     media: 1,
                     'settings.privacy': 1,
                     'settings.visibility': 1,
