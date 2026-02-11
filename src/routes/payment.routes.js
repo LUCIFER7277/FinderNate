@@ -48,6 +48,6 @@ router.post("/create-order", createRazorpayOrder);
 router.post("/verify", verifyPayment);
 
 // Buyer shows interest - auto-creates payment link & sends message in chat
-router.post("/interest", showProductInterest);
+// router.post("/interest", showProductInterest);
 
 export default router;
