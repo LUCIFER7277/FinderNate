@@ -12,6 +12,15 @@ import Chat from "../models/chat.models.js";
 import Message from "../models/message.models.js";
 import socketManager from "../config/socket.js";
 
+// Dynamically resolve frontend URL from request origin (works in both dev and production)
+const getFrontendUrl = (req) => {
+    const origin = req?.headers?.origin;
+    if (origin && origin !== 'undefined' && origin !== 'null') {
+        return origin.replace(/\/$/, '');
+    }
+    return process.env.FRONTEND_URL || 'http://localhost:4000';
+};
+
 const generateOrderNumber = () => {
     const timestamp = Date.now().toString(36).toUpperCase();
     const random = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -47,6 +56,7 @@ export const createPaymentLink = asyncHandler(async (req, res) => {
     }
 
     const linkId = generateLinkId();
+    const frontendUrl = getFrontendUrl(req);
     const paymentLink = await PaymentLink.create({
         linkId,
         sellerId,
@@ -56,8 +66,8 @@ export const createPaymentLink = asyncHandler(async (req, res) => {
         productDetails,
         amount: productDetails.price,
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        paymentUrl: `${process.env.FRONTEND_URL}/pay/${linkId}`,
-        shortUrl: `${process.env.FRONTEND_URL}/p/${linkId}`
+        paymentUrl: `${frontendUrl}/pay/${linkId}`,
+        shortUrl: `${frontendUrl}/p/${linkId}`
     });
 
     const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
@@ -331,6 +341,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
 
     // Create a unique link ID
     const linkId = generateLinkId();
+    const frontendUrl = getFrontendUrl(req);
 
     // Create the payment link
     const paymentLink = await PaymentLink.create({
@@ -340,8 +351,8 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         productDetails,
         amount: numericAmount,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days expiry
-        paymentUrl: `${process.env.FRONTEND_URL}/post/${postId}/pay/${numericAmount}`,
-        shortUrl: `${process.env.FRONTEND_URL}/p/${linkId}`,
+        paymentUrl: `${frontendUrl}/post/${postId}/pay/${numericAmount}`,
+        shortUrl: `${frontendUrl}/p/${linkId}`,
         isShareableLink: true
     });
 
@@ -521,6 +532,7 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
 
     if (!paymentLink) {
         const linkId = generateLinkId();
+        const frontendUrl = getFrontendUrl(req);
         paymentLink = await PaymentLink.create({
             linkId,
             sellerId: seller._id,
@@ -528,8 +540,8 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
             productDetails,
             amount: numericAmount,
             expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-            paymentUrl: `${process.env.FRONTEND_URL}/post/${postId}/pay/${numericAmount}`,
-            shortUrl: `${process.env.FRONTEND_URL}/p/${linkId}`,
+            paymentUrl: `${frontendUrl}/post/${postId}/pay/${numericAmount}`,
+            shortUrl: `${frontendUrl}/p/${linkId}`,
             isShareableLink: true
         });
     }
@@ -615,6 +627,12 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
 const safeEmitToChat = (chatId, event, data) => {
     if (socketManager.isReady()) {
         socketManager.emitToChat(chatId, event, data);
+    }
+};
+
+const safeEmitToUser = (userId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToUser(userId, event, data);
     }
 };
 
@@ -706,7 +724,8 @@ export const showProductInterest = asyncHandler(async (req, res) => {
     });
 
     const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
-    let messageSent = false;
+
+    const frontendUrl = getFrontendUrl(req);
 
     if (!paymentLink) {
         // Create new payment link
@@ -726,69 +745,85 @@ export const showProductInterest = asyncHandler(async (req, res) => {
             },
             amount: productPrice,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-            paymentUrl: `${process.env.FRONTEND_URL}/post/${postId}/pay/${productPrice}`,
-            shortUrl: `${process.env.FRONTEND_URL}/p/${linkId}`
+            paymentUrl: `${frontendUrl}/post/${postId}/pay/${productPrice}`,
+            shortUrl: `${frontendUrl}/p/${linkId}`
         });
-
-        // Auto-send payment link message in chat (from seller to buyer)
-        const paymentMessage = `💰 Pay for "${productName}" - ₹${productPrice}\n\nClick below to pay securely. Your payment will be held safely in escrow until you confirm delivery.`;
-
-        const recipients = chat.participants.filter(
-            p => p.toString() !== sellerId.toString()
-        );
-
-        const autoMessage = await Message.create({
-            chatId,
-            sender: sellerId, // Message appears from seller (automated)
-            message: paymentMessage,
-            messageType: 'payment_link',
-            timestamp: new Date(),
-            readBy: [sellerId],
-            deliveryStatus: recipients.map(recipientId => ({
-                userId: recipientId,
-                status: 'sent',
-                deliveredAt: null,
-                seenAt: null
-            })),
-            productReference: {
-                postId: post._id,
-                productName,
-                productImage: productImages[0] || '',
-                productPrice,
-                productType,
-                productDescription,
-            },
-            linkPreview: {
-                url: paymentLink.paymentUrl,
-                title: `Pay ₹${productPrice} for ${productName}`,
-                description: productDescription,
-                image: productImages[0] || '',
-                siteName: 'Findernate Pay'
-            }
-        });
-
-        // Update chat's last message
-        chat.lastMessageAt = new Date();
-        chat.lastMessage = {
-            sender: sellerId,
-            message: paymentMessage,
-            timestamp: new Date()
-        };
-        chat.lastMessageId = autoMessage._id;
-        await chat.save();
-
-        // Populate and emit via socket
-        const populatedMessage = await Message.findById(autoMessage._id)
-            .populate('sender', 'username fullName profileImageUrl')
-            .lean();
-
-        safeEmitToChat(chatId, 'new_message', {
-            chatId,
-            message: populatedMessage
-        });
-
-        messageSent = true;
+    } else if (paymentLink.amount !== productPrice) {
+        // Update existing payment link if price has changed
+        paymentLink.productDetails.name = productName;
+        paymentLink.productDetails.description = productDescription;
+        paymentLink.productDetails.price = productPrice;
+        paymentLink.productDetails.images = productImages;
+        paymentLink.productDetails.category = productCategory;
+        paymentLink.amount = productPrice;
+        paymentLink.paymentUrl = `${frontendUrl}/post/${postId}/pay/${productPrice}`;
+        await paymentLink.save();
     }
+
+    // Always send payment link message in chat (every time buyer shows interest)
+    const paymentMessage = `💰 Pay for "${productName}" - ₹${productPrice}\n\nClick below to pay securely. Your payment will be held safely in escrow until you confirm delivery.`;
+
+    const recipients = chat.participants.filter(
+        p => p.toString() !== sellerId.toString()
+    );
+
+    const autoMessage = await Message.create({
+        chatId,
+        sender: sellerId, // Message appears from seller (automated)
+        message: paymentMessage,
+        messageType: 'payment_link',
+        timestamp: new Date(),
+        readBy: [sellerId],
+        deliveryStatus: recipients.map(recipientId => ({
+            userId: recipientId,
+            status: 'sent',
+            deliveredAt: null,
+            seenAt: null
+        })),
+        productReference: {
+            postId: post._id,
+            productName,
+            productImage: productImages[0] || '',
+            productPrice,
+            productType,
+            productDescription,
+        },
+        linkPreview: {
+            url: paymentLink.paymentUrl,
+            title: `Pay ₹${productPrice} for ${productName}`,
+            description: productDescription,
+            image: productImages[0] || '',
+            siteName: 'Findernate Pay'
+        }
+    });
+
+    // Update chat's last message
+    chat.lastMessageAt = new Date();
+    chat.lastMessage = {
+        sender: sellerId,
+        message: paymentMessage,
+        timestamp: new Date()
+    };
+    chat.lastMessageId = autoMessage._id;
+    await chat.save();
+
+    // Populate and emit via socket
+    const populatedMessage = await Message.findById(autoMessage._id)
+        .populate('sender', 'username fullName profileImageUrl')
+        .lean();
+
+    // Emit to chat room (for users already in the room)
+    safeEmitToChat(chatId, 'new_message', {
+        chatId,
+        message: populatedMessage
+    });
+
+    // Also emit directly to buyer's user room to ensure they receive the payment link
+    // message even if they haven't joined the chat socket room yet
+    safeEmitToUser(buyerId.toString(), 'new_message', {
+        chatId,
+        message: populatedMessage
+    });
 
     return res.status(200).json(
         new ApiResponse(200, {
@@ -823,11 +858,9 @@ export const showProductInterest = asyncHandler(async (req, res) => {
                     avatar: seller?.profileImageUrl
                 }
             },
-            messageSent,
-            existing: !messageSent,
-            message: messageSent
-                ? "Payment link sent to buyer in chat"
-                : "Payment link already exists for this product in this chat"
-        }, messageSent ? "Payment link created and sent" : "Existing payment link found")
+            autoMessage: populatedMessage,
+            messageSent: true,
+            message: "Payment link sent to buyer in chat"
+        }, "Payment link created and sent")
     );
 });

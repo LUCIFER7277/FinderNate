@@ -12,14 +12,14 @@ import { filterPostsByPrivacy, canViewPost } from "../utlis/postPrivacy.js";
 import { User } from "../models/user.models.js";
 import Follower from "../models/follower.models.js";
 import Like from "../models/like.models.js";
-import { CacheManager } from "../utlis/cache.utils.js";
+import { CacheManager, FeedCacheManager } from "../utlis/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
 import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
-import { hasActivePaymentPlan, filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import { hasActivePaymentPlan } from "../utlis/businessPlan.utils.js";
 import Business from "../models/business.models.js";
 
 const extractMediaFiles = (files) => {
@@ -687,27 +687,23 @@ export const getPostById = asyncHandler(async (req, res) => {
     const postAuthor = await User.findById(postAuthorId).select('isBusinessProfile').lean();
     const isViewingOwnPost = currentUser && currentUser._id.toString() === postAuthorId.toString();
 
-    if (postAuthor?.isBusinessProfile && !isViewingOwnPost) {
-        const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
-        if (!hasActivePlan) {
-            throw new ApiError(403, "This content is currently unavailable");
-        }
-    }
+    // Business posts on free plan are visible on profile/direct view
+    // They are only hidden from home feed, not from direct access
 
     // Add visibility indicator if viewing own post on free plan
     if (postAuthor?.isBusinessProfile && isViewingOwnPost) {
         const hasActivePlan = await hasActivePaymentPlan(postAuthorId);
         if (!hasActivePlan) {
-            post.isVisibleToOthers = false;
-            post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+            post.isHiddenFromFeed = true;
+            post.visibilityMessage = "Hidden from home feed - Upgrade to show in feed";
             post.upgradeMessage = {
                 title: "Upgrade Plan",
-                message: "These business posts are currently only visible to you. Upgrade to a paid plan for reach.",
+                message: "Your business posts are visible on your profile but hidden from the home feed. Upgrade to a paid plan for more reach.",
                 ctaText: "Upgrade Now",
                 ctaUrl: "/business/select-plan"
             };
         } else {
-            post.isVisibleToOthers = true;
+            post.isHiddenFromFeed = false;
         }
     }
 
@@ -818,32 +814,33 @@ export const editPost = asyncHandler(async (req, res) => {
     if (parsedMentions) updateData.mentions = parsedMentions;
 
     // Update customization based on content type
-    const customization = { ...post.customization };
+    // Convert Mongoose subdocument to plain object to avoid serialization issues with $set
+    const customization = post.customization?.toObject?.() || { ...post.customization } || {};
 
     if (post.contentType === "normal") {
         customization.normal = {
-            ...customization.normal,
+            ...(customization.normal || {}),
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "product" && parsedProduct) {
-        customization.product = { ...customization.product?.toObject?.() || customization.product || {}, ...parsedProduct };
+        customization.product = { ...(customization.product || {}), ...parsedProduct };
         customization.normal = {
-            ...customization.normal,
+            ...(customization.normal || {}),
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "service" && parsedService) {
-        customization.service = { ...customization.service?.toObject?.() || customization.service || {}, ...parsedService };
+        customization.service = { ...(customization.service || {}), ...parsedService };
         customization.normal = {
-            ...customization.normal,
+            ...(customization.normal || {}),
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "business" && parsedBusiness) {
-        customization.business = { ...customization.business?.toObject?.() || customization.business || {}, ...parsedBusiness };
+        customization.business = { ...(customization.business || {}), ...parsedBusiness };
         customization.normal = {
-            ...customization.normal,
+            ...(customization.normal || {}),
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
@@ -868,16 +865,14 @@ export const editPost = asyncHandler(async (req, res) => {
         { new: true, runValidators: true }
     ).populate('userId', 'username fullName profileImageUrl');
 
-    // Invalidate caches if post privacy changed from private to public
-    if (isPrivacyChangingToPublic) {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+    // Invalidate caches so edited data is visible immediately on refresh
+    // Always invalidate author's feed cache on any edit
+    await FeedCacheManager.invalidateUserFeed(userId);
 
+    if (isPrivacyChangingToPublic) {
         // Invalidate explore and trending feeds so the post can appear
         await FeedCacheManager.invalidateExploreFeed();
         await FeedCacheManager.invalidateTrendingFeed();
-
-        // Invalidate author's feed
-        await FeedCacheManager.invalidateUserFeed(userId);
     }
 
     return res.status(200).json(new ApiResponse(200, updatedPost, "Post updated successfully"));
@@ -924,8 +919,6 @@ export const togglePostPrivacy = asyncHandler(async (req, res) => {
 
     // Invalidate caches if post privacy changed from private to public
     if (isPrivacyChangingToPublic) {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
-
         // Invalidate explore and trending feeds so the post can appear
         await FeedCacheManager.invalidateExploreFeed();
         await FeedCacheManager.invalidateTrendingFeed();
@@ -1719,32 +1712,31 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
                 const hasActivePlan = await hasActivePaymentPlan(userId);
 
                 if (!hasActivePlan) {
-                    // User has free plan - add visibility indicators to all posts
+                    // User has free plan - posts visible on profile but hidden from home feed
                     hiddenPostsCount = visiblePosts.length;
                     upgradeMessage = {
                         title: "Upgrade Plan",
-                        message: "Your business posts are currently only visible to you. Upgrade to a paid plan.",
+                        message: "Your business posts are visible on your profile but hidden from the home feed. Upgrade to a paid plan for more reach.",
                         ctaText: "Upgrade Now",
                         ctaUrl: "/business/select-plan"
                     };
 
-                    // Mark all posts as hidden from others
+                    // Mark all posts as hidden from feed
                     postsAfterBusinessFilter.forEach(post => {
-                        post.isVisibleToOthers = false;
-                        post.visibilityMessage = "Only visible to you - Upgrade to show to others";
+                        post.isHiddenFromFeed = true;
+                        post.visibilityMessage = "Hidden from home feed - Upgrade to show in feed";
                     });
                 } else {
-                    // User has active plan - all posts are visible
+                    // User has active plan - all posts are visible everywhere
                     postsAfterBusinessFilter.forEach(post => {
-                        post.isVisibleToOthers = true;
+                        post.isHiddenFromFeed = false;
                     });
                 }
             }
         } else {
-            // Viewing someone else's profile - apply business filter
-            // Filter out business posts without active payment plans
-            // Business posts are hidden from ALL users (including followers) if payment is inactive
-            postsAfterBusinessFilter = await filterBusinessPostsByPaymentPlan(visiblePosts);
+            // Viewing someone else's profile - show all posts (including free plan business posts)
+            // Business posts are only hidden from home feed, not from profile
+            postsAfterBusinessFilter = visiblePosts;
         }
 
         const totalPosts = await Post.countDocuments(filter);
