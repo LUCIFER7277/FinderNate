@@ -12,13 +12,9 @@ import Chat from "../models/chat.models.js";
 import Message from "../models/message.models.js";
 import socketManager from "../config/socket.js";
 
-// Dynamically resolve frontend URL from request origin (works in both dev and production)
-const getFrontendUrl = (req) => {
-    const origin = req?.headers?.origin;
-    if (origin && origin !== 'undefined' && origin !== 'null') {
-        return origin.replace(/\/$/, '');
-    }
-    return process.env.FRONTEND_URL || 'http://localhost:4000';
+// Always use configured FRONTEND_URL for payment links (never use request origin)
+const getFrontendUrl = () => {
+    return process.env.FRONTEND_URL || 'https://findernate.com';
 };
 
 const generateOrderNumber = () => {
@@ -56,7 +52,7 @@ export const createPaymentLink = asyncHandler(async (req, res) => {
     }
 
     const linkId = generateLinkId();
-    const frontendUrl = getFrontendUrl(req);
+    const frontendUrl = getFrontendUrl();
     const paymentLink = await PaymentLink.create({
         linkId,
         sellerId,
@@ -341,7 +337,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
 
     // Create a unique link ID
     const linkId = generateLinkId();
-    const frontendUrl = getFrontendUrl(req);
+    const frontendUrl = getFrontendUrl();
 
     // Create the payment link
     const paymentLink = await PaymentLink.create({
@@ -532,7 +528,7 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
 
     if (!paymentLink) {
         const linkId = generateLinkId();
-        const frontendUrl = getFrontendUrl(req);
+        const frontendUrl = getFrontendUrl();
         paymentLink = await PaymentLink.create({
             linkId,
             sellerId: seller._id,
@@ -725,7 +721,7 @@ export const showProductInterest = asyncHandler(async (req, res) => {
 
     const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
 
-    const frontendUrl = getFrontendUrl(req);
+    const frontendUrl = getFrontendUrl();
 
     if (!paymentLink) {
         // Create new payment link
@@ -748,16 +744,28 @@ export const showProductInterest = asyncHandler(async (req, res) => {
             paymentUrl: `${frontendUrl}/post/${postId}/pay/${productPrice}`,
             shortUrl: `${frontendUrl}/p/${linkId}`
         });
-    } else if (paymentLink.amount !== productPrice) {
-        // Update existing payment link if price has changed
-        paymentLink.productDetails.name = productName;
-        paymentLink.productDetails.description = productDescription;
-        paymentLink.productDetails.price = productPrice;
-        paymentLink.productDetails.images = productImages;
-        paymentLink.productDetails.category = productCategory;
-        paymentLink.amount = productPrice;
-        paymentLink.paymentUrl = `${frontendUrl}/post/${postId}/pay/${productPrice}`;
-        await paymentLink.save();
+    } else {
+        // Always update payment link URL and product details to use current FRONTEND_URL and latest data
+        let needsSave = false;
+
+        const correctUrl = `${frontendUrl}/post/${postId}/pay/${paymentLink.amount}`;
+        if (paymentLink.paymentUrl !== correctUrl) {
+            paymentLink.paymentUrl = correctUrl;
+            needsSave = true;
+        }
+
+        if (paymentLink.amount !== productPrice) {
+            paymentLink.productDetails.name = productName;
+            paymentLink.productDetails.description = productDescription;
+            paymentLink.productDetails.price = productPrice;
+            paymentLink.productDetails.images = productImages;
+            paymentLink.productDetails.category = productCategory;
+            paymentLink.amount = productPrice;
+            paymentLink.paymentUrl = `${frontendUrl}/post/${postId}/pay/${productPrice}`;
+            needsSave = true;
+        }
+
+        if (needsSave) await paymentLink.save();
     }
 
     // Always send payment link message in chat (every time buyer shows interest)
