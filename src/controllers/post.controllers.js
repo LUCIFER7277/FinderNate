@@ -827,21 +827,21 @@ export const editPost = asyncHandler(async (req, res) => {
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "product" && parsedProduct) {
-        customization.product = parsedProduct;
+        customization.product = { ...customization.product?.toObject?.() || customization.product || {}, ...parsedProduct };
         customization.normal = {
             ...customization.normal,
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "service" && parsedService) {
-        customization.service = parsedService;
+        customization.service = { ...customization.service?.toObject?.() || customization.service || {}, ...parsedService };
         customization.normal = {
             ...customization.normal,
             tags: parsedTags || customization.normal?.tags || [],
             location: resolvedLocation || customization.normal?.location
         };
     } else if (post.contentType === "business" && parsedBusiness) {
-        customization.business = parsedBusiness;
+        customization.business = { ...customization.business?.toObject?.() || customization.business || {}, ...parsedBusiness };
         customization.normal = {
             ...customization.normal,
             tags: parsedTags || customization.normal?.tags || [],

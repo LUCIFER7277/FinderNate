@@ -8,6 +8,9 @@ import PaymentLink from "../models/paymentLink.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
 import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
+import Chat from "../models/chat.models.js";
+import Message from "../models/message.models.js";
+import socketManager from "../config/socket.js";
 
 const generateOrderNumber = () => {
     const timestamp = Date.now().toString(36).toUpperCase();
@@ -601,5 +604,230 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
                 username: seller.username
             }
         }, "Razorpay order created for shareable payment")
+    );
+});
+
+// ============================================
+// BUYER INTEREST - Auto payment link in chat
+// ============================================
+
+// Helper to emit socket events safely
+const safeEmitToChat = (chatId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToChat(chatId, event, data);
+    }
+};
+
+// Buyer shows interest in a product - auto-creates payment link & sends message in chat
+export const showProductInterest = asyncHandler(async (req, res) => {
+    const { postId, chatId } = req.body;
+    const buyerId = req.user._id;
+
+    if (!postId || !chatId) {
+        throw new ApiError(400, "Post ID and Chat ID are required");
+    }
+
+    // Find the post
+    const post = await Post.findById(postId);
+    if (!post) {
+        throw new ApiError(404, "Post not found");
+    }
+
+    const sellerId = post.userId;
+
+    // Don't create payment link for own products
+    if (sellerId.toString() === buyerId.toString()) {
+        throw new ApiError(400, "Cannot create payment link for your own product");
+    }
+
+    // Verify the chat exists and buyer is a participant
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: buyerId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, "Chat not found or access denied");
+    }
+
+    // Build product details from post
+    let productName = "Product";
+    let productDescription = post.caption || "";
+    let productPrice = 0;
+    let productImages = post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || [];
+    let productCategory = "";
+    let productType = post.contentType || "product";
+
+    if (post.customization?.product) {
+        const p = post.customization.product;
+        productName = p.name || productName;
+        productDescription = p.description || productDescription;
+        productPrice = p.price || 0;
+        productImages = p.images?.length ? p.images : productImages;
+        productCategory = p.category || "";
+    } else if (post.customization?.service) {
+        const s = post.customization.service;
+        productName = s.name || productName;
+        productDescription = s.description || productDescription;
+        productPrice = s.price || 0;
+        productCategory = s.category || "";
+        productType = "service";
+    }
+
+    // If no price, return negotiation mode
+    if (!productPrice || productPrice <= 0) {
+        return res.status(200).json(
+            new ApiResponse(200, {
+                purchaseMode: 'negotiation',
+                productSummary: {
+                    postId: post._id,
+                    name: productName,
+                    description: productDescription,
+                    price: 0,
+                    currency: 'INR',
+                    category: productCategory,
+                    images: productImages,
+                    thumbnail: productImages[0] || '',
+                    purchaseMode: 'negotiation',
+                    seller: { _id: sellerId }
+                },
+                messageSent: false,
+                message: "Product has no fixed price. Negotiate in chat."
+            }, "Negotiation mode - no fixed price")
+        );
+    }
+
+    // Check if payment link already exists for this post+chat combination
+    let paymentLink = await PaymentLink.findOne({
+        postId,
+        chatId,
+        buyerId,
+        status: 'active'
+    });
+
+    const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
+    let messageSent = false;
+
+    if (!paymentLink) {
+        // Create new payment link
+        const linkId = generateLinkId();
+        paymentLink = await PaymentLink.create({
+            linkId,
+            sellerId,
+            buyerId,
+            chatId,
+            postId,
+            productDetails: {
+                name: productName,
+                description: productDescription,
+                price: productPrice,
+                images: productImages,
+                category: productCategory
+            },
+            amount: productPrice,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            paymentUrl: `${process.env.FRONTEND_URL}/post/${postId}/pay/${productPrice}`,
+            shortUrl: `${process.env.FRONTEND_URL}/p/${linkId}`
+        });
+
+        // Auto-send payment link message in chat (from seller to buyer)
+        const paymentMessage = `💰 Pay for "${productName}" - ₹${productPrice}\n\nClick below to pay securely. Your payment will be held safely in escrow until you confirm delivery.`;
+
+        const recipients = chat.participants.filter(
+            p => p.toString() !== sellerId.toString()
+        );
+
+        const autoMessage = await Message.create({
+            chatId,
+            sender: sellerId, // Message appears from seller (automated)
+            message: paymentMessage,
+            messageType: 'payment_link',
+            timestamp: new Date(),
+            readBy: [sellerId],
+            deliveryStatus: recipients.map(recipientId => ({
+                userId: recipientId,
+                status: 'sent',
+                deliveredAt: null,
+                seenAt: null
+            })),
+            productReference: {
+                postId: post._id,
+                productName,
+                productImage: productImages[0] || '',
+                productPrice,
+                productType,
+                productDescription,
+            },
+            linkPreview: {
+                url: paymentLink.paymentUrl,
+                title: `Pay ₹${productPrice} for ${productName}`,
+                description: productDescription,
+                image: productImages[0] || '',
+                siteName: 'Findernate Pay'
+            }
+        });
+
+        // Update chat's last message
+        chat.lastMessageAt = new Date();
+        chat.lastMessage = {
+            sender: sellerId,
+            message: paymentMessage,
+            timestamp: new Date()
+        };
+        chat.lastMessageId = autoMessage._id;
+        await chat.save();
+
+        // Populate and emit via socket
+        const populatedMessage = await Message.findById(autoMessage._id)
+            .populate('sender', 'username fullName profileImageUrl')
+            .lean();
+
+        safeEmitToChat(chatId, 'new_message', {
+            chatId,
+            message: populatedMessage
+        });
+
+        messageSent = true;
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            purchaseMode: 'direct',
+            productSummary: {
+                postId: post._id,
+                name: productName,
+                description: productDescription,
+                price: productPrice,
+                currency: 'INR',
+                category: productCategory,
+                images: productImages,
+                thumbnail: productImages[0] || '',
+                purchaseMode: 'direct',
+                seller: {
+                    _id: sellerId,
+                    fullName: seller?.fullName,
+                    username: seller?.username,
+                    profileImageUrl: seller?.profileImageUrl
+                }
+            },
+            paymentLink: {
+                linkId: paymentLink.linkId,
+                paymentUrl: paymentLink.paymentUrl,
+                shortUrl: paymentLink.shortUrl,
+                amount: paymentLink.amount,
+                expiresAt: paymentLink.expiresAt,
+                seller: {
+                    id: sellerId,
+                    name: seller?.fullName,
+                    username: seller?.username,
+                    avatar: seller?.profileImageUrl
+                }
+            },
+            messageSent,
+            existing: !messageSent,
+            message: messageSent
+                ? "Payment link sent to buyer in chat"
+                : "Payment link already exists for this product in this chat"
+        }, messageSent ? "Payment link created and sent" : "Existing payment link found")
     );
 });
