@@ -8,7 +8,8 @@ import {
     razorpayWebhook,
     createShareablePaymentLink,
     getShareablePaymentLinkDetails,
-    createShareableRazorpayOrder
+    createShareableRazorpayOrder,
+    showProductInterest,
 } from "../controllers/payments.controllers.js";
 
 const router = Router();
@@ -45,5 +46,8 @@ router.post("/create-order", createRazorpayOrder);
 
 // Verify payment after completion
 router.post("/verify", verifyPayment);
+
+// Buyer shows interest - auto-creates payment link & sends message in chat
+router.post("/interest", showProductInterest);
 
 export default router;

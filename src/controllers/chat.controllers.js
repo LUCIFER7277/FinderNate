@@ -688,7 +688,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
             .sort({ timestamp: -1 })
             .skip(skip)
             .limit(pageLimit)
-            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone productReference')
+            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone productReference linkPreview')
             .populate('sender', 'username fullName profileImageUrl')
             .populate({
                 path: 'replyTo',
