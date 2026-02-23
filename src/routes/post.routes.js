@@ -6,6 +6,7 @@ import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blo
 import { cacheUserFeed } from "../middlewares/cache.middleware.js";
 import {
     createNormalPost,
+    createTweetPost,
     createProductPost,
     createServicePost,
     createBusinessPost,
@@ -38,6 +39,7 @@ const mediaUpload = upload.fields([
 ]);
 
 router.route("/create/normal").post(mediaUpload, verifyJWT, createNormalPost);
+router.route("/create/tweet").post(mediaUpload, verifyJWT, createTweetPost);
 router.route("/create/service").post(mediaUpload, verifyJWT, createServicePost);
 router.route("/create/product").post(mediaUpload, verifyJWT, createProductPost);
 router.route("/create/business").post(mediaUpload, verifyJWT, createBusinessPost);

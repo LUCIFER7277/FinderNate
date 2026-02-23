@@ -17,13 +17,13 @@ import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
 import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
 
 /**
- * ✅ HOME FEED WITH BUSINESS POST PRIORITY SYSTEM
+ * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
  *
- * Priority Rules:
- * 1. Business accounts with ACTIVE payment plans (plan2/plan3/plan4) get HIGHEST priority (score: 1000)
- * 2. Their posts appear at the TOP of the feed (even above followed users)
- * 3. Business posts WITHOUT active plans are HIDDEN from ALL users (including followers)
- * 4. Non-business posts follow normal priority (followed users > recent > engagement)
+ * Sorting Rules:
+ * 1. Paid business posts (plan2/plan3/plan4) appear at the TOP, sorted by newest first
+ * 2. All other posts appear below, sorted by newest first (date descending)
+ * 3. Only business/product/service CONTENT TYPE posts from unpaid business accounts are HIDDEN
+ * 4. Normal content (photos, reels, tweets, videos) from ALL accounts always shows
  *
  * Payment Plan Criteria:
  * - subscriptionStatus must be 'active'
@@ -58,8 +58,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         }
 
         const FEED_LIMIT = 50; // Reduced from 100
-        const now = new Date();
-        const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
         // ✅ 1. Get viewable user IDs based on privacy settings and following relationships
         // For logged-out users (userId is null), this returns only users with public privacy
@@ -70,23 +68,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
         );
         console.log('🔍 Feed Debug - viewableUserIds count:', viewableUserIds.length);
-
-        // ✅ 2. Get following and followers for prioritization (only if user is authenticated)
-        let feedUserIds = [];
-        if (userId) {
-            const user = await User.findById(userId)
-                .select('following followers')
-                .lean(); // Use lean() for better performance
-            const following = user?.following || [];
-            const followers = user?.followers || [];
-
-            // ✅ FIXED: Convert to ObjectIds for aggregation
-            feedUserIds = [...new Set([
-                ...following.map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id),
-                ...followers.map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id)
-            ])];
-            console.log('🔍 Feed Debug - feedUserIds count:', feedUserIds.length);
-        }
 
         // ✅ BUSINESS POST PRIORITY SYSTEM
         // Get business users with active payment plans (plan2, plan3, plan4 - NOT plan1 which is free)
@@ -112,7 +93,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
-            postType: { $in: ['photo', 'reel', 'video'] },
+            postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
             userId: { $in: viewableUserIds, $nin: blockedUsers },
             // For logged-out users, only show posts with public visibility
             ...(userId ? {} : {
@@ -155,75 +136,54 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 }
             },
             {
-                // ✅ CRITICAL: Filter out business posts without active payment plans
-                // Rule: Business posts WITHOUT active plan are hidden from ALL users (including followers)
-                // Exception: Reels/videos from business accounts are ALWAYS shown regardless of payment plan
+                // ✅ CRITICAL: Filter out business-type content from unpaid business accounts
+                // Rule: Only business/product/service CONTENT TYPE posts from unpaid business accounts are hidden
+                // All other posts (normal posts, reels, tweets, videos) from ANY account are always shown
                 $match: {
                     $expr: {
                         $or: [
-                            // Keep ALL non-business posts
+                            // Keep ALL posts from non-business accounts
                             { $eq: ['$isBusinessAccount', false] },
-                            // Keep business posts ONLY if user has active payment plan
+                            // Keep ALL posts from business accounts with active payment plans
                             {
                                 $and: [
                                     { $eq: ['$isBusinessAccount', true] },
                                     { $in: ['$userIdString', activePlanUserIdsStrings] }
                                 ]
                             },
-                            // Keep ALL reels/videos regardless of business payment plan
-                            { $in: ['$postType', ['reel', 'video']] }
+                            // For unpaid business accounts: only hide business/product/service content types
+                            // Keep normal content type posts (photos, reels, tweets, videos) from all business accounts
+                            {
+                                $and: [
+                                    { $eq: ['$isBusinessAccount', true] },
+                                    { $eq: ['$contentType', 'normal'] }
+                                ]
+                            }
                         ]
                     }
                 }
             },
             {
                 $addFields: {
-                    // ✅ BUSINESS POST PRIORITY SCORING SYSTEM
-                    // Priority order: Paid Business Posts > Followed Users > Recent Posts > Engagement
-                    feedScore: {
-                        $add: [
-                            // ✅ HIGHEST PRIORITY: Paid business posts get score of 1000 (even higher than followed users)
-                            // This ensures business accounts with active paid plans ALWAYS appear at the top
+                    // ✅ SIMPLE PRIORITY: Paid business posts on top, then everything sorted by date
+                    // 1 = paid business post (appears on top), 0 = normal post (appears below)
+                    isPaidBusiness: {
+                        $cond: [
                             {
-                                $cond: [
-                                    {
-                                        $and: [
-                                            { $eq: ['$isBusinessAccount', true] },
-                                            { $in: ['$userIdString', activePlanUserIdsStrings] }
-                                        ]
-                                    },
-                                    1000, // HIGHEST priority for paid business posts (increased from 200)
-                                    0
+                                $and: [
+                                    { $eq: ['$isBusinessAccount', true] },
+                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
                                 ]
                             },
-                            // Followed users get high priority (but lower than paid business)
-                            { $cond: [{ $in: ['$userId', feedUserIds] }, 100, 0] },
-                            // Recent posts get boost (last 24 hours)
-                            { $cond: [{ $gte: ['$createdAt', yesterday] }, 20, 0] },
-                            // Engagement boost (capped at 30)
-                            { $min: [
-                                { $add: [
-                                    { $multiply: [{ $ifNull: ['$engagement.likes', 0] }, 1] },
-                                    { $multiply: [{ $ifNull: ['$engagement.comments', 0] }, 2] },
-                                    { $multiply: [{ $ifNull: ['$engagement.shares', 0] }, 3] }
-                                ]},
-                                30
-                            ]},
-                            // Content type boost
-                            { $switch: {
-                                branches: [
-                                    { case: { $eq: ['$contentType', 'product'] }, then: 15 },
-                                    { case: { $eq: ['$contentType', 'service'] }, then: 12 },
-                                    { case: { $eq: ['$contentType', 'business'] }, then: 10 }
-                                ],
-                                default: 8
-                            }}
+                            1,
+                            0
                         ]
                     }
                 }
             },
             {
-                $sort: { feedScore: -1, createdAt: -1 }
+                // Sort: paid business posts first, then by newest date
+                $sort: { isPaidBusiness: -1, createdAt: -1 }
             },
             {
                 $skip: skip
@@ -249,6 +209,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 // Remove temporary fields used for filtering
                 $project: {
                     isBusinessAccount: 0,
+                    isPaidBusiness: 0,
                     userIdString: 0,
                     userInfo: 0
                 }

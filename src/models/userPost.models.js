@@ -273,7 +273,7 @@ const AnalyticsSchema = new mongoose.Schema({
 // 📬 Post Schema
 const PostSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    postType: { type: String, required: true, enum: ['photo', 'reel', 'video', 'story'] },
+    postType: { type: String, required: true, enum: ['photo', 'reel', 'video', 'story', 'tweet'] },
     contentType: { type: String, required: true, enum: ['normal', 'product', 'service', 'business'] },
     caption: String,
     description: String,

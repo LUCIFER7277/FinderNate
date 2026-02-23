@@ -51,8 +51,8 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         publishedAt,
         status,
     } = req.body;
-    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
-        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
 
@@ -172,6 +172,134 @@ export const createNormalPost = asyncHandler(async (req, res) => {
     return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
+export const createTweetPost = asyncHandler(async (req, res) => {
+    const userId = req.user?._id;
+    if (!userId) throw new ApiError(400, "User ID is required");
+
+    const {
+        caption,
+        description,
+        mentions,
+        location,
+        tags,
+        settings,
+        scheduledAt,
+        publishedAt,
+        status,
+    } = req.body;
+
+    if (!caption || !caption.trim()) {
+        throw new ApiError(400, "Tweet text (caption) is required");
+    }
+
+    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
+    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
+    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
+    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+
+    let resolvedLocation = parsedLocation || {};
+    if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
+        try {
+            const coords = await getCoordinates(resolvedLocation);
+            if (coords?.latitude && coords?.longitude) {
+                resolvedLocation.coordinates = {
+                    type: "Point",
+                    coordinates: [coords.longitude, coords.latitude]
+                };
+            } else {
+                console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
+            }
+        } catch (error) {
+            console.error('Error resolving location coordinates:', error.message);
+        }
+    }
+
+    // Media is optional for tweets
+    const files = extractMediaFiles(req.files);
+    let uploadedMedia = [];
+
+    for (const file of files) {
+        try {
+            const result = await uploadBufferToBunny(file.buffer, "posts");
+            if (result.resource_type === "image") {
+                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
+                uploadedMedia.push({
+                    type: result.resource_type,
+                    url: result.secure_url,
+                    thumbnailUrl,
+                    fileSize: result.bytes,
+                    format: result.format,
+                    duration: result.duration || null,
+                    dimensions: {
+                        width: result.width,
+                        height: result.height,
+                    },
+                });
+            } else if (result.resource_type === "video") {
+                let thumbnailUrl;
+                const customThumbnail = req.files?.thumbnail?.[0];
+                if (customThumbnail) {
+                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
+                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
+                } else {
+                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
+                }
+                uploadedMedia.push({
+                    type: result.resource_type,
+                    url: result.secure_url,
+                    thumbnailUrl,
+                    fileSize: result.bytes,
+                    format: result.format,
+                    duration: result.duration || null,
+                    dimensions: {
+                        width: result.width,
+                        height: result.height,
+                    },
+                });
+            }
+        } catch {
+            throw new ApiError(500, "Bunny.net upload failed");
+        }
+    }
+
+    const post = await Post.create({
+        userId,
+        postType: "tweet",
+        contentType: "normal",
+        caption,
+        description,
+        mentions: parsedMentions || [],
+        media: uploadedMedia,
+        customization: {
+            normal: {
+                location: resolvedLocation,
+                tags: parsedTags || [],
+            },
+        },
+        settings: {
+            ...parsedSettings,
+            privacy: parsedSettings?.privacy || req.user?.privacy || 'public',
+            isPrivacyTouched: parsedSettings?.privacy ? true : false
+        },
+        scheduledAt,
+        publishedAt,
+        status: status || (scheduledAt ? "scheduled" : "published"),
+        isPromoted: false,
+        isFeatured: false,
+        isReported: false,
+        reportCount: 0,
+        engagement: {},
+        analytics: {},
+    });
+
+    await Post.db.model('User').findByIdAndUpdate(
+        userId,
+        { $push: { posts: post._id } }
+    );
+
+    return res.status(201).json(new ApiResponse(201, post, "Tweet post created successfully"));
+});
+
 export const createProductPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
@@ -191,8 +319,8 @@ export const createProductPost = asyncHandler(async (req, res) => {
         publishedAt,
         status,
     } = req.body;
-    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
-        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
     const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
@@ -342,8 +470,8 @@ export const createServicePost = asyncHandler(async (req, res) => {
         publishedAt,
         status,
     } = req.body;
-    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
-        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
     const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
@@ -487,8 +615,8 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
         publishedAt,
         status,
     } = req.body;
-    if (!postType || !["photo", "reel", "video", "story"].includes(postType)) {
-        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', or 'story'");
+    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
     const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
