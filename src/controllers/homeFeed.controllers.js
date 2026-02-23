@@ -112,6 +112,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
+            postType: { $in: ['photo', 'reel', 'video'] },
             userId: { $in: viewableUserIds, $nin: blockedUsers },
             // For logged-out users, only show posts with public visibility
             ...(userId ? {} : {
@@ -156,6 +157,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             {
                 // ✅ CRITICAL: Filter out business posts without active payment plans
                 // Rule: Business posts WITHOUT active plan are hidden from ALL users (including followers)
+                // Exception: Reels/videos from business accounts are ALWAYS shown regardless of payment plan
                 $match: {
                     $expr: {
                         $or: [
@@ -167,7 +169,9 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                                     { $eq: ['$isBusinessAccount', true] },
                                     { $in: ['$userIdString', activePlanUserIdsStrings] }
                                 ]
-                            }
+                            },
+                            // Keep ALL reels/videos regardless of business payment plan
+                            { $in: ['$postType', ['reel', 'video']] }
                         ]
                     }
                 }
@@ -255,6 +259,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     _id: 1,
                     userId: 1,
                     contentType: 1,
+                    postType: 1,
                     caption: 1,
                     description: 1,
                     media: 1,
