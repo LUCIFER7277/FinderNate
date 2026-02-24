@@ -9,7 +9,7 @@ const DraftSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['Post', 'Reel', 'Story'],
+        enum: ['Post', 'Reel', 'Story', 'Tweet'],
         required: true
     },
     content: {
