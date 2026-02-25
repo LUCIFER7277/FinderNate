@@ -10,6 +10,10 @@ import {
     getShareablePaymentLinkDetails,
     createShareableRazorpayOrder,
     showProductInterest,
+    sendCheckoutMessage,
+    getCheckoutDetails,
+    initiateCheckoutPayment,
+    verifyCheckoutPayment,
 } from "../controllers/payments.controllers.js";
 
 const router = Router();
@@ -47,7 +51,20 @@ router.post("/create-order", createRazorpayOrder);
 // Verify payment after completion
 router.post("/verify", verifyPayment);
 
-// Buyer shows interest - auto-creates payment link & sends message in chat
+// Buyer shows interest - sends checkout message in chat with full product details & price breakdown
+router.post("/checkout", sendCheckoutMessage);
+
+// E-commerce checkout flow (Flipkart/Myntra style)
+// Step 2: Buyer clicks "Proceed to Pay" → fills address → creates Razorpay order
+router.post("/checkout/initiate", initiateCheckoutPayment);
+
+// Step 3: Buyer completes Razorpay payment → verify & confirm order
+router.post("/checkout/verify", verifyCheckoutPayment);
+
+// Step 1: Buyer views checkout details from a checkout message (param route last)
+router.get("/checkout/:messageId", getCheckoutDetails);
+
+// Legacy: Buyer shows interest - auto-creates payment link & sends message in chat
 // router.post("/interest", showProductInterest);
 
 export default router;

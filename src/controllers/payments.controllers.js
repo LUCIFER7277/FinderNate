@@ -872,3 +872,614 @@ export const showProductInterest = asyncHandler(async (req, res) => {
         }, "Payment link created and sent")
     );
 });
+
+// ============================================
+// CHECKOUT MESSAGE - Send rich checkout card in chat
+// ============================================
+
+export const sendCheckoutMessage = asyncHandler(async (req, res) => {
+    const { postId, chatId } = req.body;
+    const buyerId = req.user._id;
+
+    if (!postId || !chatId) {
+        throw new ApiError(400, "Post ID and Chat ID are required");
+    }
+
+    // Find the post with full details
+    const post = await Post.findById(postId);
+    if (!post) {
+        throw new ApiError(404, "Post not found");
+    }
+
+    const sellerId = post.userId;
+
+    // Don't allow self-checkout
+    if (sellerId.toString() === buyerId.toString()) {
+        throw new ApiError(400, "Cannot checkout your own product");
+    }
+
+    // Verify the chat exists and buyer is a participant
+    const chat = await Chat.findOne({
+        _id: chatId,
+        participants: buyerId
+    });
+
+    if (!chat) {
+        throw new ApiError(404, "Chat not found or access denied");
+    }
+
+    // Extract product details
+    let productName = "Product";
+    let productDescription = post.caption || "";
+    let productPrice = 0;
+    let productImages = post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || [];
+    let productCategory = "";
+    let productType = post.contentType || "product";
+    let specifications = [];
+    let variants = [];
+    let deliveryOptions = "offline";
+    let sellerLocation = "";
+    let currency = "INR";
+    let shippingCharges = 0;
+    let gstPercent = 0;
+
+    if (post.customization?.product) {
+        const p = post.customization.product;
+        productName = p.name || productName;
+        productDescription = p.description || productDescription;
+        productPrice = p.price || 0;
+        productImages = p.images?.length ? p.images : productImages;
+        productCategory = p.category || "";
+        specifications = p.specifications || [];
+        variants = p.variants || [];
+        deliveryOptions = p.deliveryOptions || "offline";
+        currency = p.currency || "INR";
+        shippingCharges = p.shippingCharges || 0;
+        gstPercent = p.gstPercent || 0;
+        if (p.location) {
+            sellerLocation = p.location.name || p.location.address || p.location.city || "";
+        }
+    } else if (post.customization?.service) {
+        const s = post.customization.service;
+        productName = s.name || productName;
+        productDescription = s.description || productDescription;
+        productPrice = s.price || 0;
+        productCategory = s.category || "";
+        productType = "service";
+        deliveryOptions = s.deliveryOptions || "offline";
+        currency = s.currency || "INR";
+        shippingCharges = s.shippingCharges || 0;
+        gstPercent = s.gstPercent || 0;
+        if (s.location) {
+            sellerLocation = s.location.name || s.location.address || s.location.city || "";
+        }
+    }
+
+    // If no price, return negotiation mode
+    if (!productPrice || productPrice <= 0) {
+        return res.status(200).json(
+            new ApiResponse(200, {
+                purchaseMode: 'negotiation',
+                message: "Product has no fixed price. Negotiate in chat."
+            }, "Negotiation mode - no fixed price")
+        );
+    }
+
+    // Calculate price breakdown using seller-provided GST & shipping
+    const basePrice = productPrice;
+    const gstAmount = Math.round((basePrice * gstPercent) / 100);
+    const totalPrice = basePrice + shippingCharges + gstAmount;
+
+    // Get seller info
+    const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
+
+    // Create or reuse payment link
+    const frontendUrl = getFrontendUrl();
+
+    let paymentLink = await PaymentLink.findOne({
+        postId,
+        chatId,
+        buyerId,
+        status: 'active'
+    });
+
+    if (!paymentLink) {
+        const linkId = generateLinkId();
+        paymentLink = await PaymentLink.create({
+            linkId,
+            sellerId,
+            buyerId,
+            chatId,
+            postId,
+            productDetails: {
+                name: productName,
+                description: productDescription,
+                price: totalPrice,
+                images: productImages,
+                category: productCategory
+            },
+            amount: totalPrice,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            paymentUrl: `${frontendUrl}/post/${postId}/pay/${totalPrice}`,
+            shortUrl: `${frontendUrl}/p/${linkId}`
+        });
+    } else {
+        // Update if needed
+        const correctUrl = `${frontendUrl}/post/${postId}/pay/${totalPrice}`;
+        if (paymentLink.paymentUrl !== correctUrl || paymentLink.amount !== totalPrice) {
+            paymentLink.amount = totalPrice;
+            paymentLink.paymentUrl = correctUrl;
+            paymentLink.productDetails = {
+                name: productName,
+                description: productDescription,
+                price: totalPrice,
+                images: productImages,
+                category: productCategory
+            };
+            await paymentLink.save();
+        }
+    }
+
+    // Build the checkout message
+    const checkoutText = `🛒 Checkout for "${productName}"\n\nBase Price: ₹${basePrice.toLocaleString('en-IN')}\nShipping: ${shippingCharges > 0 ? '₹' + shippingCharges.toLocaleString('en-IN') : 'FREE'}\nGST (${gstPercent}%): ₹${gstAmount.toLocaleString('en-IN')}\n\n💰 Total: ₹${totalPrice.toLocaleString('en-IN')}`;
+
+    const recipients = chat.participants.filter(
+        p => p.toString() !== sellerId.toString()
+    );
+
+    const checkoutMessage = await Message.create({
+        chatId,
+        sender: sellerId, // Message appears from seller (automated)
+        message: checkoutText,
+        messageType: 'checkout',
+        timestamp: new Date(),
+        readBy: [sellerId],
+        deliveryStatus: recipients.map(recipientId => ({
+            userId: recipientId,
+            status: 'sent',
+            deliveredAt: null,
+            seenAt: null
+        })),
+        productReference: {
+            postId: post._id,
+            productName,
+            productImage: productImages[0] || '',
+            productPrice: totalPrice,
+            productType,
+            productDescription,
+        },
+        checkoutDetails: {
+            postId: post._id,
+            productName,
+            productDescription,
+            productImages,
+            productCategory,
+            productType,
+            specifications,
+            variants,
+            deliveryOptions,
+            sellerLocation,
+            basePrice,
+            shippingCharges,
+            gstPercent,
+            gstAmount,
+            totalPrice,
+            currency,
+            sellerId,
+            sellerName: seller?.fullName || '',
+            sellerUsername: seller?.username || '',
+            sellerAvatar: seller?.profileImageUrl || '',
+            paymentLinkId: paymentLink.linkId,
+            paymentUrl: '', // Will be set after message creation with messageId
+            checkoutStatus: 'pending',
+            expiresAt: paymentLink.expiresAt
+        }
+    });
+
+    // Update paymentUrl to point to the full checkout page using messageId
+    const checkoutPageUrl = `${frontendUrl}/checkout/${checkoutMessage._id}`;
+    checkoutMessage.checkoutDetails.paymentUrl = checkoutPageUrl;
+    await checkoutMessage.save();
+
+    // Update chat's last message
+    chat.lastMessageAt = new Date();
+    chat.lastMessage = {
+        sender: sellerId,
+        message: `🛒 Checkout: ${productName} - ₹${totalPrice.toLocaleString('en-IN')}`,
+        timestamp: new Date()
+    };
+    chat.lastMessageId = checkoutMessage._id;
+    await chat.save();
+
+    // Populate and emit via socket
+    const populatedMessage = await Message.findById(checkoutMessage._id)
+        .populate('sender', 'username fullName profileImageUrl')
+        .lean();
+
+    // Emit to chat room
+    safeEmitToChat(chatId, 'new_message', {
+        chatId,
+        message: populatedMessage
+    });
+
+    // Also emit directly to buyer
+    safeEmitToUser(buyerId.toString(), 'new_message', {
+        chatId,
+        message: populatedMessage
+    });
+
+    // Determine if shipping address is needed
+    const addressRequired = deliveryOptions === 'offline' || deliveryOptions === 'both';
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            purchaseMode: 'direct',
+            checkoutMessage: populatedMessage,
+            messageSent: true,
+            message: "Checkout sent to buyer in chat",
+            actions: {
+                canProceedToPay: true,
+                addressRequired,
+                checkoutMessageId: checkoutMessage._id,
+                paymentLinkId: paymentLink.linkId,
+                totalPrice,
+                currency
+            }
+        }, "Checkout message sent successfully")
+    );
+});
+
+// ============================================
+// E-COMMERCE CHECKOUT FLOW (Flipkart/Myntra style)
+// ============================================
+
+// GET checkout details from a checkout message (buyer views before paying)
+export const getCheckoutDetails = asyncHandler(async (req, res) => {
+    const { messageId } = req.params;
+    const userId = req.user._id;
+
+    const message = await Message.findOne({
+        _id: messageId,
+        messageType: 'checkout',
+        isDeleted: false
+    }).populate('sender', 'username fullName profileImageUrl isBlueTickVerified');
+
+    if (!message) {
+        throw new ApiError(404, "Checkout message not found");
+    }
+
+    // Verify user is a participant in this chat
+    const chat = await Chat.findOne({
+        _id: message.chatId,
+        participants: userId
+    });
+
+    if (!chat) {
+        throw new ApiError(403, "Access denied");
+    }
+
+    const checkout = message.checkoutDetails;
+
+    // Check if expired
+    if (checkout.expiresAt && new Date() > checkout.expiresAt) {
+        checkout.checkoutStatus = 'expired';
+        message.checkoutDetails.checkoutStatus = 'expired';
+        await message.save();
+    }
+
+    // Determine if shipping address is needed
+    const addressRequired = checkout.deliveryOptions === 'offline' || checkout.deliveryOptions === 'both';
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            messageId: message._id,
+            chatId: message.chatId,
+            checkoutDetails: {
+                postId: checkout.postId,
+                productName: checkout.productName,
+                productDescription: checkout.productDescription,
+                productImages: checkout.productImages,
+                productCategory: checkout.productCategory,
+                productType: checkout.productType,
+                specifications: checkout.specifications,
+                variants: checkout.variants,
+                deliveryOptions: checkout.deliveryOptions,
+                sellerLocation: checkout.sellerLocation,
+                priceBreakdown: {
+                    basePrice: checkout.basePrice,
+                    shippingCharges: checkout.shippingCharges,
+                    gstPercent: checkout.gstPercent,
+                    gstAmount: checkout.gstAmount,
+                    totalPrice: checkout.totalPrice,
+                    currency: checkout.currency
+                },
+                seller: {
+                    _id: checkout.sellerId,
+                    fullName: checkout.sellerName,
+                    username: checkout.sellerUsername,
+                    profileImageUrl: checkout.sellerAvatar
+                },
+                checkoutStatus: checkout.checkoutStatus,
+                expiresAt: checkout.expiresAt
+            },
+            actions: {
+                canProceedToPay: checkout.checkoutStatus === 'pending',
+                addressRequired,
+                paymentLinkId: checkout.paymentLinkId
+            }
+        }, "Checkout details fetched")
+    );
+});
+
+// Buyer initiates payment from checkout message (like clicking "Proceed to Pay")
+export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
+    const { messageId, shippingAddress } = req.body;
+    const buyerId = req.user._id;
+
+    if (!messageId) {
+        throw new ApiError(400, "Checkout message ID is required");
+    }
+
+    // Find the checkout message
+    const message = await Message.findOne({
+        _id: messageId,
+        messageType: 'checkout',
+        isDeleted: false
+    });
+
+    if (!message) {
+        throw new ApiError(404, "Checkout message not found");
+    }
+
+    const checkout = message.checkoutDetails;
+
+    // Verify buyer is in the chat
+    const chat = await Chat.findOne({
+        _id: message.chatId,
+        participants: buyerId
+    });
+
+    if (!chat) {
+        throw new ApiError(403, "Access denied");
+    }
+
+    // Don't let seller pay themselves
+    if (checkout.sellerId.toString() === buyerId.toString()) {
+        throw new ApiError(400, "Cannot pay for your own product");
+    }
+
+    // Check checkout status
+    if (checkout.checkoutStatus === 'paid') {
+        throw new ApiError(400, "This checkout has already been paid");
+    }
+
+    if (checkout.expiresAt && new Date() > checkout.expiresAt) {
+        message.checkoutDetails.checkoutStatus = 'expired';
+        await message.save();
+        throw new ApiError(400, "This checkout has expired. Ask the seller to send a new one.");
+    }
+
+    // Validate shipping address if delivery is offline/both
+    const needsAddress = checkout.deliveryOptions === 'offline' || checkout.deliveryOptions === 'both';
+    if (needsAddress && !shippingAddress) {
+        throw new ApiError(400, "Shipping address is required for this product");
+    }
+
+    if (needsAddress && shippingAddress) {
+        if (!shippingAddress.fullName || !shippingAddress.phoneNumber || !shippingAddress.addressLine1 || !shippingAddress.city || !shippingAddress.state || !shippingAddress.postalCode) {
+            throw new ApiError(400, "Please provide complete shipping address (name, phone, address, city, state, pincode)");
+        }
+    }
+
+    // Find or reuse payment link
+    const paymentLink = await PaymentLink.findOne({
+        linkId: checkout.paymentLinkId,
+        status: 'active'
+    });
+
+    if (!paymentLink) {
+        throw new ApiError(400, "Payment link expired or not found. Ask seller to resend checkout.");
+    }
+
+    // Create order
+    const orderNumber = generateOrderNumber();
+    const order = await Order.create({
+        orderNumber,
+        buyerId,
+        sellerId: checkout.sellerId,
+        postId: checkout.postId,
+        chatId: message.chatId,
+        paymentLinkId: paymentLink._id,
+        productDetails: {
+            name: checkout.productName,
+            description: checkout.productDescription,
+            price: checkout.totalPrice,
+            images: checkout.productImages,
+            category: checkout.productCategory
+        },
+        amount: checkout.totalPrice,
+        platformFee: 0,
+        sellerAmount: checkout.totalPrice,
+        shippingAddress: needsAddress ? shippingAddress : undefined,
+        orderStatus: 'payment_pending',
+        paymentStatus: 'pending'
+    });
+
+    // Create Razorpay order
+    let razorpayOrder;
+    try {
+        razorpayOrder = await razorpay.orders.create({
+            amount: checkout.totalPrice * 100, // paise
+            currency: checkout.currency || 'INR',
+            receipt: order.orderNumber,
+            notes: {
+                orderId: order._id.toString(),
+                buyerId: buyerId.toString(),
+                sellerId: checkout.sellerId.toString(),
+                checkoutMessageId: messageId,
+                type: 'checkout'
+            }
+        });
+    } catch (razorpayError) {
+        await Order.findByIdAndDelete(order._id);
+        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
+        throw new ApiError(400, errorMsg);
+    }
+
+    order.razorpayOrderId = razorpayOrder.id;
+    await order.save();
+
+    paymentLink.orderId = order._id;
+    await paymentLink.save();
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            razorpayOrderId: razorpayOrder.id,
+            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+            amount: razorpayOrder.amount,
+            currency: razorpayOrder.currency,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            checkoutMessageId: messageId,
+            productDetails: {
+                name: checkout.productName,
+                image: checkout.productImages?.[0] || '',
+                totalPrice: checkout.totalPrice
+            },
+            seller: {
+                name: checkout.sellerName,
+                username: checkout.sellerUsername
+            }
+        }, "Razorpay order created - proceed to payment")
+    );
+});
+
+// Verify checkout payment & update message status
+export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId, checkoutMessageId } = req.body;
+
+    // Verify signature
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+        .update(body.toString())
+        .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+        throw new ApiError(400, "Invalid payment signature");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    // Update order
+    order.razorpayPaymentId = razorpay_payment_id;
+    order.razorpaySignature = razorpay_signature;
+    order.paymentStatus = 'held';
+    order.orderStatus = 'payment_received';
+    await order.save();
+
+    // Update payment link
+    await PaymentLink.findByIdAndUpdate(order.paymentLinkId, {
+        status: 'paid',
+        paidAt: new Date()
+    });
+
+    // Hold funds in escrow
+    const escrowWallet = await EscrowWallet.getWallet();
+    await escrowWallet.holdFunds(order, order.amount, `Payment for order ${order.orderNumber}`);
+
+    // Update checkout message status to 'paid'
+    if (checkoutMessageId) {
+        const checkoutMessage = await Message.findById(checkoutMessageId);
+        if (checkoutMessage && checkoutMessage.checkoutDetails) {
+            checkoutMessage.checkoutDetails.checkoutStatus = 'paid';
+            await checkoutMessage.save();
+
+            // Send payment confirmation message in chat
+            const buyer = await User.findById(order.buyerId).select('fullName username');
+            const confirmationText = `✅ Payment Confirmed!\n\nOrder: #${order.orderNumber}\nAmount: ₹${order.amount.toLocaleString('en-IN')}\nProduct: ${checkoutMessage.checkoutDetails.productName}\n\nPayment is held securely in escrow. Seller will be notified to ship your order.`;
+
+            const recipients = [];
+            const chat = await Chat.findById(checkoutMessage.chatId);
+            if (chat) {
+                chat.participants.forEach(p => {
+                    if (p.toString() !== order.buyerId.toString()) {
+                        recipients.push(p);
+                    }
+                });
+            }
+
+            const confirmMsg = await Message.create({
+                chatId: checkoutMessage.chatId,
+                sender: order.buyerId,
+                message: confirmationText,
+                messageType: 'text',
+                timestamp: new Date(),
+                readBy: [order.buyerId],
+                deliveryStatus: recipients.map(recipientId => ({
+                    userId: recipientId,
+                    status: 'sent',
+                    deliveredAt: null,
+                    seenAt: null
+                }))
+            });
+
+            // Update chat last message
+            if (chat) {
+                chat.lastMessageAt = new Date();
+                chat.lastMessage = {
+                    sender: order.buyerId,
+                    message: `✅ Payment confirmed for #${order.orderNumber}`,
+                    timestamp: new Date()
+                };
+                chat.lastMessageId = confirmMsg._id;
+                await chat.save();
+            }
+
+            // Emit socket events
+            const populatedConfirm = await Message.findById(confirmMsg._id)
+                .populate('sender', 'username fullName profileImageUrl')
+                .lean();
+
+            safeEmitToChat(checkoutMessage.chatId.toString(), 'new_message', {
+                chatId: checkoutMessage.chatId,
+                message: populatedConfirm
+            });
+
+            // Notify seller about the payment
+            safeEmitToUser(order.sellerId.toString(), 'checkout_paid', {
+                chatId: checkoutMessage.chatId,
+                messageId: checkoutMessageId,
+                orderId: order._id,
+                orderNumber: order.orderNumber,
+                amount: order.amount,
+                buyerName: buyer?.fullName || 'Buyer'
+            });
+
+            // Notify buyer about updated checkout status
+            safeEmitToUser(order.buyerId.toString(), 'checkout_status_updated', {
+                chatId: checkoutMessage.chatId,
+                messageId: checkoutMessageId,
+                checkoutStatus: 'paid',
+                orderId: order._id,
+                orderNumber: order.orderNumber
+            });
+        }
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            order: {
+                _id: order._id,
+                orderNumber: order.orderNumber,
+                orderStatus: order.orderStatus,
+                paymentStatus: order.paymentStatus
+            },
+            checkoutStatus: 'paid',
+            message: "Payment verified! Your order has been confirmed."
+        }, "Checkout payment verified and held in escrow")
+    );
+});
