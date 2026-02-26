@@ -30,6 +30,8 @@ const DisputeSchema = new mongoose.Schema({
     reason: String,
     description: String,
     evidence: [String],
+    disputeVideoUrl: String,
+    disputeVideoUploadedAt: Date,
     status: { type: String, enum: ['open', 'under_review', 'resolved', 'rejected'], default: 'open' },
     resolution: String,
     createdAt: { type: Date, default: Date.now },

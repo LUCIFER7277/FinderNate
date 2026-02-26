@@ -7,8 +7,10 @@ import {
     getSellerNewOrdersCount,
     markOrderShipped,
     markOrderDelivered,
+    updateTrackingInfo,
     confirmDelivery,
     reportIssue,
+    uploadDisputeVideo,
     uploadPaymentProof,
     uploadPackingMedia,
     uploadOpeningVideo,
@@ -47,6 +49,7 @@ router.get("/:orderId", getOrderDetails);
 // Seller actions
 router.patch("/:orderId/ship", markOrderShipped);
 router.patch("/:orderId/deliver", markOrderDelivered);
+router.patch("/:orderId/tracking", updateTrackingInfo);
 router.post("/:orderId/packing-media", uploadPackingMedia);
 router.post("/:orderId/rate-buyer", rateBuyer);
 
@@ -54,6 +57,7 @@ router.post("/:orderId/rate-buyer", rateBuyer);
 router.patch("/:orderId/confirm", confirmDelivery);
 router.post("/:orderId/rate-seller", rateSeller);
 router.post("/:orderId/report", reportIssue);
+router.post("/:orderId/dispute-video", uploadDisputeVideo);
 router.post("/:orderId/payment-proof", uploadPaymentProof);
 router.post("/:orderId/opening-video", uploadOpeningVideo);
 

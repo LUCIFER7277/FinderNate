@@ -4,6 +4,101 @@ import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
+import Notification from "../models/notification.models.js";
+import Message from "../models/message.models.js";
+import Chat from "../models/chat.models.js";
+import socketManager from "../config/socket.js";
+import notificationCache from "../utlis/notificationCache.utils.js";
+
+const safeEmitToChat = (chatId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToChat(chatId, event, data);
+    }
+};
+
+const safeEmitToUser = (userId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToUser(userId, event, data);
+    }
+};
+
+const sendOrderNotification = async ({
+    recipientId,
+    senderId,
+    orderId,
+    orderNumber,
+    notificationMessage,
+    chatMessageText,
+    chatId,
+    buyerId
+}) => {
+    try {
+        // Create database notification
+        const notification = await Notification.create({
+            receiverId: recipientId,
+            senderId: senderId,
+            type: 'order',
+            orderId: orderId,
+            message: notificationMessage
+        });
+
+        if (global.io) {
+            global.io.to(`user_${recipientId}`).emit("notification", notification);
+        }
+
+        await notificationCache.invalidateNotificationCache(recipientId);
+
+        // Send automated chat message (skip for guest/shareable orders)
+        if (!chatId || !buyerId) return;
+
+        const chat = await Chat.findById(chatId);
+        if (!chat) return;
+
+        const recipients = chat.participants.filter(
+            p => p.toString() !== senderId.toString()
+        );
+
+        const chatMessage = await Message.create({
+            chatId,
+            sender: senderId,
+            message: chatMessageText,
+            messageType: 'order_update',
+            timestamp: new Date(),
+            readBy: [senderId],
+            deliveryStatus: recipients.map(rid => ({
+                userId: rid,
+                status: 'sent'
+            }))
+        });
+
+        chat.lastMessageAt = new Date();
+        chat.lastMessage = {
+            sender: senderId,
+            message: chatMessageText,
+            timestamp: new Date()
+        };
+        chat.lastMessageId = chatMessage._id;
+        await chat.save();
+
+        const populatedMessage = await Message.findById(chatMessage._id)
+            .populate('sender', 'username fullName profileImageUrl')
+            .lean();
+
+        safeEmitToChat(chatId.toString(), 'new_message', {
+            chatId,
+            message: populatedMessage
+        });
+
+        safeEmitToUser(recipientId.toString(), 'new_message', {
+            chatId,
+            message: populatedMessage
+        });
+
+        await notificationCache.invalidateMessageCache(recipientId);
+    } catch (error) {
+        console.error(`sendOrderNotification error for order ${orderNumber}:`, error);
+    }
+};
 
 // Get order details
 export const getOrderDetails = asyncHandler(async (req, res) => {
@@ -118,6 +213,20 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
     };
     await order.save();
 
+    // Notify buyer that order has been shipped
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been shipped!`,
+            chatMessageText: `Order #${order.orderNumber} has been shipped!${order.shippingInfo?.trackingId ? `\nTracking ID: ${order.shippingInfo.trackingId}` : ''}${order.shippingInfo?.carrier ? `\nCarrier: ${order.shippingInfo.carrier}` : ''}\n\nYou will be notified when it is delivered.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Ship notification error:', err));
+    }
+
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
@@ -126,6 +235,60 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order marked as shipped")
+    );
+});
+
+// Seller updates tracking info (tracking ID, carrier) after shipping
+export const updateTrackingInfo = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { trackingId, carrier } = req.body;
+    const sellerId = req.user._id;
+
+    if (!trackingId && !carrier) {
+        throw new ApiError(400, "Provide at least trackingId or carrier to update");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can update tracking info");
+    }
+
+    if (order.orderStatus !== 'shipped' && order.orderStatus !== 'delivered') {
+        throw new ApiError(400, "Order must be shipped or delivered to update tracking info");
+    }
+
+    if (!order.shippingInfo) {
+        order.shippingInfo = {};
+    }
+    if (trackingId) order.shippingInfo.trackingId = trackingId;
+    if (carrier) order.shippingInfo.carrier = carrier;
+    await order.save();
+
+    // Notify buyer about updated tracking info
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Tracking info updated for order #${order.orderNumber}`,
+            chatMessageText: `Tracking info updated for Order #${order.orderNumber}${trackingId ? `\nTracking ID: ${trackingId}` : ''}${carrier ? `\nCarrier: ${carrier}` : ''}`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Tracking update notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Tracking info updated")
     );
 });
 
@@ -153,6 +316,20 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
     }
     order.shippingInfo.deliveredAt = new Date();
     await order.save();
+
+    // Notify buyer that order has been delivered
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been marked as delivered`,
+            chatMessageText: `Order #${order.orderNumber} has been marked as delivered by the seller.\n\nPlease confirm delivery once you have received and inspected the product.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Deliver notification error:', err));
+    }
 
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
@@ -201,6 +378,18 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     // No platform fee - release full amount to seller
     await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released for order ${order.orderNumber}`);
 
+    // Notify seller that delivery has been confirmed by the buyer
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Order #${order.orderNumber} has been delivered successfully!`,
+        chatMessageText: `Order #${order.orderNumber} has been delivered successfully!\n\nThe buyer has confirmed receiving the product.${rating ? `\nRating: ${'⭐'.repeat(rating)}` : ''}`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Confirm notification error:', err));
+
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
@@ -243,6 +432,54 @@ export const reportIssue = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { order }, "Issue reported, payment held until resolution")
+    );
+});
+
+// Buyer uploads dispute proof video (damage evidence)
+export const uploadDisputeVideo = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { disputeVideoUrl } = req.body;
+    const buyerId = req.user._id;
+
+    if (!disputeVideoUrl) {
+        throw new ApiError(400, "Dispute video URL is required. You must upload a video showing proof of damage to be eligible for refund or return.");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.buyerId.toString() !== buyerId.toString()) {
+        throw new ApiError(403, "Only the buyer can upload dispute video");
+    }
+
+    if (order.orderStatus !== 'disputed') {
+        throw new ApiError(400, "Can only upload dispute video for disputed orders");
+    }
+
+    if (!order.dispute) {
+        throw new ApiError(400, "No active dispute found for this order");
+    }
+
+    if (order.dispute.status === 'resolved' || order.dispute.status === 'rejected') {
+        throw new ApiError(400, "Cannot upload video for a closed dispute");
+    }
+
+    order.dispute.disputeVideoUrl = disputeVideoUrl;
+    order.dispute.disputeVideoUploadedAt = new Date();
+    await order.save();
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            order: updatedOrder,
+            notice: "Your dispute video has been submitted. Both the admin and seller will review this footage. If valid proof of damage is not provided, the item will not be eligible for refund or return."
+        }, "Dispute proof video uploaded successfully")
     );
 });
 

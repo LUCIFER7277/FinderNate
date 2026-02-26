@@ -11,6 +11,8 @@ import { User } from "../models/user.models.js";
 import Chat from "../models/chat.models.js";
 import Message from "../models/message.models.js";
 import socketManager from "../config/socket.js";
+import Notification from "../models/notification.models.js";
+import notificationCache from "../utlis/notificationCache.utils.js";
 
 // Always use configured FRONTEND_URL for payment links (never use request origin)
 const getFrontendUrl = () => {
@@ -213,6 +215,27 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
     const escrowWallet = await EscrowWallet.getWallet();
     await escrowWallet.holdFunds(order, order.amount, `Payment for order ${order.orderNumber}`);
+
+    // Notify seller that a new order has been placed
+    if (order.buyerId) {
+        try {
+            const notification = await Notification.create({
+                receiverId: order.sellerId,
+                senderId: order.buyerId,
+                type: 'order',
+                orderId: order._id,
+                message: `New order #${order.orderNumber} placed! Amount: \u20B9${order.amount}`
+            });
+
+            if (global.io) {
+                global.io.to(`user_${order.sellerId}`).emit("notification", notification);
+            }
+
+            await notificationCache.invalidateNotificationCache(order.sellerId);
+        } catch (err) {
+            console.error('Order placed notification error:', err);
+        }
+    }
 
     return res.status(200).json(
         new ApiResponse(200, {
@@ -1540,6 +1563,25 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
                 orderId: order._id,
                 orderNumber: order.orderNumber
             });
+
+            // Create persistent notification for seller (bell menu)
+            try {
+                const sellerNotification = await Notification.create({
+                    receiverId: order.sellerId,
+                    senderId: order.buyerId,
+                    type: 'order',
+                    orderId: order._id,
+                    message: `New order #${order.orderNumber} placed by ${buyer?.fullName || 'a buyer'}! Amount: \u20B9${order.amount}`
+                });
+
+                if (global.io) {
+                    global.io.to(`user_${order.sellerId}`).emit("notification", sellerNotification);
+                }
+
+                await notificationCache.invalidateNotificationCache(order.sellerId);
+            } catch (err) {
+                console.error('Checkout order placed notification error:', err);
+            }
         }
     }
 
