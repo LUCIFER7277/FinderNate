@@ -1108,9 +1108,6 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
         message: populatedMessage
     });
 
-    // Determine if shipping address is needed
-    const addressRequired = deliveryOptions === 'offline' || deliveryOptions === 'both';
-
     return res.status(200).json(
         new ApiResponse(200, {
             purchaseMode: 'direct',
@@ -1119,7 +1116,7 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
             message: "Checkout sent to buyer in chat",
             actions: {
                 canProceedToPay: true,
-                addressRequired,
+                addressRequired: true,
                 checkoutMessageId: checkoutMessage._id,
                 paymentLinkId: paymentLink.linkId,
                 totalPrice,
@@ -1167,9 +1164,6 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
         await message.save();
     }
 
-    // Determine if shipping address is needed
-    const addressRequired = checkout.deliveryOptions === 'offline' || checkout.deliveryOptions === 'both';
-
     return res.status(200).json(
         new ApiResponse(200, {
             messageId: message._id,
@@ -1204,7 +1198,7 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
             },
             actions: {
                 canProceedToPay: checkout.checkoutStatus === 'pending',
-                addressRequired,
+                addressRequired: true,
                 paymentLinkId: checkout.paymentLinkId
             }
         }, "Checkout details fetched")
@@ -1259,16 +1253,13 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "This checkout has expired. Ask the seller to send a new one.");
     }
 
-    // Validate shipping address if delivery is offline/both
-    const needsAddress = checkout.deliveryOptions === 'offline' || checkout.deliveryOptions === 'both';
-    if (needsAddress && !shippingAddress) {
-        throw new ApiError(400, "Shipping address is required for this product");
+    // Always validate shipping address
+    if (!shippingAddress) {
+        throw new ApiError(400, "Shipping address is required");
     }
 
-    if (needsAddress && shippingAddress) {
-        if (!shippingAddress.fullName || !shippingAddress.phoneNumber || !shippingAddress.addressLine1 || !shippingAddress.city || !shippingAddress.state || !shippingAddress.postalCode) {
-            throw new ApiError(400, "Please provide complete shipping address (name, phone, address, city, state, pincode)");
-        }
+    if (!shippingAddress.fullName || !shippingAddress.phoneNumber || !shippingAddress.addressLine1 || !shippingAddress.city || !shippingAddress.state || !shippingAddress.postalCode) {
+        throw new ApiError(400, "Please provide complete shipping address (name, phone, address, city, state, pincode)");
     }
 
     // Find or reuse payment link
@@ -1300,7 +1291,7 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         amount: checkout.totalPrice,
         platformFee: 0,
         sellerAmount: checkout.totalPrice,
-        shippingAddress: needsAddress ? shippingAddress : undefined,
+        shippingAddress: shippingAddress,
         orderStatus: 'payment_pending',
         paymentStatus: 'pending'
     });
