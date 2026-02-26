@@ -1164,10 +1164,91 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
         await message.save();
     }
 
+    // Determine user role in this checkout
+    const isBuyer = checkout.sellerId.toString() !== userId.toString();
+    const isSeller = checkout.sellerId.toString() === userId.toString();
+
+    // Build checkout policies based on user role (fixed for all products)
+    const checkoutPolicies = {
+        shippingPolicy: {
+            estimatedDeliveryDays: "5-10",
+            maxShippingDays: 15,
+            description: "Estimated delivery within 5-10 business days. Maximum shipping time is 15 days from order confirmation. If the seller does not ship within this period, you may cancel the order for a full refund."
+        },
+        returnPolicy: {
+            maxReturnDays: 7,
+            returnConditions: [
+                "Product must be in original condition with tags and packaging intact",
+                "Return request must be raised within 7 days of delivery",
+                "Opening video or photographic proof of damage is mandatory for return claims",
+                "Refund will be processed within 5-7 business days after return approval"
+            ],
+            description: "You can request a return within 7 days of delivery if the product is damaged, defective, or not as described."
+        },
+        ...(isBuyer ? {
+            buyerNotices: [
+                {
+                    type: "instruction",
+                    title: "Record Package Opening",
+                    message: "Please record a video while opening your package or take clear photos of the product upon arrival. This proof is required if you need to file a return or dispute.",
+                    priority: "high"
+                },
+                {
+                    type: "instruction",
+                    title: "Return Policy",
+                    message: "Returns are accepted within 7 days of delivery for damaged, defective, or misrepresented items. The product must be in its original condition with all tags and packaging intact.",
+                    priority: "medium"
+                },
+                {
+                    type: "info",
+                    title: "Escrow Protection",
+                    message: "Your payment is held securely in escrow and will only be released to the seller after you confirm delivery. If there is an issue, you can raise a dispute.",
+                    priority: "medium"
+                },
+                {
+                    type: "legal_warning",
+                    title: "Fraudulent Payment Warning",
+                    message: "Any fraudulent, unauthorized, or deceptive payment activity will result in immediate account suspension and legal action under applicable laws including the Information Technology Act, 2000 and Indian Penal Code. Findernate reserves the right to report such activities to law enforcement authorities.",
+                    priority: "critical",
+                    displayStyle: "red"
+                }
+            ]
+        } : {}),
+        ...(isSeller ? {
+            sellerNotices: [
+                {
+                    type: "responsibility",
+                    title: "Product Condition Responsibility",
+                    message: "As the seller, you take full responsibility for ensuring the product is in proper condition before shipping. You are liable for any damage caused due to improper packaging or handling.",
+                    priority: "high"
+                },
+                {
+                    type: "instruction",
+                    title: "Packing Proof Required",
+                    message: "Record a packing video or take photos of the product before shipping. This proof protects you in case of a false damage claim by the buyer.",
+                    priority: "high"
+                },
+                {
+                    type: "info",
+                    title: "Return & Refund Policy",
+                    message: "If the buyer reports a damaged or defective item within 7 days of delivery with valid proof, you may be required to accept a return and a full or partial refund will be issued from escrow.",
+                    priority: "medium"
+                },
+                {
+                    type: "instruction",
+                    title: "Shipping Timeline",
+                    message: "You must ship the order within 15 days of payment confirmation. Failure to ship within this period may result in automatic order cancellation and refund to the buyer.",
+                    priority: "high"
+                }
+            ]
+        } : {})
+    };
+
     return res.status(200).json(
         new ApiResponse(200, {
             messageId: message._id,
             chatId: message.chatId,
+            userRole: isBuyer ? "buyer" : "seller",
             checkoutDetails: {
                 postId: checkout.postId,
                 productName: checkout.productName,
@@ -1196,6 +1277,7 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 checkoutStatus: checkout.checkoutStatus,
                 expiresAt: checkout.expiresAt
             },
+            checkoutPolicies,
             actions: {
                 canProceedToPay: checkout.checkoutStatus === 'pending',
                 addressRequired: true,
