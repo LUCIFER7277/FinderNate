@@ -119,8 +119,19 @@ export const getOrderDetails = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Not authorized to view this order");
     }
 
+    const responseData = { order };
+
+    // Include dispute policy info when order is disputed
+    if (order.orderStatus === 'disputed' && order.dispute) {
+        responseData.disputePolicy = {
+            videoRequired: true,
+            videoUploaded: !!order.dispute.disputeVideoUrl,
+            message: "The buyer must upload a video showing proof of damage to be eligible for refund or return. This footage is accessible to both the admin and the seller. If valid proof is not provided, the item will not be eligible for refund or return."
+        };
+    }
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Order details fetched")
+        new ApiResponse(200, responseData, "Order details fetched")
     );
 });
 
@@ -524,7 +535,7 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
 // Buyer reports issue / requests return
 export const reportIssue = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
-    const { reason, description, evidence } = req.body;
+    const { reason, description, evidence, disputeVideoUrl } = req.body;
     const buyerId = req.user._id;
 
     const order = await Order.findById(orderId);
@@ -540,6 +551,21 @@ export const reportIssue = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Reason is required");
     }
 
+    const validReasons = ['damaged_product', 'wrong_item', 'missing_item', 'not_as_described', 'defective', 'counterfeit', 'other'];
+    if (!validReasons.includes(reason)) {
+        throw new ApiError(400, `Invalid dispute reason. Must be one of: ${validReasons.join(', ')}`);
+    }
+
+    const reasonLabels = {
+        damaged_product: 'Damaged Product',
+        wrong_item: 'Wrong Item Received',
+        missing_item: 'Missing Item',
+        not_as_described: 'Not As Described',
+        defective: 'Defective Product',
+        counterfeit: 'Counterfeit Product',
+        other: 'Other'
+    };
+
     order.orderStatus = 'disputed';
     order.dispute = {
         reason,
@@ -548,10 +574,41 @@ export const reportIssue = asyncHandler(async (req, res) => {
         status: 'open',
         createdAt: new Date()
     };
+
+    if (disputeVideoUrl) {
+        order.dispute.disputeVideoUrl = disputeVideoUrl;
+        order.dispute.disputeVideoUploadedAt = new Date();
+    }
+
     await order.save();
 
+    // Notify seller about the dispute
+    const reasonLabel = reasonLabels[reason] || reason;
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Dispute raised on order #${order.orderNumber}. Reason: ${reasonLabel}`,
+        chatMessageText: `A dispute has been raised on Order #${order.orderNumber}.\n\nReason: ${reasonLabel}${description ? `\nDescription: ${description}` : ''}${disputeVideoUrl ? '\n\nThe buyer has uploaded a proof video. You can view it in the order details.' : '\n\nThe buyer has not yet uploaded a proof video.'}\n\nThe admin team will review this dispute.`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Dispute notification error:', err));
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Issue reported, payment held until resolution")
+        new ApiResponse(200, {
+            order: updatedOrder,
+            disputePolicy: {
+                videoRequired: true,
+                videoUploaded: !!disputeVideoUrl,
+                message: "You must upload a video showing proof of damage to be eligible for refund or return. This footage will be reviewed by both the admin and the seller. If valid proof is not provided, the item will not be eligible for refund or return."
+            }
+        }, "Issue reported, payment held until resolution")
     );
 });
 
@@ -589,6 +646,18 @@ export const uploadDisputeVideo = asyncHandler(async (req, res) => {
     order.dispute.disputeVideoUrl = disputeVideoUrl;
     order.dispute.disputeVideoUploadedAt = new Date();
     await order.save();
+
+    // Notify seller that buyer has uploaded dispute proof video
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Buyer uploaded dispute proof video for order #${order.orderNumber}`,
+        chatMessageText: `The buyer has uploaded a proof video for the dispute on Order #${order.orderNumber}.\n\nYou can view the video evidence in the order details. The admin team will review this dispute.`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Dispute video notification error:', err));
 
     const updatedOrder = await Order.findById(orderId)
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')

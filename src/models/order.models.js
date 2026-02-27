@@ -27,7 +27,11 @@ const BuyerProofSchema = new mongoose.Schema({
 }, { _id: false });
 
 const DisputeSchema = new mongoose.Schema({
-    reason: String,
+    reason: {
+        type: String,
+        enum: ['damaged_product', 'wrong_item', 'missing_item', 'not_as_described', 'defective', 'counterfeit', 'other'],
+        required: true
+    },
     description: String,
     evidence: [String],
     disputeVideoUrl: String,
