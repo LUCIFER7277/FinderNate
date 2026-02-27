@@ -1354,3 +1354,101 @@ export const exportOrdersToCSV = asyncHandler(async (req, res) => {
 
     return res.status(200).send(csv);
 });
+
+// Get all reviews for a user (as seller or as buyer)
+export const getUserReviews = asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+    const { role = 'seller', page = 1, limit = 10 } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    let matchQuery, ratingField, reviewField, reviewerPopulateField, reviewerRole;
+
+    if (role === 'buyer') {
+        // Reviews about this user as a buyer (ratings BY sellers)
+        matchQuery = {
+            buyerId: userObjectId,
+            sellerRating: { $exists: true, $ne: null }
+        };
+        ratingField = 'sellerRating';
+        reviewField = 'sellerReview';
+        reviewerPopulateField = 'sellerId';
+        reviewerRole = 'seller';
+    } else {
+        // Reviews about this user as a seller (ratings BY buyers)
+        matchQuery = {
+            sellerId: userObjectId,
+            buyerRating: { $exists: true, $ne: null }
+        };
+        ratingField = 'buyerRating';
+        reviewField = 'buyerReview';
+        reviewerPopulateField = 'buyerId';
+        reviewerRole = 'buyer';
+    }
+
+    // Aggregate stats
+    const statsResult = await Order.aggregate([
+        { $match: matchQuery },
+        {
+            $group: {
+                _id: null,
+                averageRating: { $avg: `$${ratingField}` },
+                totalReviews: { $sum: 1 },
+                fiveStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 5] }, 1, 0] } },
+                fourStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 4] }, 1, 0] } },
+                threeStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 3] }, 1, 0] } },
+                twoStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 2] }, 1, 0] } },
+                oneStar: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 1] }, 1, 0] } }
+            }
+        }
+    ]);
+
+    const stats = statsResult[0] || {
+        averageRating: 0,
+        totalReviews: 0,
+        fiveStars: 0, fourStars: 0, threeStars: 0, twoStars: 0, oneStar: 0
+    };
+
+    // Paginated reviews
+    const reviews = await Order.find(matchQuery)
+        .select(`${ratingField} ${reviewField} createdAt productDetails.name orderNumber`)
+        .populate(reviewerPopulateField, 'fullName username profileImageUrl')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean();
+
+    // Normalize reviews into consistent shape
+    const normalizedReviews = reviews.map(order => ({
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        rating: order[ratingField],
+        review: order[reviewField] || null,
+        productName: order.productDetails?.name || null,
+        reviewer: order[reviewerPopulateField],
+        reviewerRole,
+        createdAt: order.createdAt
+    }));
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            stats: {
+                averageRating: Math.round((stats.averageRating || 0) * 10) / 10,
+                totalReviews: stats.totalReviews,
+                breakdown: {
+                    5: stats.fiveStars,
+                    4: stats.fourStars,
+                    3: stats.threeStars,
+                    2: stats.twoStars,
+                    1: stats.oneStar
+                }
+            },
+            reviews: normalizedReviews,
+            page: pageNum,
+            totalPages: Math.ceil(stats.totalReviews / limitNum),
+            total: stats.totalReviews
+        }, "User reviews fetched successfully")
+    );
+});

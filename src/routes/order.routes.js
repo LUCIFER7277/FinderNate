@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { verifyJWT } from "../middlewares/auth.middleware.js";
+import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import {
     getOrderDetails,
     getBuyerOrders,
@@ -22,10 +22,14 @@ import {
     getSellerOrderHistory,
     getBuyerOrderStatistics,
     getSellerOrderStatistics,
-    exportOrdersToCSV
+    exportOrdersToCSV,
+    getUserReviews
 } from "../controllers/orders.controllers.js";
 
 const router = Router();
+
+// Public routes (no auth required)
+router.get("/user/:userId/reviews", optionalVerifyJWT, getUserReviews);
 
 router.use(verifyJWT);
 
