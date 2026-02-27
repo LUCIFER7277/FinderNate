@@ -23,7 +23,8 @@ import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
  * 1. Paid business posts (plan2/plan3/plan4) appear at the TOP, sorted by newest first
  * 2. All other posts appear below, sorted by newest first (date descending)
  * 3. Only business/product/service CONTENT TYPE posts from unpaid business accounts are HIDDEN
- * 4. Normal content (photos, reels, tweets, videos) from ALL accounts always shows
+ * 4. Normal content (photos, tweets, videos) from ALL accounts always shows
+ * 5. Reels from ALL accounts always show regardless of content type or payment status
  *
  * Payment Plan Criteria:
  * - subscriptionStatus must be 'active'
@@ -139,23 +140,21 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 // ✅ CRITICAL: Filter out business-type content from unpaid business accounts
                 // Rule: Only business/product/service CONTENT TYPE posts from unpaid business accounts are hidden
                 // All other posts (normal posts, reels, tweets, videos) from ANY account are always shown
+                // Reels are ALWAYS shown regardless of content type or business payment status
                 $match: {
                     $expr: {
                         $or: [
+                            // Keep ALL posts from users with active paid plans (no need to check isBusinessProfile)
+                            { $in: ['$userIdString', activePlanUserIdsStrings] },
                             // Keep ALL posts from non-business accounts
                             { $eq: ['$isBusinessAccount', false] },
-                            // Keep ALL posts from business accounts with active payment plans
+                            // Keep ALL reels regardless of content type or business status
+                            { $eq: ['$postType', 'reel'] },
+                            // For unpaid business accounts: only keep normal content type posts
                             {
                                 $and: [
                                     { $eq: ['$isBusinessAccount', true] },
-                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
-                                ]
-                            },
-                            // For unpaid business accounts: only hide business/product/service content types
-                            // Keep normal content type posts (photos, reels, tweets, videos) from all business accounts
-                            {
-                                $and: [
-                                    { $eq: ['$isBusinessAccount', true] },
+                                    { $not: { $in: ['$userIdString', activePlanUserIdsStrings] } },
                                     { $eq: ['$contentType', 'normal'] }
                                 ]
                             }
@@ -167,14 +166,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 $addFields: {
                     // ✅ SIMPLE PRIORITY: Paid business posts on top, then everything sorted by date
                     // 1 = paid business post (appears on top), 0 = normal post (appears below)
+                    // Only checks activePlanUserIdsStrings - no dependency on isBusinessProfile
                     isPaidBusiness: {
                         $cond: [
-                            {
-                                $and: [
-                                    { $eq: ['$isBusinessAccount', true] },
-                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
-                                ]
-                            },
+                            { $in: ['$userIdString', activePlanUserIdsStrings] },
                             1,
                             0
                         ]
@@ -392,20 +387,28 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         if (page === 1 && posts.length === limit) {
             // Only do count query for first page if it's full
             try {
-                // Count all posts, then filter out unpaid business posts
+                // Count all posts, filtering out business content from unpaid business accounts
                 const allPostsForCount = await Post.find({
                     contentType: { $in: ['normal', 'service', 'product', 'business'] },
+                    postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
                     userId: { $nin: blockedUsers, $in: viewableUserIds }
-                }).select('userId').lean();
-                
-                // Filter out unpaid business posts
+                }).select('userId contentType postType').lean();
+
+                // Filter: keep all posts from paid plans, all from non-business,
+                // all reels, and only normal contentType from unpaid business accounts
                 const filteredPosts = allPostsForCount.filter(post => {
                     const userIdStr = post.userId.toString();
+                    // Keep all posts from users with active paid plans
+                    if (activePlanUserIdsSet.has(userIdStr)) return true;
+                    // Keep all posts from non-business accounts
                     const isBusiness = businessUserIdsSet.has(userIdStr);
-                    if (!isBusiness) return true; // Keep non-business posts
-                    return activePlanUserIdsSet.has(userIdStr); // Keep only paid business posts
+                    if (!isBusiness) return true;
+                    // Always keep reels regardless of content type or business status
+                    if (post.postType === 'reel') return true;
+                    // For unpaid business accounts, only keep normal content type
+                    return post.contentType === 'normal';
                 });
-                
+
                 totalCount = filteredPosts.length;
             } catch (error) {
                 totalCount = posts.length; // Fallback

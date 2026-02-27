@@ -4,6 +4,101 @@ import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
+import Notification from "../models/notification.models.js";
+import Message from "../models/message.models.js";
+import Chat from "../models/chat.models.js";
+import socketManager from "../config/socket.js";
+import notificationCache from "../utlis/notificationCache.utils.js";
+
+const safeEmitToChat = (chatId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToChat(chatId, event, data);
+    }
+};
+
+const safeEmitToUser = (userId, event, data) => {
+    if (socketManager.isReady()) {
+        socketManager.emitToUser(userId, event, data);
+    }
+};
+
+const sendOrderNotification = async ({
+    recipientId,
+    senderId,
+    orderId,
+    orderNumber,
+    notificationMessage,
+    chatMessageText,
+    chatId,
+    buyerId
+}) => {
+    try {
+        // Create database notification
+        const notification = await Notification.create({
+            receiverId: recipientId,
+            senderId: senderId,
+            type: 'order',
+            orderId: orderId,
+            message: notificationMessage
+        });
+
+        if (global.io) {
+            global.io.to(`user_${recipientId}`).emit("notification", notification);
+        }
+
+        await notificationCache.invalidateNotificationCache(recipientId);
+
+        // Send automated chat message (skip for guest/shareable orders)
+        if (!chatId || !buyerId) return;
+
+        const chat = await Chat.findById(chatId);
+        if (!chat) return;
+
+        const recipients = chat.participants.filter(
+            p => p.toString() !== senderId.toString()
+        );
+
+        const chatMessage = await Message.create({
+            chatId,
+            sender: senderId,
+            message: chatMessageText,
+            messageType: 'order_update',
+            timestamp: new Date(),
+            readBy: [senderId],
+            deliveryStatus: recipients.map(rid => ({
+                userId: rid,
+                status: 'sent'
+            }))
+        });
+
+        chat.lastMessageAt = new Date();
+        chat.lastMessage = {
+            sender: senderId,
+            message: chatMessageText,
+            timestamp: new Date()
+        };
+        chat.lastMessageId = chatMessage._id;
+        await chat.save();
+
+        const populatedMessage = await Message.findById(chatMessage._id)
+            .populate('sender', 'username fullName profileImageUrl')
+            .lean();
+
+        safeEmitToChat(chatId.toString(), 'new_message', {
+            chatId,
+            message: populatedMessage
+        });
+
+        safeEmitToUser(recipientId.toString(), 'new_message', {
+            chatId,
+            message: populatedMessage
+        });
+
+        await notificationCache.invalidateMessageCache(recipientId);
+    } catch (error) {
+        console.error(`sendOrderNotification error for order ${orderNumber}:`, error);
+    }
+};
 
 // Get order details
 export const getOrderDetails = asyncHandler(async (req, res) => {
@@ -24,8 +119,19 @@ export const getOrderDetails = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Not authorized to view this order");
     }
 
+    const responseData = { order };
+
+    // Include dispute policy info when order is disputed
+    if (order.orderStatus === 'disputed' && order.dispute) {
+        responseData.disputePolicy = {
+            videoRequired: true,
+            videoUploaded: !!order.dispute.disputeVideoUrl,
+            message: "The buyer must upload a video showing proof of damage to be eligible for refund or return. This footage is accessible to both the admin and the seller. If valid proof is not provided, the item will not be eligible for refund or return."
+        };
+    }
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Order details fetched")
+        new ApiResponse(200, responseData, "Order details fetched")
     );
 });
 
@@ -86,6 +192,126 @@ export const getSellerOrders = asyncHandler(async (req, res) => {
     );
 });
 
+// Seller confirms the placed order
+export const sellerConfirmOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const sellerId = req.user._id;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can confirm this order");
+    }
+
+    if (order.orderStatus !== 'payment_received') {
+        throw new ApiError(400, "Order can only be confirmed when payment is received");
+    }
+
+    order.orderStatus = 'processing';
+    order.sellerResponse = {
+        status: 'confirmed',
+        respondedAt: new Date()
+    };
+    await order.save();
+
+    // Notify buyer that seller has confirmed the order
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been confirmed by the seller! It is now being processed.`,
+            chatMessageText: `Order #${order.orderNumber} has been confirmed by the seller!\n\nYour order is now being processed and will be shipped soon.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Seller confirm notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Order confirmed by seller")
+    );
+});
+
+// Seller rejects the placed order with reason
+export const sellerRejectOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { reason, note } = req.body;
+    const sellerId = req.user._id;
+
+    if (!reason) {
+        throw new ApiError(400, "Rejection reason is required");
+    }
+
+    const validReasons = ['out_of_stock', 'price_change', 'invalid_address', 'need_clarification', 'certificate_required', 'other'];
+    if (!validReasons.includes(reason)) {
+        throw new ApiError(400, `Invalid rejection reason. Must be one of: ${validReasons.join(', ')}`);
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can reject this order");
+    }
+
+    if (order.orderStatus !== 'payment_received') {
+        throw new ApiError(400, "Order can only be rejected when payment is received");
+    }
+
+    const reasonLabels = {
+        out_of_stock: 'Out of Stock',
+        price_change: 'Price Change',
+        invalid_address: 'Buyer Address Not Valid',
+        need_clarification: 'Seller Needs More Clarification',
+        certificate_required: 'Certificates Required for This Product',
+        other: 'Other'
+    };
+
+    order.orderStatus = 'seller_rejected';
+    order.sellerResponse = {
+        status: 'rejected',
+        rejectionReason: reason,
+        rejectionNote: note || '',
+        respondedAt: new Date()
+    };
+    await order.save();
+
+    // Notify buyer that seller has rejected the order
+    const rejectionLabel = reasonLabels[reason] || reason;
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been rejected by the seller. Reason: ${rejectionLabel}`,
+            chatMessageText: `Order #${order.orderNumber} has been rejected by the seller.\n\nReason: ${rejectionLabel}${note ? `\nNote: ${note}` : ''}\n\nYour payment is safe in escrow. The Findernate team will process your refund shortly.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Seller reject notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Order rejected by seller. Admin will process the refund.")
+    );
+});
+
 // Seller marks order as shipped
 export const markOrderShipped = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
@@ -118,6 +344,20 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
     };
     await order.save();
 
+    // Notify buyer that order has been shipped
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been shipped!`,
+            chatMessageText: `Order #${order.orderNumber} has been shipped!${order.shippingInfo?.trackingId ? `\nTracking ID: ${order.shippingInfo.trackingId}` : ''}${order.shippingInfo?.carrier ? `\nCarrier: ${order.shippingInfo.carrier}` : ''}\n\nYou will be notified when it is delivered.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Ship notification error:', err));
+    }
+
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
@@ -126,6 +366,60 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order marked as shipped")
+    );
+});
+
+// Seller updates tracking info (tracking ID, carrier) after shipping
+export const updateTrackingInfo = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { trackingId, carrier } = req.body;
+    const sellerId = req.user._id;
+
+    if (!trackingId && !carrier) {
+        throw new ApiError(400, "Provide at least trackingId or carrier to update");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can update tracking info");
+    }
+
+    if (order.orderStatus !== 'shipped' && order.orderStatus !== 'delivered') {
+        throw new ApiError(400, "Order must be shipped or delivered to update tracking info");
+    }
+
+    if (!order.shippingInfo) {
+        order.shippingInfo = {};
+    }
+    if (trackingId) order.shippingInfo.trackingId = trackingId;
+    if (carrier) order.shippingInfo.carrier = carrier;
+    await order.save();
+
+    // Notify buyer about updated tracking info
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Tracking info updated for order #${order.orderNumber}`,
+            chatMessageText: `Tracking info updated for Order #${order.orderNumber}${trackingId ? `\nTracking ID: ${trackingId}` : ''}${carrier ? `\nCarrier: ${carrier}` : ''}`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Tracking update notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Tracking info updated")
     );
 });
 
@@ -153,6 +447,20 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
     }
     order.shippingInfo.deliveredAt = new Date();
     await order.save();
+
+    // Notify buyer that order has been delivered
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been marked as delivered`,
+            chatMessageText: `Order #${order.orderNumber} has been marked as delivered by the seller.\n\nPlease confirm delivery once you have received and inspected the product.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Deliver notification error:', err));
+    }
 
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
@@ -201,6 +509,18 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     // No platform fee - release full amount to seller
     await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released for order ${order.orderNumber}`);
 
+    // Notify seller that delivery has been confirmed by the buyer
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Order #${order.orderNumber} has been delivered successfully!`,
+        chatMessageText: `Order #${order.orderNumber} has been delivered successfully!\n\nThe buyer has confirmed receiving the product.${rating ? `\nRating: ${'⭐'.repeat(rating)}` : ''}`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Confirm notification error:', err));
+
     // Populate and return updated order
     const updatedOrder = await Order.findById(orderId)
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
@@ -215,7 +535,7 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
 // Buyer reports issue / requests return
 export const reportIssue = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
-    const { reason, description, evidence } = req.body;
+    const { reason, description, evidence, disputeVideoUrl } = req.body;
     const buyerId = req.user._id;
 
     const order = await Order.findById(orderId);
@@ -231,6 +551,21 @@ export const reportIssue = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Reason is required");
     }
 
+    const validReasons = ['damaged_product', 'wrong_item', 'missing_item', 'not_as_described', 'defective', 'counterfeit', 'other'];
+    if (!validReasons.includes(reason)) {
+        throw new ApiError(400, `Invalid dispute reason. Must be one of: ${validReasons.join(', ')}`);
+    }
+
+    const reasonLabels = {
+        damaged_product: 'Damaged Product',
+        wrong_item: 'Wrong Item Received',
+        missing_item: 'Missing Item',
+        not_as_described: 'Not As Described',
+        defective: 'Defective Product',
+        counterfeit: 'Counterfeit Product',
+        other: 'Other'
+    };
+
     order.orderStatus = 'disputed';
     order.dispute = {
         reason,
@@ -239,10 +574,101 @@ export const reportIssue = asyncHandler(async (req, res) => {
         status: 'open',
         createdAt: new Date()
     };
+
+    if (disputeVideoUrl) {
+        order.dispute.disputeVideoUrl = disputeVideoUrl;
+        order.dispute.disputeVideoUploadedAt = new Date();
+    }
+
     await order.save();
 
+    // Notify seller about the dispute
+    const reasonLabel = reasonLabels[reason] || reason;
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Dispute raised on order #${order.orderNumber}. Reason: ${reasonLabel}`,
+        chatMessageText: `A dispute has been raised on Order #${order.orderNumber}.\n\nReason: ${reasonLabel}${description ? `\nDescription: ${description}` : ''}${disputeVideoUrl ? '\n\nThe buyer has uploaded a proof video. You can view it in the order details.' : '\n\nThe buyer has not yet uploaded a proof video.'}\n\nThe admin team will review this dispute.`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Dispute notification error:', err));
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Issue reported, payment held until resolution")
+        new ApiResponse(200, {
+            order: updatedOrder,
+            disputePolicy: {
+                videoRequired: true,
+                videoUploaded: !!disputeVideoUrl,
+                message: "You must upload a video showing proof of damage to be eligible for refund or return. This footage will be reviewed by both the admin and the seller. If valid proof is not provided, the item will not be eligible for refund or return."
+            }
+        }, "Issue reported, payment held until resolution")
+    );
+});
+
+// Buyer uploads dispute proof video (damage evidence)
+export const uploadDisputeVideo = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { disputeVideoUrl } = req.body;
+    const buyerId = req.user._id;
+
+    if (!disputeVideoUrl) {
+        throw new ApiError(400, "Dispute video URL is required. You must upload a video showing proof of damage to be eligible for refund or return.");
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.buyerId.toString() !== buyerId.toString()) {
+        throw new ApiError(403, "Only the buyer can upload dispute video");
+    }
+
+    if (order.orderStatus !== 'disputed') {
+        throw new ApiError(400, "Can only upload dispute video for disputed orders");
+    }
+
+    if (!order.dispute) {
+        throw new ApiError(400, "No active dispute found for this order");
+    }
+
+    if (order.dispute.status === 'resolved' || order.dispute.status === 'rejected') {
+        throw new ApiError(400, "Cannot upload video for a closed dispute");
+    }
+
+    order.dispute.disputeVideoUrl = disputeVideoUrl;
+    order.dispute.disputeVideoUploadedAt = new Date();
+    await order.save();
+
+    // Notify seller that buyer has uploaded dispute proof video
+    sendOrderNotification({
+        recipientId: order.sellerId,
+        senderId: buyerId,
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        notificationMessage: `Buyer uploaded dispute proof video for order #${order.orderNumber}`,
+        chatMessageText: `The buyer has uploaded a proof video for the dispute on Order #${order.orderNumber}.\n\nYou can view the video evidence in the order details. The admin team will review this dispute.`,
+        chatId: order.chatId,
+        buyerId: order.buyerId
+    }).catch(err => console.error('Dispute video notification error:', err));
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            order: updatedOrder,
+            notice: "Your dispute video has been submitted. Both the admin and seller will review this footage. If valid proof of damage is not provided, the item will not be eligible for refund or return."
+        }, "Dispute proof video uploaded successfully")
     );
 });
 
@@ -927,4 +1353,102 @@ export const exportOrdersToCSV = asyncHandler(async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="orders_${type}_${Date.now()}.csv"`);
 
     return res.status(200).send(csv);
+});
+
+// Get all reviews for a user (as seller or as buyer)
+export const getUserReviews = asyncHandler(async (req, res) => {
+    const { userId } = req.params;
+    const { role = 'seller', page = 1, limit = 10 } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    let matchQuery, ratingField, reviewField, reviewerPopulateField, reviewerRole;
+
+    if (role === 'buyer') {
+        // Reviews about this user as a buyer (ratings BY sellers)
+        matchQuery = {
+            buyerId: userObjectId,
+            sellerRating: { $exists: true, $ne: null }
+        };
+        ratingField = 'sellerRating';
+        reviewField = 'sellerReview';
+        reviewerPopulateField = 'sellerId';
+        reviewerRole = 'seller';
+    } else {
+        // Reviews about this user as a seller (ratings BY buyers)
+        matchQuery = {
+            sellerId: userObjectId,
+            buyerRating: { $exists: true, $ne: null }
+        };
+        ratingField = 'buyerRating';
+        reviewField = 'buyerReview';
+        reviewerPopulateField = 'buyerId';
+        reviewerRole = 'buyer';
+    }
+
+    // Aggregate stats
+    const statsResult = await Order.aggregate([
+        { $match: matchQuery },
+        {
+            $group: {
+                _id: null,
+                averageRating: { $avg: `$${ratingField}` },
+                totalReviews: { $sum: 1 },
+                fiveStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 5] }, 1, 0] } },
+                fourStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 4] }, 1, 0] } },
+                threeStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 3] }, 1, 0] } },
+                twoStars: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 2] }, 1, 0] } },
+                oneStar: { $sum: { $cond: [{ $eq: [`$${ratingField}`, 1] }, 1, 0] } }
+            }
+        }
+    ]);
+
+    const stats = statsResult[0] || {
+        averageRating: 0,
+        totalReviews: 0,
+        fiveStars: 0, fourStars: 0, threeStars: 0, twoStars: 0, oneStar: 0
+    };
+
+    // Paginated reviews
+    const reviews = await Order.find(matchQuery)
+        .select(`${ratingField} ${reviewField} createdAt productDetails.name orderNumber`)
+        .populate(reviewerPopulateField, 'fullName username profileImageUrl')
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean();
+
+    // Normalize reviews into consistent shape
+    const normalizedReviews = reviews.map(order => ({
+        _id: order._id,
+        orderNumber: order.orderNumber,
+        rating: order[ratingField],
+        review: order[reviewField] || null,
+        productName: order.productDetails?.name || null,
+        reviewer: order[reviewerPopulateField],
+        reviewerRole,
+        createdAt: order.createdAt
+    }));
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            stats: {
+                averageRating: Math.round((stats.averageRating || 0) * 10) / 10,
+                totalReviews: stats.totalReviews,
+                breakdown: {
+                    5: stats.fiveStars,
+                    4: stats.fourStars,
+                    3: stats.threeStars,
+                    2: stats.twoStars,
+                    1: stats.oneStar
+                }
+            },
+            reviews: normalizedReviews,
+            page: pageNum,
+            totalPages: Math.ceil(stats.totalReviews / limitNum),
+            total: stats.totalReviews
+        }, "User reviews fetched successfully")
+    );
 });

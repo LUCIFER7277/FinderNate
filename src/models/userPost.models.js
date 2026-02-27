@@ -59,6 +59,7 @@ const ProductDetailsSchema = new mongoose.Schema({
     brand: String,
     sku: String,
     availability: String,
+    inStock: { type: Boolean, default: true },
     variants: [ProductVariantSchema],
     specifications: [ProductSpecificationSchema],
     images: [String],
@@ -76,6 +77,18 @@ const ProductDetailsSchema = new mongoose.Schema({
         enum: ['online', 'offline', 'both'],
         required: true,
         default: 'online'
+    },
+    // 💰 Shipping & GST (set by seller)
+    shippingCharges: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    gstPercent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100
     },
     location: {
         name: String,
@@ -127,6 +140,18 @@ const ServiceDetailsSchema = new mongoose.Schema({
         enum: ['online', 'offline', 'both'],
         required: true,
         default: 'online'
+    },
+    // 💰 Shipping & GST (set by seller)
+    shippingCharges: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    gstPercent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100
     },
     availability: ServiceAvailabilitySchema,
     location: ServiceLocationSchema,

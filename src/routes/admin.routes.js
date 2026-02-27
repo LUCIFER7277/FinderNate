@@ -42,6 +42,7 @@ import {
     getEscrowTransactions,
     getAllOrders,
     getDisputedOrders,
+    getRejectedOrders,
     resolveDispute,
     manualReleasePayment,
     manualRefundPayment,
@@ -184,6 +185,7 @@ router.route("/escrow/dashboard").get(getEscrowDashboard);
 router.route("/escrow/transactions").get(getEscrowTransactions);
 router.route("/escrow/orders").get(getAllOrders);
 router.route("/escrow/disputes").get(getDisputedOrders);
+router.route("/escrow/rejected").get(getRejectedOrders);
 router.route("/escrow/disputes/:orderId/resolve").post(resolveDispute);
 router.route("/escrow/orders/:orderId/release").post(manualReleasePayment);
 router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);

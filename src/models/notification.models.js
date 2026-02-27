@@ -14,7 +14,7 @@ const NotificationSchema = new mongoose.Schema({
     },
     type: {
         type: String,
-        enum: ['like', 'unlike', 'comment', 'follow', 'mention', 'message', 'tag', 'storyView', 'others'],
+        enum: ['like', 'unlike', 'comment', 'follow', 'mention', 'message', 'tag', 'storyView', 'order', 'others'],
         required: true
     },
     message: {
@@ -29,6 +29,11 @@ const NotificationSchema = new mongoose.Schema({
     commentId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Comment',
+        default: null
+    },
+    orderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Order',
         default: null
     },
     isRead: {

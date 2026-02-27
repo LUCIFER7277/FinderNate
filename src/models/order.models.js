@@ -27,13 +27,36 @@ const BuyerProofSchema = new mongoose.Schema({
 }, { _id: false });
 
 const DisputeSchema = new mongoose.Schema({
-    reason: String,
+    reason: {
+        type: String,
+        enum: ['damaged_product', 'wrong_item', 'missing_item', 'not_as_described', 'defective', 'counterfeit', 'other'],
+        required: true
+    },
     description: String,
     evidence: [String],
+    disputeVideoUrl: String,
+    disputeVideoUploadedAt: Date,
     status: { type: String, enum: ['open', 'under_review', 'resolved', 'rejected'], default: 'open' },
     resolution: String,
     createdAt: { type: Date, default: Date.now },
     resolvedAt: Date
+}, { _id: false });
+
+const SellerResponseSchema = new mongoose.Schema({
+    status: { type: String, enum: ['confirmed', 'rejected'] },
+    rejectionReason: {
+        type: String,
+        enum: [
+            'out_of_stock',
+            'price_change',
+            'invalid_address',
+            'need_clarification',
+            'certificate_required',
+            'other'
+        ]
+    },
+    rejectionNote: String,
+    respondedAt: { type: Date, default: Date.now }
 }, { _id: false });
 
 // Guest buyer details schema (for shareable payment links)
@@ -70,7 +93,7 @@ const OrderSchema = new mongoose.Schema({
     },
     orderStatus: {
         type: String,
-        enum: ['created', 'payment_pending', 'payment_received', 'processing', 'shipped', 'delivered', 'confirmed', 'disputed', 'cancelled', 'refunded'],
+        enum: ['created', 'payment_pending', 'payment_received', 'processing', 'shipped', 'delivered', 'confirmed', 'disputed', 'cancelled', 'refunded', 'seller_rejected'],
         default: 'created'
     },
     razorpayOrderId: String,
@@ -80,6 +103,7 @@ const OrderSchema = new mongoose.Schema({
     shippingInfo: ShippingInfoSchema,
     buyerProof: BuyerProofSchema,
     dispute: DisputeSchema,
+    sellerResponse: SellerResponseSchema,
     statusHistory: [{
         status: String,
         timestamp: { type: Date, default: Date.now },

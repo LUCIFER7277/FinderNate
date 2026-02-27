@@ -19,7 +19,7 @@ const MessageSchema = new mongoose.Schema({
     },
     messageType: {
         type: String,
-        enum: ['text', 'image', 'video', 'file', 'audio', 'location', 'payment_link'],
+        enum: ['text', 'image', 'video', 'file', 'audio', 'location', 'payment_link', 'checkout', 'order_update'],
         default: 'text'
     },
     mediaUrl: String,
@@ -159,6 +159,59 @@ const MessageSchema = new mongoose.Schema({
         image: String,
         siteName: String,
         fetchedAt: Date
+    },
+    // 🛒 Checkout details for in-chat checkout messages
+    checkoutDetails: {
+        postId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Post'
+        },
+        productName: String,
+        productDescription: String,
+        productImages: [String],
+        productCategory: String,
+        productType: {
+            type: String,
+            enum: ['product', 'service']
+        },
+        specifications: [{
+            key: String,
+            value: String
+        }],
+        variants: [{
+            name: String,
+            options: [String]
+        }],
+        deliveryOptions: String,
+        sellerLocation: String,
+        // Price breakdown
+        basePrice: Number,
+        shippingCharges: Number,
+        gstPercent: Number,
+        gstAmount: Number,
+        totalPrice: Number,
+        currency: {
+            type: String,
+            default: 'INR'
+        },
+        // Seller info
+        sellerId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        sellerName: String,
+        sellerUsername: String,
+        sellerAvatar: String,
+        // Payment link reference
+        paymentLinkId: String,
+        paymentUrl: String,
+        // Status tracking
+        checkoutStatus: {
+            type: String,
+            enum: ['pending', 'paid', 'expired'],
+            default: 'pending'
+        },
+        expiresAt: Date
     }
 }, {
     timestamps: true,
