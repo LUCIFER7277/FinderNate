@@ -59,6 +59,7 @@ const ProductDetailsSchema = new mongoose.Schema({
     brand: String,
     sku: String,
     availability: String,
+    inStock: { type: Boolean, default: true },
     variants: [ProductVariantSchema],
     specifications: [ProductSpecificationSchema],
     images: [String],
