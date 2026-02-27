@@ -38,6 +38,23 @@ const DisputeSchema = new mongoose.Schema({
     resolvedAt: Date
 }, { _id: false });
 
+const SellerResponseSchema = new mongoose.Schema({
+    status: { type: String, enum: ['confirmed', 'rejected'] },
+    rejectionReason: {
+        type: String,
+        enum: [
+            'out_of_stock',
+            'price_change',
+            'invalid_address',
+            'need_clarification',
+            'certificate_required',
+            'other'
+        ]
+    },
+    rejectionNote: String,
+    respondedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
 // Guest buyer details schema (for shareable payment links)
 const GuestBuyerDetailsSchema = new mongoose.Schema({
     fullName: String,
@@ -72,7 +89,7 @@ const OrderSchema = new mongoose.Schema({
     },
     orderStatus: {
         type: String,
-        enum: ['created', 'payment_pending', 'payment_received', 'processing', 'shipped', 'delivered', 'confirmed', 'disputed', 'cancelled', 'refunded'],
+        enum: ['created', 'payment_pending', 'payment_received', 'processing', 'shipped', 'delivered', 'confirmed', 'disputed', 'cancelled', 'refunded', 'seller_rejected'],
         default: 'created'
     },
     razorpayOrderId: String,
@@ -82,6 +99,7 @@ const OrderSchema = new mongoose.Schema({
     shippingInfo: ShippingInfoSchema,
     buyerProof: BuyerProofSchema,
     dispute: DisputeSchema,
+    sellerResponse: SellerResponseSchema,
     statusHistory: [{
         status: String,
         timestamp: { type: Date, default: Date.now },

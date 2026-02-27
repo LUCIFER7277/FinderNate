@@ -19,6 +19,7 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
 
     const pendingOrders = await Order.countDocuments({ paymentStatus: 'held' });
     const disputedOrders = await Order.countDocuments({ orderStatus: 'disputed' });
+    const rejectedOrders = await Order.countDocuments({ orderStatus: 'seller_rejected' });
     const completedOrders = await Order.countDocuments({ paymentStatus: 'released' });
 
     return res.status(200).json(
@@ -27,6 +28,7 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
             orderStats: {
                 pendingRelease: pendingOrders,
                 disputed: disputedOrders,
+                sellerRejected: rejectedOrders,
                 completed: completedOrders
             }
         }, "Escrow dashboard fetched")
@@ -108,6 +110,29 @@ export const getDisputedOrders = asyncHandler(async (req, res) => {
             page: parseInt(page),
             totalPages: Math.ceil(total / limit)
         }, "Disputed orders fetched")
+    );
+});
+
+// Get seller-rejected orders pending admin refund (Admin only)
+export const getRejectedOrders = asyncHandler(async (req, res) => {
+    const { page = 1, limit = 20 } = req.query;
+
+    const orders = await Order.find({ orderStatus: 'seller_rejected' })
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber email')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .sort({ updatedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit));
+
+    const total = await Order.countDocuments({ orderStatus: 'seller_rejected' });
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            orders,
+            total,
+            page: parseInt(page),
+            totalPages: Math.ceil(total / limit)
+        }, "Seller-rejected orders fetched")
     );
 });
 

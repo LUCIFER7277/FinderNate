@@ -5,6 +5,8 @@ import {
     getBuyerOrders,
     getSellerOrders,
     getSellerNewOrdersCount,
+    sellerConfirmOrder,
+    sellerRejectOrder,
     markOrderShipped,
     markOrderDelivered,
     updateTrackingInfo,
@@ -47,6 +49,8 @@ router.get("/seller", getSellerOrders);
 router.get("/:orderId", getOrderDetails);
 
 // Seller actions
+router.patch("/:orderId/seller-confirm", sellerConfirmOrder);
+router.patch("/:orderId/seller-reject", sellerRejectOrder);
 router.patch("/:orderId/ship", markOrderShipped);
 router.patch("/:orderId/deliver", markOrderDelivered);
 router.patch("/:orderId/tracking", updateTrackingInfo);

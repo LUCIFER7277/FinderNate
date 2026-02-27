@@ -181,6 +181,126 @@ export const getSellerOrders = asyncHandler(async (req, res) => {
     );
 });
 
+// Seller confirms the placed order
+export const sellerConfirmOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const sellerId = req.user._id;
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can confirm this order");
+    }
+
+    if (order.orderStatus !== 'payment_received') {
+        throw new ApiError(400, "Order can only be confirmed when payment is received");
+    }
+
+    order.orderStatus = 'processing';
+    order.sellerResponse = {
+        status: 'confirmed',
+        respondedAt: new Date()
+    };
+    await order.save();
+
+    // Notify buyer that seller has confirmed the order
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been confirmed by the seller! It is now being processed.`,
+            chatMessageText: `Order #${order.orderNumber} has been confirmed by the seller!\n\nYour order is now being processed and will be shipped soon.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Seller confirm notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Order confirmed by seller")
+    );
+});
+
+// Seller rejects the placed order with reason
+export const sellerRejectOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+    const { reason, note } = req.body;
+    const sellerId = req.user._id;
+
+    if (!reason) {
+        throw new ApiError(400, "Rejection reason is required");
+    }
+
+    const validReasons = ['out_of_stock', 'price_change', 'invalid_address', 'need_clarification', 'certificate_required', 'other'];
+    if (!validReasons.includes(reason)) {
+        throw new ApiError(400, `Invalid rejection reason. Must be one of: ${validReasons.join(', ')}`);
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (order.sellerId.toString() !== sellerId.toString()) {
+        throw new ApiError(403, "Only the seller can reject this order");
+    }
+
+    if (order.orderStatus !== 'payment_received') {
+        throw new ApiError(400, "Order can only be rejected when payment is received");
+    }
+
+    const reasonLabels = {
+        out_of_stock: 'Out of Stock',
+        price_change: 'Price Change',
+        invalid_address: 'Buyer Address Not Valid',
+        need_clarification: 'Seller Needs More Clarification',
+        certificate_required: 'Certificates Required for This Product',
+        other: 'Other'
+    };
+
+    order.orderStatus = 'seller_rejected';
+    order.sellerResponse = {
+        status: 'rejected',
+        rejectionReason: reason,
+        rejectionNote: note || '',
+        respondedAt: new Date()
+    };
+    await order.save();
+
+    // Notify buyer that seller has rejected the order
+    const rejectionLabel = reasonLabels[reason] || reason;
+    if (order.buyerId) {
+        sendOrderNotification({
+            recipientId: order.buyerId,
+            senderId: sellerId,
+            orderId: order._id,
+            orderNumber: order.orderNumber,
+            notificationMessage: `Your order #${order.orderNumber} has been rejected by the seller. Reason: ${rejectionLabel}`,
+            chatMessageText: `Order #${order.orderNumber} has been rejected by the seller.\n\nReason: ${rejectionLabel}${note ? `\nNote: ${note}` : ''}\n\nYour payment is safe in escrow. The Findernate team will process your refund shortly.`,
+            chatId: order.chatId,
+            buyerId: order.buyerId
+        }).catch(err => console.error('Seller reject notification error:', err));
+    }
+
+    const updatedOrder = await Order.findById(orderId)
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'media caption');
+
+    return res.status(200).json(
+        new ApiResponse(200, { order: updatedOrder }, "Order rejected by seller. Admin will process the refund.")
+    );
+});
+
 // Seller marks order as shipped
 export const markOrderShipped = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
