@@ -493,9 +493,8 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
     }
 
     order.orderStatus = 'confirmed';
-    order.paymentStatus = 'released';
+    // Payment stays held — admin will manually release
     order.deliveryConfirmedAt = new Date();
-    order.paymentReleasedAt = new Date();
 
     if (rating) order.buyerRating = rating;
     if (review) order.buyerReview = review;
@@ -505,18 +504,14 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
 
     await order.save();
 
-    const escrowWallet = await EscrowWallet.getWallet();
-    // No platform fee - release full amount to seller
-    await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released for order ${order.orderNumber}`);
-
     // Notify seller that delivery has been confirmed by the buyer
     sendOrderNotification({
         recipientId: order.sellerId,
         senderId: buyerId,
         orderId: order._id,
         orderNumber: order.orderNumber,
-        notificationMessage: `Order #${order.orderNumber} has been delivered successfully!`,
-        chatMessageText: `Order #${order.orderNumber} has been delivered successfully!\n\nThe buyer has confirmed receiving the product.${rating ? `\nRating: ${'⭐'.repeat(rating)}` : ''}`,
+        notificationMessage: `Order #${order.orderNumber} delivery confirmed by buyer! Payment will be released by admin shortly.`,
+        chatMessageText: `Order #${order.orderNumber} has been delivered successfully!\n\nThe buyer has confirmed receiving the product. Payment will be released by admin shortly.${rating ? `\nRating: ${'⭐'.repeat(rating)}` : ''}`,
         chatId: order.chatId,
         buyerId: order.buyerId
     }).catch(err => console.error('Confirm notification error:', err));
@@ -528,7 +523,7 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
         .populate('postId', 'media caption');
 
     return res.status(200).json(
-        new ApiResponse(200, { order: updatedOrder }, "Delivery confirmed and payment released to seller")
+        new ApiResponse(200, { order: updatedOrder }, "Delivery confirmed. Payment will be released by admin.")
     );
 });
 
