@@ -9,6 +9,7 @@ import {
     createShareablePaymentLink,
     getShareablePaymentLinkDetails,
     createShareableRazorpayOrder,
+    getCheckoutByLinkId,
     showProductInterest,
     sendCheckoutMessage,
     getCheckoutDetails,
@@ -35,6 +36,10 @@ router.get("/post/:postId/pay/:amount", getShareablePaymentLinkDetails);
 
 // Create Razorpay order for shareable payment link (optional auth - can be used by guests)
 router.post("/post/create-order", optionalVerifyJWT, createShareableRazorpayOrder);
+
+// Public route - get checkout details by linkId (for shareable checkout links)
+// Used when someone accesses /checkout/:linkId
+router.get("/checkout/link/:linkId", getCheckoutByLinkId);
 
 // Protected routes
 router.use(verifyJWT);
