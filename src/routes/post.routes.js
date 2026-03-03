@@ -10,6 +10,7 @@ import {
     createProductPost,
     createServicePost,
     createBusinessPost,
+    createBatchPosts,
     getUserProfilePosts,
     getMyPosts,
     getPostById,
@@ -43,6 +44,16 @@ router.route("/create/tweet").post(mediaUpload, verifyJWT, createTweetPost);
 router.route("/create/service").post(mediaUpload, verifyJWT, createServicePost);
 router.route("/create/product").post(mediaUpload, verifyJWT, createProductPost);
 router.route("/create/business").post(mediaUpload, verifyJWT, createBusinessPost);
+
+// Batch post creation - up to 6 posts at once with mixed content types
+const batchMediaUpload = upload.fields(
+    Array.from({ length: 6 }, (_, i) => [
+        { name: `post_${i}_image`, maxCount: 10 },
+        { name: `post_${i}_video`, maxCount: 10 },
+        { name: `post_${i}_thumbnail`, maxCount: 1 },
+    ]).flat()
+);
+router.route("/create/batch").post(batchMediaUpload, verifyJWT, createBatchPosts);
 router.route("/user/:userId/profile").get(verifyJWT, getUserProfilePosts);
 router.route("/switch/profile/:userId").get(verifyJWT, getProfileTabContent);
 router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, cacheUserFeed, getHomeFeed);

@@ -32,39 +32,17 @@ const extractMediaFiles = (files) => {
     return allFiles;
 };
 
-
-export const createNormalPost = asyncHandler(async (req, res) => {
-    const userId = req.user?._id;
-    if (!userId) throw new ApiError(400, "User ID is required");
-
-    const {
-        postType,
-        caption,
-        description,
-        mentions,
-        mood,
-        activity,
-        location,
-        tags,
-        settings,
-        scheduledAt,
-        publishedAt,
-        status,
-    } = req.body;
-    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
-        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
+const parseField = (value) => {
+    if (typeof value === "string") {
+        try { return JSON.parse(value); } catch { return value; }
     }
+    return value;
+};
 
-
-    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
-    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
-    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
-    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
-
+const resolveLocationCoordinates = async (parsedLocation) => {
     let resolvedLocation = parsedLocation || {};
     if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
         try {
-            // Pass the full location object to allow multiple fallback strategies
             const coords = await getCoordinates(resolvedLocation);
             if (coords?.latitude && coords?.longitude) {
                 resolvedLocation.coordinates = {
@@ -72,20 +50,17 @@ export const createNormalPost = asyncHandler(async (req, res) => {
                     coordinates: [coords.longitude, coords.latitude]
                 };
             } else {
-                // Log warning but allow post creation without coordinates
                 console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
             }
         } catch (error) {
-            // Log error but allow post creation without coordinates
             console.error('Error resolving location coordinates:', error.message);
         }
     }
+    return resolvedLocation;
+};
 
-    const files = extractMediaFiles(req.files);
-    if (!files.length) throw new ApiError(400, "Media file is required");
-
-    let uploadedMedia = [];
-
+const uploadPostMedia = async (files, customThumbnail) => {
+    const uploadedMedia = [];
     for (const file of files) {
         try {
             const result = await uploadBufferToBunny(file.buffer, "posts");
@@ -98,19 +73,14 @@ export const createNormalPost = asyncHandler(async (req, res) => {
                     fileSize: result.bytes,
                     format: result.format,
                     duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
+                    dimensions: { width: result.width, height: result.height },
                 });
             } else if (result.resource_type === "video") {
                 let thumbnailUrl;
-                const customThumbnail = req.files?.thumbnail?.[0];
                 if (customThumbnail) {
                     const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
                     thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
                 } else {
-                    // Generate Bunny.net thumbnail from video URL (first frame, 300x300 crop)
                     thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
                 }
                 uploadedMedia.push({
@@ -120,16 +90,35 @@ export const createNormalPost = asyncHandler(async (req, res) => {
                     fileSize: result.bytes,
                     format: result.format,
                     duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
+                    dimensions: { width: result.width, height: result.height },
                 });
             }
         } catch {
             throw new ApiError(500, "Bunny.net upload failed");
         }
     }
+    return uploadedMedia;
+};
+
+export const createNormalPost = asyncHandler(async (req, res) => {
+    const userId = req.user?._id;
+    if (!userId) throw new ApiError(400, "User ID is required");
+
+    const { postType, caption, description, mentions, mood, activity, location, tags, settings, scheduledAt, publishedAt, status } = req.body;
+    if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
+        throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
+    }
+
+    const parsedMentions = parseField(mentions);
+    const parsedTags = parseField(tags);
+    const parsedSettings = parseField(settings);
+    const parsedLocation = parseField(location);
+    const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
+
+    const files = extractMediaFiles(req.files);
+    if (!files.length) throw new ApiError(400, "Media file is required");
+
+    const uploadedMedia = await uploadPostMedia(files, req.files?.thumbnail?.[0]);
 
     const post = await Post.create({
         userId,
@@ -140,12 +129,7 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
-            normal: {
-                mood,
-                activity,
-                location: resolvedLocation,
-                tags: parsedTags || [],
-            },
+            normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
         settings: {
             ...parsedSettings,
@@ -155,20 +139,11 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         scheduledAt,
         publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
-        isPromoted: false,
-        isFeatured: false,
-        isReported: false,
-        reportCount: 0,
-        engagement: {},
-        analytics: {},
+        isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+        engagement: {}, analytics: {},
     });
 
-    // Add post ID to user's posts array
-    await Post.db.model('User').findByIdAndUpdate(
-        userId,
-        { $push: { posts: post._id } }
-    );
-
+    await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
@@ -176,91 +151,20 @@ export const createTweetPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const {
-        caption,
-        description,
-        mentions,
-        location,
-        tags,
-        settings,
-        scheduledAt,
-        publishedAt,
-        status,
-    } = req.body;
-
+    const { caption, description, mentions, location, tags, settings, scheduledAt, publishedAt, status } = req.body;
     if (!caption || !caption.trim()) {
         throw new ApiError(400, "Tweet text (caption) is required");
     }
 
-    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
-    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
-    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
-    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
-
-    let resolvedLocation = parsedLocation || {};
-    if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
-        try {
-            const coords = await getCoordinates(resolvedLocation);
-            if (coords?.latitude && coords?.longitude) {
-                resolvedLocation.coordinates = {
-                    type: "Point",
-                    coordinates: [coords.longitude, coords.latitude]
-                };
-            } else {
-                console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
-            }
-        } catch (error) {
-            console.error('Error resolving location coordinates:', error.message);
-        }
-    }
+    const parsedMentions = parseField(mentions);
+    const parsedTags = parseField(tags);
+    const parsedSettings = parseField(settings);
+    const parsedLocation = parseField(location);
+    const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
 
     // Media is optional for tweets
     const files = extractMediaFiles(req.files);
-    let uploadedMedia = [];
-
-    for (const file of files) {
-        try {
-            const result = await uploadBufferToBunny(file.buffer, "posts");
-            if (result.resource_type === "image") {
-                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            } else if (result.resource_type === "video") {
-                let thumbnailUrl;
-                const customThumbnail = req.files?.thumbnail?.[0];
-                if (customThumbnail) {
-                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
-                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
-                } else {
-                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
-                }
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            }
-        } catch {
-            throw new ApiError(500, "Bunny.net upload failed");
-        }
-    }
+    const uploadedMedia = files.length ? await uploadPostMedia(files, req.files?.thumbnail?.[0]) : [];
 
     const post = await Post.create({
         userId,
@@ -271,10 +175,7 @@ export const createTweetPost = asyncHandler(async (req, res) => {
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
-            normal: {
-                location: resolvedLocation,
-                tags: parsedTags || [],
-            },
+            normal: { location: resolvedLocation, tags: parsedTags || [] },
         },
         settings: {
             ...parsedSettings,
@@ -284,19 +185,11 @@ export const createTweetPost = asyncHandler(async (req, res) => {
         scheduledAt,
         publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
-        isPromoted: false,
-        isFeatured: false,
-        isReported: false,
-        reportCount: 0,
-        engagement: {},
-        analytics: {},
+        isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+        engagement: {}, analytics: {},
     });
 
-    await Post.db.model('User').findByIdAndUpdate(
-        userId,
-        { $push: { posts: post._id } }
-    );
-
+    await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     return res.status(201).json(new ApiResponse(201, post, "Tweet post created successfully"));
 });
 
@@ -304,150 +197,43 @@ export const createProductPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const {
-        postType,
-        caption,
-        description,
-        mentions,
-        mood,
-        activity,
-        location,
-        tags,
-        product,
-        settings,
-        scheduledAt,
-        publishedAt,
-        status,
-    } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, product, settings, scheduledAt, publishedAt, status } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
-    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
-    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
-    const parsedProduct = typeof product === "string" ? JSON.parse(product) : product;
-    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
-    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+    const parsedMentions = parseField(mentions);
+    const parsedTags = parseField(tags);
+    const parsedProduct = parseField(product);
+    const parsedSettings = parseField(settings);
+    const parsedLocation = parseField(location);
 
-    // Include location in product object for validation
-    const productWithLocation = {
-        ...parsedProduct,
-        location: parsedLocation
-    };
+    const validatedProduct = await validateDeliveryAndLocation({ ...parsedProduct, location: parsedLocation }, "product");
+    if (!validatedProduct?.link) throw new ApiError(400, "Product post must include a product link");
 
-    // Validate delivery options and location requirements
-    const validatedProduct = await validateDeliveryAndLocation(productWithLocation, "product");
-
-    let resolvedLocation = parsedLocation || {};
-    if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
-        try {
-            // Pass the full location object to allow multiple fallback strategies
-            const coords = await getCoordinates(resolvedLocation);
-            if (coords?.latitude && coords?.longitude) {
-                resolvedLocation.coordinates = {
-                    type: "Point",
-                    coordinates: [coords.longitude, coords.latitude]
-                };
-            } else {
-                // Log warning but allow post creation without coordinates
-                console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
-            }
-        } catch (error) {
-            // Log error but allow post creation without coordinates
-            console.error('Error resolving location coordinates:', error.message);
-        }
-    }
+    const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
 
     const files = extractMediaFiles(req.files);
-
     if (!files.length) throw new ApiError(400, "Media file is required");
 
-    let uploadedMedia = [];
-    for (const file of files) {
-        try {
-
-            const result = await uploadBufferToBunny(file.buffer, "posts");
-            if (result.resource_type === "image") {
-                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            } else if (result.resource_type === "video") {
-                let thumbnailUrl;
-                const customThumbnail = req.files?.thumbnail?.[0];
-                if (customThumbnail) {
-                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
-                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
-                } else {
-                    // Generate Bunny.net thumbnail from video URL (first frame, 300x300 crop)
-                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
-                }
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            }
-        } catch (error) {
-            console.error("Upload failed for:", file.originalname, error);
-            throw new ApiError(500, "Bunny.net upload failed");
-        }
-    }
-    if (!validatedProduct?.link) {
-        throw new ApiError(400, "Product post must include a product link");
-    }
+    const uploadedMedia = await uploadPostMedia(files, req.files?.thumbnail?.[0]);
 
     const post = await Post.create({
-        userId,
-        postType,
-        contentType: "product",
-        caption,
-        description,
+        userId, postType, contentType: "product", caption, description,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
             product: validatedProduct,
-            normal: {
-                mood,
-                activity,
-                location: resolvedLocation,
-                tags: parsedTags || [],
-            },
+            normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
         settings: parsedSettings || {},
-        scheduledAt,
-        publishedAt,
+        scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
-        isPromoted: false,
-        isFeatured: false,
-        isReported: false,
-        reportCount: 0,
-        engagement: {},
-        analytics: {},
+        isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+        engagement: {}, analytics: {},
     });
 
-    // Add post ID to user's posts array
-    await Post.db.model('User').findByIdAndUpdate(
-        userId,
-        { $push: { posts: post._id } }
-    );
-
+    await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     return res.status(201).json(new ApiResponse(201, post, "Product post created successfully"));
 });
 
@@ -455,144 +241,41 @@ export const createServicePost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const {
-        postType,
-        caption,
-        description,
-        mentions,
-        mood,
-        activity,
-        location,
-        tags,
-        service,
-        settings,
-        scheduledAt,
-        publishedAt,
-        status,
-    } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, service, settings, scheduledAt, publishedAt, status } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
-    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
-    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
-    const parsedService = typeof service === "string" ? JSON.parse(service) : service;
-    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
-    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+    const parsedMentions = parseField(mentions);
+    const parsedTags = parseField(tags);
+    const parsedService = parseField(service);
+    const parsedSettings = parseField(settings);
+    const parsedLocation = parseField(location);
 
-    // Include location in service object for validation
-    const serviceWithLocation = {
-        ...parsedService,
-        location: parsedLocation
-    };
-
-    // Validate delivery options and location requirements
-    const validatedService = await validateDeliveryAndLocation(serviceWithLocation, "service");
-
-    let resolvedLocation = parsedLocation || {};
-    if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
-        try {
-            // Pass the full location object to allow multiple fallback strategies
-            const coords = await getCoordinates(resolvedLocation);
-            if (coords?.latitude && coords?.longitude) {
-                resolvedLocation.coordinates = {
-                    type: "Point",
-                    coordinates: [coords.longitude, coords.latitude]
-                };
-            } else {
-                // Log warning but allow post creation without coordinates
-                console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
-            }
-        } catch (error) {
-            // Log error but allow post creation without coordinates
-            console.error('Error resolving location coordinates:', error.message);
-        }
-    }
+    const validatedService = await validateDeliveryAndLocation({ ...parsedService, location: parsedLocation }, "service");
+    const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
 
     const files = extractMediaFiles(req.files);
     if (!files.length) throw new ApiError(400, "Media file is required");
 
-    let uploadedMedia = [];
-    for (const file of files) {
-        try {
-            const result = await uploadBufferToBunny(file.buffer, "posts");
-            if (result.resource_type === "image") {
-                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            } else if (result.resource_type === "video") {
-                let thumbnailUrl;
-                const customThumbnail = req.files?.thumbnail?.[0];
-                if (customThumbnail) {
-                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
-                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
-                } else {
-                    // Generate Bunny.net thumbnail from video URL (first frame, 300x300 crop)
-                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
-                }
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            }
-        } catch {
-            throw new ApiError(500, "Bunny.net upload failed");
-        }
-    }
+    const uploadedMedia = await uploadPostMedia(files, req.files?.thumbnail?.[0]);
 
     const post = await Post.create({
-        userId,
-        postType,
-        contentType: "service",
-        caption,
-        description,
+        userId, postType, contentType: "service", caption, description,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
             service: validatedService,
-            normal: {
-                mood,
-                activity,
-                location: resolvedLocation,
-                tags: parsedTags || [],
-            },
+            normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
         settings: parsedSettings || {},
-        scheduledAt,
-        publishedAt,
+        scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
-        isPromoted: false,
-        isFeatured: false,
-        isReported: false,
-        reportCount: 0,
-        engagement: {},
-        analytics: {},
+        isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+        engagement: {}, analytics: {},
     });
 
-    // Add post ID to user's posts array
-    await Post.db.model('User').findByIdAndUpdate(
-        userId,
-        { $push: { posts: post._id } }
-    );
-
+    await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     return res.status(201).json(new ApiResponse(201, post, "Service post created successfully"));
 });
 
@@ -600,148 +283,43 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const {
-        postType,
-        caption,
-        description,
-        mentions,
-        mood,
-        activity,
-        location,
-        tags,
-        business,
-        settings,
-        scheduledAt,
-        publishedAt,
-        status,
-    } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, business, settings, scheduledAt, publishedAt, status } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
 
-    const parsedMentions = typeof mentions === "string" ? JSON.parse(mentions) : mentions;
-    const parsedTags = typeof tags === "string" ? JSON.parse(tags) : tags;
-    const parsedBusiness = typeof business === "string" ? JSON.parse(business) : business;
-    const parsedSettings = typeof settings === "string" ? JSON.parse(settings) : settings;
-    const parsedLocation = typeof location === "string" ? JSON.parse(location) : location;
+    const parsedMentions = parseField(mentions);
+    const parsedTags = parseField(tags);
+    const parsedBusiness = parseField(business);
+    const parsedSettings = parseField(settings);
+    const parsedLocation = parseField(location);
 
-    // Include location in business object for validation
-    const businessWithLocation = {
-        ...parsedBusiness,
-        location: parsedLocation
-    };
+    const validatedBusiness = await validateDeliveryAndLocation({ ...parsedBusiness, location: parsedLocation }, "business");
+    if (!validatedBusiness?.link) throw new ApiError(400, "Business post must include a business link");
 
-    // Validate delivery options and location requirements
-    const validatedBusiness = await validateDeliveryAndLocation(businessWithLocation, "business");
-
-    let resolvedLocation = parsedLocation || {};
-    if ((resolvedLocation.name || resolvedLocation.address) && !resolvedLocation.coordinates) {
-        try {
-            // Pass the full location object to allow multiple fallback strategies
-            const coords = await getCoordinates(resolvedLocation);
-            if (coords?.latitude && coords?.longitude) {
-                resolvedLocation.coordinates = {
-                    type: "Point",
-                    coordinates: [coords.longitude, coords.latitude]
-                };
-            } else {
-                // Log warning but allow post creation without coordinates
-                console.warn(`Could not resolve coordinates for location: ${resolvedLocation.name || resolvedLocation.address || 'unknown'}. Post will be created without coordinates.`);
-            }
-        } catch (error) {
-            // Log error but allow post creation without coordinates
-            console.error('Error resolving location coordinates:', error.message);
-        }
-    }
+    const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
 
     const files = extractMediaFiles(req.files);
     if (!files.length) throw new ApiError(400, "Media file is required");
 
-    let uploadedMedia = [];
-    for (const file of files) {
-        try {
-            const result = await uploadBufferToBunny(file.buffer, "posts");
-            if (result.resource_type === "image") {
-                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            } else if (result.resource_type === "video") {
-                let thumbnailUrl;
-                const customThumbnail = req.files?.thumbnail?.[0];
-                if (customThumbnail) {
-                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
-                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
-                } else {
-                    // Generate Bunny.net thumbnail from video URL (first frame, 300x300 crop)
-                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
-                }
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: {
-                        width: result.width,
-                        height: result.height,
-                    },
-                });
-            }
-        } catch {
-            throw new ApiError(500, "Bunny.net upload failed");
-        }
-    }
-
-    if (!validatedBusiness?.link) {
-        throw new ApiError(400, "Business post must include a business link");
-    }
+    const uploadedMedia = await uploadPostMedia(files, req.files?.thumbnail?.[0]);
 
     const post = await Post.create({
-        userId,
-        postType,
-        contentType: "business",
-        caption,
-        description,
+        userId, postType, contentType: "business", caption, description,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
             business: validatedBusiness,
-            normal: {
-                mood,
-                activity,
-                location: resolvedLocation,
-                tags: parsedTags || [],
-            },
+            normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
         settings: parsedSettings || {},
-        scheduledAt,
-        publishedAt,
+        scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
-        isPromoted: false,
-        isFeatured: false,
-        isReported: false,
-        reportCount: 0,
-        engagement: {},
-        analytics: {},
+        isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+        engagement: {}, analytics: {},
     });
 
-    // Add post ID to user's posts array
-    await Post.db.model('User').findByIdAndUpdate(
-        userId,
-        { $push: { posts: post._id } }
-    );
-
+    await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     return res.status(201).json(new ApiResponse(201, post, "Business post created successfully"));
 });
 
@@ -879,6 +457,176 @@ export const getPostById = asyncHandler(async (req, res) => {
 });
 
 // Edit post
+export const createBatchPosts = asyncHandler(async (req, res) => {
+    const userId = req.user?._id;
+    if (!userId) throw new ApiError(400, "User ID is required");
+
+    let posts;
+    try {
+        posts = typeof req.body.posts === "string" ? JSON.parse(req.body.posts) : req.body.posts;
+    } catch {
+        throw new ApiError(400, "Invalid posts data. Must be a valid JSON array.");
+    }
+
+    if (!Array.isArray(posts) || posts.length === 0) {
+        throw new ApiError(400, "posts must be a non-empty array");
+    }
+    if (posts.length > 6) {
+        throw new ApiError(400, "Maximum 6 posts allowed per batch");
+    }
+
+    const validPostTypes = ["photo", "reel", "video", "story", "tweet"];
+    const validContentTypes = ["normal", "product", "service", "business"];
+
+    // Phase 1: Validate all posts before any uploads
+    const parsedPosts = [];
+    for (let i = 0; i < posts.length; i++) {
+        const p = posts[i];
+        const contentType = p.contentType || "normal";
+        const postType = p.postType;
+
+        if (!postType || !validPostTypes.includes(postType)) {
+            throw new ApiError(400, `Post ${i + 1}: postType must be one of '${validPostTypes.join("', '")}'`);
+        }
+        if (!validContentTypes.includes(contentType)) {
+            throw new ApiError(400, `Post ${i + 1}: contentType must be one of '${validContentTypes.join("', '")}'`);
+        }
+
+        const parsedMentions = parseField(p.mentions);
+        const parsedTags = parseField(p.tags);
+        const parsedSettings = parseField(p.settings);
+        const parsedLocation = parseField(p.location);
+
+        // Extract files for this post index
+        const images = req.files?.[`post_${i}_image`] || [];
+        const videos = req.files?.[`post_${i}_video`] || [];
+        const thumbnail = req.files?.[`post_${i}_thumbnail`]?.[0] || null;
+        const files = [...images, ...videos];
+
+        // Media required for non-tweet posts
+        if (postType !== "tweet" && !files.length) {
+            throw new ApiError(400, `Post ${i + 1}: Media file is required for ${postType} posts`);
+        }
+        if (postType === "tweet" && (!p.caption || !p.caption.trim())) {
+            throw new ApiError(400, `Post ${i + 1}: Tweet text (caption) is required`);
+        }
+
+        // Validate content-type-specific fields
+        let validatedDetails = null;
+        if (contentType === "product") {
+            const parsedProduct = parseField(p.product);
+            validatedDetails = await validateDeliveryAndLocation({ ...parsedProduct, location: parsedLocation }, "product");
+            if (!validatedDetails?.link) {
+                throw new ApiError(400, `Post ${i + 1}: Product post must include a product link`);
+            }
+        } else if (contentType === "service") {
+            const parsedService = parseField(p.service);
+            validatedDetails = await validateDeliveryAndLocation({ ...parsedService, location: parsedLocation }, "service");
+        } else if (contentType === "business") {
+            const parsedBusiness = parseField(p.business);
+            validatedDetails = await validateDeliveryAndLocation({ ...parsedBusiness, location: parsedLocation }, "business");
+            if (!validatedDetails?.link) {
+                throw new ApiError(400, `Post ${i + 1}: Business post must include a business link`);
+            }
+        }
+
+        parsedPosts.push({
+            postType, contentType,
+            caption: p.caption, description: p.description,
+            mood: p.mood, activity: p.activity,
+            parsedMentions, parsedTags, parsedSettings, parsedLocation,
+            validatedDetails, files, thumbnail,
+            scheduledAt: p.scheduledAt, publishedAt: p.publishedAt, status: p.status,
+        });
+    }
+
+    // Phase 2: Upload media for all posts + resolve locations
+    const allUploadedUrls = [];
+    const postMediaAndLocations = [];
+
+    try {
+        for (let i = 0; i < parsedPosts.length; i++) {
+            const p = parsedPosts[i];
+            const uploadedMedia = p.files.length ? await uploadPostMedia(p.files, p.thumbnail) : [];
+            allUploadedUrls.push(...uploadedMedia.map(m => m.url));
+            const resolvedLocation = await resolveLocationCoordinates(p.parsedLocation);
+            postMediaAndLocations.push({ uploadedMedia, resolvedLocation });
+        }
+    } catch (error) {
+        // Cleanup already-uploaded media on failure
+        if (allUploadedUrls.length > 0) {
+            await deleteMultipleFromBunny(allUploadedUrls).catch(err => console.error("Cleanup failed:", err));
+        }
+        throw error;
+    }
+
+    // Phase 3: Create all posts in a transaction
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction();
+
+        const createdPosts = [];
+        for (let i = 0; i < parsedPosts.length; i++) {
+            const p = parsedPosts[i];
+            const { uploadedMedia, resolvedLocation } = postMediaAndLocations[i];
+
+            const customization = {
+                normal: { mood: p.mood, activity: p.activity, location: resolvedLocation, tags: p.parsedTags || [] },
+            };
+            if (p.contentType === "product") customization.product = p.validatedDetails;
+            if (p.contentType === "service") customization.service = p.validatedDetails;
+            if (p.contentType === "business") customization.business = p.validatedDetails;
+
+            const postSettings = p.contentType === "normal" ? {
+                ...p.parsedSettings,
+                privacy: p.parsedSettings?.privacy || req.user?.privacy || 'public',
+                isPrivacyTouched: p.parsedSettings?.privacy ? true : false
+            } : (p.parsedSettings || {});
+
+            const [created] = await Post.create([{
+                userId,
+                postType: p.postType,
+                contentType: p.contentType,
+                caption: p.caption,
+                description: p.description,
+                mentions: p.parsedMentions || [],
+                media: uploadedMedia,
+                customization,
+                settings: postSettings,
+                scheduledAt: p.scheduledAt,
+                publishedAt: p.publishedAt,
+                status: p.status || (p.scheduledAt ? "scheduled" : "published"),
+                isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
+                engagement: {}, analytics: {},
+            }], { session });
+
+            createdPosts.push(created);
+        }
+
+        // Push all post IDs to user's posts array in one operation
+        await Post.db.model('User').findByIdAndUpdate(
+            userId,
+            { $push: { posts: { $each: createdPosts.map(p => p._id) } } },
+            { session }
+        );
+
+        await session.commitTransaction();
+
+        return res.status(201).json(
+            new ApiResponse(201, { posts: createdPosts, count: createdPosts.length }, `${createdPosts.length} posts created successfully`)
+        );
+    } catch (error) {
+        await session.abortTransaction();
+        // Cleanup uploaded media from Bunny CDN
+        if (allUploadedUrls.length > 0) {
+            await deleteMultipleFromBunny(allUploadedUrls).catch(err => console.error("Cleanup failed:", err));
+        }
+        throw error;
+    } finally {
+        session.endSession();
+    }
+});
+
 export const editPost = asyncHandler(async (req, res) => {
     const { postId } = req.params;
     const userId = req.user?._id;
