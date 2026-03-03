@@ -347,7 +347,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         productDetails,
         amount: numericAmount,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days expiry
-        paymentUrl: `${frontendUrl}/post/${postId}/pay/${numericAmount}`,
+        paymentUrl: `${frontendUrl}/checkout/${linkId}`,
         shortUrl: `${frontendUrl}/p/${linkId}`,
         isShareableLink: true
     });
@@ -462,6 +462,162 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
             },
             paymentLinkId: paymentLink?.linkId || null
         }, "Payment details fetched successfully")
+    );
+});
+
+// ============================================
+// GET CHECKOUT DETAILS BY LINK ID (Public - for shareable checkout links)
+// ============================================
+export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
+    const { linkId } = req.params;
+
+    const paymentLink = await PaymentLink.findOne({ linkId, isShareableLink: true })
+        .populate('sellerId', 'fullName username profileImageUrl isBusinessProfile isBlueTickVerified');
+
+    if (!paymentLink) {
+        throw new ApiError(404, "Checkout link not found");
+    }
+
+    if (paymentLink.status === 'expired' || (paymentLink.expiresAt && new Date() > paymentLink.expiresAt)) {
+        paymentLink.status = 'expired';
+        await paymentLink.save();
+        throw new ApiError(400, "Checkout link has expired");
+    }
+
+    if (paymentLink.status === 'paid') {
+        throw new ApiError(400, "Payment already completed");
+    }
+
+    // Get the post for full details
+    const post = await Post.findById(paymentLink.postId);
+    if (!post) {
+        throw new ApiError(404, "Product not found");
+    }
+
+    // Build detailed product info
+    let productName = paymentLink.productDetails?.name || "Product";
+    let productDescription = paymentLink.productDetails?.description || "";
+    let productImages = paymentLink.productDetails?.images || [];
+    let productCategory = paymentLink.productDetails?.category || "";
+    let productType = post.contentType || "product";
+    let specifications = [];
+    let variants = [];
+    let deliveryOptions = "offline";
+    let sellerLocation = "";
+    let shippingCharges = 0;
+    let gstPercent = 0;
+
+    if (post.customization?.product) {
+        const p = post.customization.product;
+        productName = p.name || productName;
+        productDescription = p.description || productDescription;
+        productImages = p.images?.length ? p.images : productImages;
+        productCategory = p.category || productCategory;
+        specifications = p.specifications || [];
+        variants = p.variants || [];
+        deliveryOptions = p.deliveryOptions || "offline";
+        shippingCharges = p.shippingCharges || 0;
+        gstPercent = p.gstPercent || 0;
+        if (p.location) {
+            sellerLocation = p.location.name || p.location.address || p.location.city || "";
+        }
+    } else if (post.customization?.service) {
+        const s = post.customization.service;
+        productName = s.name || productName;
+        productDescription = s.description || productDescription;
+        productCategory = s.category || productCategory;
+        productType = "service";
+        deliveryOptions = s.deliveryOptions || "offline";
+        shippingCharges = s.shippingCharges || 0;
+        gstPercent = s.gstPercent || 0;
+        if (s.location) {
+            sellerLocation = s.location.name || s.location.address || s.location.city || "";
+        }
+    }
+
+    const basePrice = paymentLink.amount;
+    const gstAmount = Math.round((basePrice * gstPercent) / 100);
+    const totalPrice = basePrice + shippingCharges + gstAmount;
+
+    const seller = paymentLink.sellerId;
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            linkId: paymentLink.linkId,
+            checkoutDetails: {
+                postId: paymentLink.postId,
+                productName,
+                productDescription,
+                productImages,
+                productCategory,
+                productType,
+                specifications,
+                variants,
+                deliveryOptions,
+                sellerLocation,
+                priceBreakdown: {
+                    basePrice,
+                    shippingCharges,
+                    gstPercent,
+                    gstAmount,
+                    totalPrice,
+                    currency: paymentLink.currency || 'INR'
+                },
+                seller: {
+                    _id: seller._id,
+                    fullName: seller.fullName,
+                    username: seller.username,
+                    profileImageUrl: seller.profileImageUrl
+                },
+                checkoutStatus: paymentLink.status === 'active' ? 'pending' : paymentLink.status,
+                expiresAt: paymentLink.expiresAt
+            },
+            userRole: 'buyer',
+            checkoutPolicies: {
+                shippingPolicy: {
+                    estimatedDeliveryDays: '5-10',
+                    maxShippingDays: 15,
+                    description: 'Shipping is handled by the seller. Estimated delivery is 5-10 business days depending on your location. Tracking details will be shared once shipped.'
+                },
+                returnPolicy: {
+                    maxReturnDays: 7,
+                    returnConditions: [
+                        'Item must be unused, unworn and in original packaging',
+                        'Return request must be raised within 7 days of delivery',
+                        'Record a video while opening the package for dispute support',
+                        'Refunds are processed within 5-7 business days after return approval',
+                        'Shipping costs for returns may be borne by the buyer unless the item is defective'
+                    ],
+                    description: 'Returns accepted within 7 days of delivery for eligible items. Items must be in original condition with tags and packaging intact.'
+                },
+                buyerNotices: [
+                    {
+                        type: 'escrow_protection',
+                        title: 'Escrow Payment Protection',
+                        message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
+                        priority: 'medium'
+                    },
+                    {
+                        type: 'package_opening',
+                        title: 'Record Package Opening',
+                        message: 'We strongly recommend recording a video while opening your package. This is required as evidence if you need to file a return or dispute.',
+                        priority: 'high'
+                    },
+                    {
+                        type: 'fraud_warning',
+                        title: 'Fraudulent Payment Warning',
+                        message: 'Any fraudulent, unauthorized, or deceptive payment activity will result in immediate account suspension and legal action under applicable laws including the IT Act, 2000 and Indian Penal Code.',
+                        priority: 'critical',
+                        displayStyle: 'red'
+                    }
+                ]
+            },
+            actions: {
+                canProceedToPay: paymentLink.status === 'active',
+                addressRequired: true,
+                paymentLinkId: paymentLink.linkId
+            }
+        }, "Checkout details fetched")
     );
 });
 
@@ -1164,10 +1320,15 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
         await message.save();
     }
 
+    // Determine user role
+    const isSeller = checkout.sellerId?.toString() === userId.toString();
+    const userRole = isSeller ? 'seller' : 'buyer';
+
     return res.status(200).json(
         new ApiResponse(200, {
             messageId: message._id,
             chatId: message.chatId,
+            userRole,
             checkoutDetails: {
                 postId: checkout.postId,
                 productName: checkout.productName,
@@ -1195,6 +1356,53 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 },
                 checkoutStatus: checkout.checkoutStatus,
                 expiresAt: checkout.expiresAt
+            },
+            checkoutPolicies: {
+                shippingPolicy: {
+                    estimatedDeliveryDays: '5-10',
+                    maxShippingDays: 15,
+                    description: 'Shipping is handled by the seller. Estimated delivery is 5-10 business days depending on your location. Tracking details will be shared once shipped.'
+                },
+                returnPolicy: {
+                    maxReturnDays: 7,
+                    returnConditions: [
+                        'Item must be unused, unworn and in original packaging',
+                        'Return request must be raised within 7 days of delivery',
+                        'Record a video while opening the package for dispute support',
+                        'Refunds are processed within 5-7 business days after return approval',
+                        'Shipping costs for returns may be borne by the buyer unless the item is defective'
+                    ],
+                    description: 'Returns accepted within 7 days of delivery for eligible items. Items must be in original condition with tags and packaging intact.'
+                },
+                buyerNotices: !isSeller ? [
+                    {
+                        type: 'escrow_protection',
+                        title: 'Escrow Payment Protection',
+                        message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
+                        priority: 'medium'
+                    },
+                    {
+                        type: 'package_opening',
+                        title: 'Record Package Opening',
+                        message: 'We strongly recommend recording a video while opening your package. This is required as evidence if you need to file a return or dispute.',
+                        priority: 'high'
+                    },
+                    {
+                        type: 'fraud_warning',
+                        title: 'Fraudulent Payment Warning',
+                        message: 'Any fraudulent, unauthorized, or deceptive payment activity will result in immediate account suspension and legal action under applicable laws including the IT Act, 2000 and Indian Penal Code.',
+                        priority: 'critical',
+                        displayStyle: 'red'
+                    }
+                ] : [],
+                sellerNotices: isSeller ? [
+                    {
+                        type: 'seller_info',
+                        title: 'Seller View',
+                        message: 'You are viewing this checkout as the seller. You cannot purchase your own product. Share this checkout link with your buyers.',
+                        priority: 'medium'
+                    }
+                ] : []
             },
             actions: {
                 canProceedToPay: checkout.checkoutStatus === 'pending',
