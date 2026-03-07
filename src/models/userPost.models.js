@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { IPost } from '../types/userPost.types.js';
 
 // 🌐 GeoJSON for location
 const GeoJSONPointSchema = new mongoose.Schema({
@@ -296,7 +297,7 @@ const AnalyticsSchema = new mongoose.Schema({
 }, { _id: false });
 
 // 📬 Post Schema
-const PostSchema = new mongoose.Schema({
+const PostSchema = new mongoose.Schema<IPost>({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     postType: { type: String, required: true, enum: ['photo', 'reel', 'video', 'story', 'tweet'] },
     contentType: { type: String, required: true, enum: ['normal', 'product', 'service', 'business'] },

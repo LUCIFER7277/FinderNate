@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IActivityLog } from '../types/activity.types.js';
 
-const ActivityLogSchema = new mongoose.Schema({
+const ActivityLogSchema = new mongoose.Schema<IActivityLog>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

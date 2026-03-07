@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IBusinessRating } from '../types/businessRating.types.js';
 
-const BusinessRatingSchema = new mongoose.Schema({
+const BusinessRatingSchema = new mongoose.Schema<IBusinessRating>({
     businessId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Business',

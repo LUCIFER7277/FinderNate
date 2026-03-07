@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IApiKey } from '../types/apikey.types.js';
 
-const ApiKeySchema = new mongoose.Schema({
+const ApiKeySchema = new mongoose.Schema<IApiKey>({
     key: {
         type: String,
         required: true,

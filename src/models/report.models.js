@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IReport } from '../types/report.types.js';
 
-const ReportSchema = new mongoose.Schema({
+const ReportSchema = new mongoose.Schema<IReport>({
     reporterId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

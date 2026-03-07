@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IMedia } from '../types/media.types.js';
 
-const MediaSchema = new mongoose.Schema({
+const MediaSchema = new mongoose.Schema<IMedia>({
     url: {
         type: String,
         required: true

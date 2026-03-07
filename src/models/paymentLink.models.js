@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
+import { IPaymentLink } from '../types/paymentLink.types.js';
 
-const PaymentLinkSchema = new mongoose.Schema({
+const PaymentLinkSchema = new mongoose.Schema<IPaymentLink>({
     linkId: { type: String, required: true, unique: true },
     sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

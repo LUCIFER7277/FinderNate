@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IDevice } from '../types/device.types.js';
 
-const DeviceSchema = new mongoose.Schema({
+const DeviceSchema = new mongoose.Schema<IDevice>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IHashtag } from '../types/hashtag.types.js';
 
-const HashtagSchema = new mongoose.Schema({
+const HashtagSchema = new mongoose.Schema<IHashtag>({
     tag: {
         type: String,
         required: true,

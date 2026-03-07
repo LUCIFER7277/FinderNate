@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IAdvertisement } from '../types/advertisement.types.js';
 
-const AdvertisementSchema = new mongoose.Schema({
+const AdvertisementSchema = new mongoose.Schema<IAdvertisement>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

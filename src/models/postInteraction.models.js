@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IPostInteraction } from '../types/postInteraction.types.js';
 
-const PostInteractionSchema = new mongoose.Schema({
+const PostInteractionSchema = new mongoose.Schema<IPostInteraction>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

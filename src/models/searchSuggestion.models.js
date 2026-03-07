@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ISearchSuggestion } from '../types/searchSuggestion.types.js';
 
-const SearchSuggestionSchema = new mongoose.Schema({
+const SearchSuggestionSchema = new mongoose.Schema<ISearchSuggestion>({
     keyword: {
         type: String,
         required: true,

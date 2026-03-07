@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IDraft } from '../types/draft.types.js';
 
-const DraftSchema = new mongoose.Schema({
+const DraftSchema = new mongoose.Schema<IDraft>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

@@ -1,8 +1,9 @@
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
+import { IUser } from '../types/user.types.js';
 
-const UserSchema = new mongoose.Schema({
+const UserSchema = new mongoose.Schema<IUser>({
     uid: { type: String, required: true, unique: true },
     username: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },
     email: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },

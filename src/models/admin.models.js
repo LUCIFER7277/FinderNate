@@ -1,8 +1,9 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import { IAdmin } from '../types/admin.types.js';
 
-const AdminSchema = new mongoose.Schema({
+const AdminSchema = new mongoose.Schema<IAdmin>({
     uid: { type: String, required: true, unique: true },
     username: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },
     email: { type: String, required: true, unique: true, index: true, trim: true, lowercase: true },

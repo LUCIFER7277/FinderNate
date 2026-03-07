@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IFeedback } from '../types/feedback.types.js';
 
-const FeedbackSchema = new mongoose.Schema({
+const FeedbackSchema = new mongoose.Schema<IFeedback>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

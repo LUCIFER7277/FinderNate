@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
+import { ISavedPost } from '../types/savedPost.types.js';
 
 // Instagram-style saved posts: Always private, only visible to the user who saved them
-const SavedPostSchema = new mongoose.Schema({
+const SavedPostSchema = new mongoose.Schema<ISavedPost>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

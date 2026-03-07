@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { IBusiness } from '../types/business.types.js';
 
 const SocialMediaSchema = new mongoose.Schema({
     platform: String,
@@ -52,7 +53,7 @@ const LocationSchema = new mongoose.Schema({
     lastLocationUpdate: { type: Date } // Track when location was last updated
 }, { _id: false });
 
-const BusinessSchema = new mongoose.Schema({
+const BusinessSchema = new mongoose.Schema<IBusiness>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

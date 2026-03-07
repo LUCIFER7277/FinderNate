@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ILike } from '../types/like.types.js';
 
-const LikeSchema = new mongoose.Schema({
+const LikeSchema = new mongoose.Schema<ILike>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

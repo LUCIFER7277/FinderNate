@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IInsight } from '../types/insight.types.js';
 
-const InsightSchema = new mongoose.Schema({
+const InsightSchema = new mongoose.Schema<IInsight>({
     postId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Post',

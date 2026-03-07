@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IBlock } from '../types/block.types.js';
 
-const BlockSchema = new mongoose.Schema({
+const BlockSchema = new mongoose.Schema<IBlock>({
     blockerId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

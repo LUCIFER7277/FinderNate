@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { IEscrowWallet } from '../types/escrowWallet.types.js';
 
 const EscrowTransactionSchema = new mongoose.Schema({
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
@@ -11,7 +12,7 @@ const EscrowTransactionSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 }, { _id: true });
 
-const EscrowWalletSchema = new mongoose.Schema({
+const EscrowWalletSchema = new mongoose.Schema<IEscrowWallet>({
     isSystemWallet: { type: Boolean, default: true, unique: true },
     totalBalance: { type: Number, default: 0 },
     heldBalance: { type: Number, default: 0 },

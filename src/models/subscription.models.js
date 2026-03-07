@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ISubscription } from '../types/subscription.types.js';
 
-const SubscriptionSchema = new mongoose.Schema({
+const SubscriptionSchema = new mongoose.Schema<ISubscription>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

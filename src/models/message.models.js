@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IMessage } from '../types/message.types.js';
 
-const MessageSchema = new mongoose.Schema({
+const MessageSchema = new mongoose.Schema<IMessage>({
     chatId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Chat',

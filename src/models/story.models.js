@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IStory } from '../types/story.types.js';
 
-const StorySchema = new mongoose.Schema({
+const StorySchema = new mongoose.Schema<IStory>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

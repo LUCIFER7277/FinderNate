@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
+import { ITempUser } from '../types/tempUser.types.js';
 
-const TempUserSchema = new mongoose.Schema({
+const TempUserSchema = new mongoose.Schema<ITempUser>({
     fullName: String,
     fullNameLower: String,
     username: String,
