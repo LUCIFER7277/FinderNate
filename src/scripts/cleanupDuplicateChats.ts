@@ -5,7 +5,13 @@ dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/findernate';
 
-const connectDB = async () => {
+interface ChatDocument {
+    _id: unknown;
+    participants?: unknown[];
+    createdAt?: string | Date;
+}
+
+const connectDB = async (): Promise<void> => {
     try {
         console.log('🔄 Connecting to MongoDB...');
         await mongoose.connect(MONGODB_URI, {
@@ -15,7 +21,7 @@ const connectDB = async () => {
         });
         console.log('✅ MongoDB connected successfully');
     } catch (error) {
-        console.error('❌ MongoDB connection error:', error.message);
+        console.error('❌ MongoDB connection error:', (error as Error).message);
         process.exit(1);
     }
 };
@@ -24,33 +30,33 @@ const connectDB = async () => {
  * Find and remove duplicate chats
  * Keeps the oldest chat for each unique pair of participants
  */
-const cleanupDuplicateChats = async () => {
+const cleanupDuplicateChats = async (): Promise<void> => {
     try {
-        const db = mongoose.connection.db;
+        const db = mongoose.connection.db!;
         const chatsCollection = db.collection('chats');
 
         console.log('\n🔍 Finding duplicate chats...\n');
 
         // Find all chats
-        const allChats = await chatsCollection.find({}).toArray();
+        const allChats: ChatDocument[] = await chatsCollection.find({}).toArray() as ChatDocument[];
         console.log(`📊 Total chats found: ${allChats.length}`);
 
         // Group chats by participants (for 1-on-1 chats only)
-        const chatGroups = new Map();
+        const chatGroups = new Map<string, ChatDocument[]>();
 
         for (const chat of allChats) {
             // Only process 1-on-1 chats (exactly 2 participants)
             if (chat.participants && chat.participants.length === 2) {
                 // Sort participant IDs to create a consistent key
                 const participantKey = [...chat.participants]
-                    .map(id => id.toString())
+                    .map(id => String(id))
                     .sort()
                     .join(',');
 
                 if (!chatGroups.has(participantKey)) {
                     chatGroups.set(participantKey, []);
                 }
-                chatGroups.get(participantKey).push(chat);
+                chatGroups.get(participantKey)!.push(chat);
             }
         }
 
@@ -59,14 +65,14 @@ const cleanupDuplicateChats = async () => {
         // Find and remove duplicates
         let duplicatesFound = 0;
         let chatsDeleted = 0;
-        const chatIdsToDelete = [];
+        const chatIdsToDelete: unknown[] = [];
 
         for (const [participantKey, chats] of chatGroups.entries()) {
             if (chats.length > 1) {
                 duplicatesFound++;
 
                 // Sort by createdAt to keep the oldest one
-                chats.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                chats.sort((a, b) => new Date(a.createdAt as string).getTime() - new Date(b.createdAt as string).getTime());
 
                 const keepChat = chats[0];
                 const deleteChats = chats.slice(1);
@@ -118,7 +124,7 @@ const cleanupDuplicateChats = async () => {
 
         const messagesCollection = db.collection('messages');
         const messageDeleteResult = await messagesCollection.deleteMany({
-            chatId: { $in: chatIdsToDelete.map(id => id.toString()) }
+            chatId: { $in: chatIdsToDelete.map(id => String(id)) }
         });
 
         console.log(`✅ Deleted ${messageDeleteResult.deletedCount} messages from duplicate chats`);
@@ -137,15 +143,13 @@ const cleanupDuplicateChats = async () => {
 /**
  * Create unique index to prevent future duplicates
  */
-const createUniqueIndex = async () => {
+const createUniqueIndex = async (): Promise<void> => {
     try {
         console.log('\n🔧 Creating unique index to prevent future duplicates...');
 
-        const db = mongoose.connection.db;
+        const db = mongoose.connection.db!;
         const chatsCollection = db.collection('chats');
 
-        // Create a unique compound index on sorted participants
-        // This prevents duplicate chats between the same 2 users
         await chatsCollection.createIndex(
             { participants: 1 },
             {
@@ -159,10 +163,11 @@ const createUniqueIndex = async () => {
 
         console.log('✅ Unique index created successfully');
     } catch (error) {
-        if (error.code === 11000) {
+        const mongoError = error as { code?: number; message?: string };
+        if (mongoError.code === 11000) {
             console.log('ℹ️  Unique index already exists');
         } else {
-            console.error('❌ Error creating unique index:', error.message);
+            console.error('❌ Error creating unique index:', mongoError.message);
         }
     }
 };
@@ -170,7 +175,7 @@ const createUniqueIndex = async () => {
 /**
  * Main execution
  */
-const main = async () => {
+const main = async (): Promise<void> => {
     try {
         console.log('═══════════════════════════════════════════════════');
         console.log('  🧹 DUPLICATE CHAT CLEANUP SCRIPT');

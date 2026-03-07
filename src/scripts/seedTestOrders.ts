@@ -1,25 +1,45 @@
 import mongoose from "mongoose";
-import Order from "../src/models/order.models.js";
-import { User } from "../src/models/user.models.js";
-import Post from "../src/models/userPost.models.js";
+import Order from "../models/order.models.js";
+import { User } from "../models/user.models.js";
+import Post from "../models/userPost.models.js";
+import type { IUser } from "../types/user.types.js";
+import type { IPost } from "../types/userPost.types.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI!;
+
+interface TestProduct {
+    name: string;
+    category: string;
+    price: number;
+    description: string;
+}
+
+interface TestAddress {
+    fullName: string;
+    phoneNumber: string;
+    addressLine1: string;
+    addressLine2?: string;
+    city: string;
+    state: string;
+    postalCode: string;
+    country: string;
+}
 
 // Helper to generate order numbers
-const generateOrderNumber = () => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+const generateOrderNumber = (): string => `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
 // Helper to get random date in the past N days
-const getRandomPastDate = (daysAgo) => {
+const getRandomPastDate = (daysAgo: number): Date => {
     const date = new Date();
     date.setDate(date.getDate() - Math.floor(Math.random() * daysAgo));
     return date;
 };
 
 // Test product categories and details
-const testProducts = [
+const testProducts: TestProduct[] = [
     { name: "iPhone 14 Pro", category: "Electronics", price: 89999, description: "Latest iPhone with great camera" },
     { name: "Nike Air Max", category: "Fashion", price: 8999, description: "Comfortable running shoes" },
     { name: "MacBook Pro M2", category: "Electronics", price: 179999, description: "Powerful laptop for professionals" },
@@ -35,7 +55,7 @@ const testProducts = [
 ];
 
 // Test addresses
-const testAddresses = [
+const testAddresses: TestAddress[] = [
     {
         fullName: "John Doe",
         phoneNumber: "+919876543210",
@@ -67,30 +87,30 @@ const testAddresses = [
     }
 ];
 
-const createTestOrders = async () => {
+const createTestOrders = async (): Promise<void> => {
     try {
         console.log("🔌 Connecting to MongoDB...");
         await mongoose.connect(MONGODB_URI);
         console.log("✅ Connected to MongoDB");
 
         // Get the current user (assuming you're logged in - we'll use the first user we find)
-        const users = await User.find().limit(10);
+        const users: IUser[] = await User.find().limit(10);
 
         if (users.length < 2) {
             console.log("❌ Not enough users found. Please ensure you have at least 2 users in the database.");
             process.exit(1);
         }
 
-        const currentUser = users[0]; // This will be the buyer
-        const sellers = users.slice(1); // Other users will be sellers
+        const currentUser: IUser = users[0]; // This will be the buyer
+        const sellers: IUser[] = users.slice(1); // Other users will be sellers
 
         console.log(`\n👤 Creating test orders for buyer: ${currentUser.username} (${currentUser._id})`);
         console.log(`👥 Using ${sellers.length} sellers for test orders\n`);
 
         // Get some posts to link orders to (optional)
-        const posts = await Post.find().limit(5);
+        const posts: IPost[] = await Post.find().limit(5);
 
-        const testOrders = [];
+        const testOrders: object[] = [];
 
         // TEST CASE 1: Completed Orders (5 orders)
         console.log("✅ Creating COMPLETED orders...");

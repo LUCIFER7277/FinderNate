@@ -1,52 +1,58 @@
 import mongoose from 'mongoose';
+import type { Collection, IndexSpecification, CreateIndexesOptions } from 'mongodb';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/findernate';
 
-const connectDB = async () => {
+const connectDB = async (): Promise<void> => {
     try {
         console.log('🔄 Connecting to MongoDB...');
         console.log('📍 URI:', MONGODB_URI.replace(/:([^@]+)@/, ':****@'));
-        
+
         await mongoose.connect(MONGODB_URI, {
             serverSelectionTimeoutMS: 10000,
             connectTimeoutMS: 10000,
             socketTimeoutMS: 10000,
         });
-        
+
         console.log('✅ MongoDB connected successfully');
-        console.log('🗄️  Database:', mongoose.connection.db.databaseName);
-        
+        console.log('🗄️  Database:', mongoose.connection.db!.databaseName);
+
     } catch (error) {
-        console.error('❌ MongoDB connection error:', error.message);
+        console.error('❌ MongoDB connection error:', (error as Error).message);
         process.exit(1);
     }
 };
 
 // Helper function to safely create index
-const safeCreateIndex = async (collection, indexSpec, options = {}) => {
+const safeCreateIndex = async (
+    collection: Collection,
+    indexSpec: IndexSpecification,
+    options: CreateIndexesOptions = {}
+): Promise<{ created: boolean; skipped: boolean }> => {
     try {
         await collection.createIndex(indexSpec, options);
         console.log(`  ✅ Created: ${options.name || JSON.stringify(indexSpec)}`);
         return { created: true, skipped: false };
     } catch (error) {
-        if (error.code === 85 || error.codeName === 'IndexOptionsConflict') {
+        const mongoError = error as { code?: number; codeName?: string; message?: string };
+        if (mongoError.code === 85 || mongoError.codeName === 'IndexOptionsConflict') {
             console.log(`  ⚠️  Skipped: ${options.name || JSON.stringify(indexSpec)} (already exists)`);
             return { created: false, skipped: true };
         } else {
-            console.log(`  ❌ Failed: ${options.name || JSON.stringify(indexSpec)} - ${error.message}`);
+            console.log(`  ❌ Failed: ${options.name || JSON.stringify(indexSpec)} - ${mongoError.message}`);
             throw error;
         }
     }
 };
 
-const createIndexes = async () => {
+const createIndexes = async (): Promise<void> => {
     try {
-        const db = mongoose.connection.db;
+        const db = mongoose.connection.db!;
         console.log('🚀 Starting index optimization...\n');
-        
+
         let totalCreated = 0;
         let totalSkipped = 0;
 
@@ -54,9 +60,9 @@ const createIndexes = async () => {
         // USER COLLECTION INDEXES
         // =============================================================================
         console.log('👥 User Collection Indexes:');
-        const userCollection = db.collection('users');
-        
-        const userIndexes = [
+        const userCollection = db.collection('users') as unknown as Collection;
+
+        const userIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ fullNameLower: 'text', username: 'text' }, { name: 'idx_user_search', weights: { fullNameLower: 2, username: 3 } }],
             [{ isBusinessProfile: 1 }, { name: 'idx_business_flag' }],
             [{ accountStatus: 1 }, { name: 'idx_account_status' }],
@@ -74,9 +80,9 @@ const createIndexes = async () => {
         // POST COLLECTION INDEXES
         // =============================================================================
         console.log('\n📮 Post Collection Indexes:');
-        const postCollection = db.collection('posts');
-        
-        const postIndexes = [
+        const postCollection = db.collection('posts') as unknown as Collection;
+
+        const postIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ userId: 1, createdAt: -1 }, { name: 'idx_user_posts_time' }],
             [{ postType: 1, createdAt: -1 }, { name: 'idx_type_time' }],
             [{ contentType: 1, createdAt: -1 }, { name: 'idx_content_time' }],
@@ -104,9 +110,9 @@ const createIndexes = async () => {
         // CHAT & MESSAGE INDEXES
         // =============================================================================
         console.log('\n💬 Chat Collection Indexes:');
-        const chatCollection = db.collection('chats');
-        
-        const chatIndexes = [
+        const chatCollection = db.collection('chats') as unknown as Collection;
+
+        const chatIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ participants: 1, lastMessageAt: -1 }, { name: 'idx_user_chats' }],
             [{ chatType: 1, status: 1 }, { name: 'idx_chat_status' }],
         ];
@@ -118,9 +124,9 @@ const createIndexes = async () => {
         }
 
         console.log('\n💌 Message Collection Indexes:');
-        const messageCollection = db.collection('messages');
-        
-        const messageIndexes = [
+        const messageCollection = db.collection('messages') as unknown as Collection;
+
+        const messageIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ chatId: 1, createdAt: -1 }, { name: 'idx_chat_messages_time' }],
             [{ senderId: 1, createdAt: -1 }, { name: 'idx_sender_messages' }],
             [{ messageStatus: 1 }, { name: 'idx_message_status' }],
@@ -136,9 +142,9 @@ const createIndexes = async () => {
         // ENGAGEMENT INDEXES
         // =============================================================================
         console.log('\n❤️  Like Collection Indexes:');
-        const likeCollection = db.collection('likes');
-        
-        const likeIndexes = [
+        const likeCollection = db.collection('likes') as unknown as Collection;
+
+        const likeIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ postId: 1, createdAt: -1 }, { name: 'idx_post_likes_time' }],
             [{ userId: 1, createdAt: -1 }, { name: 'idx_user_likes_time' }],
         ];
@@ -150,9 +156,9 @@ const createIndexes = async () => {
         }
 
         console.log('\n💬 Comment Collection Indexes:');
-        const commentCollection = db.collection('comments');
-        
-        const commentIndexes = [
+        const commentCollection = db.collection('comments') as unknown as Collection;
+
+        const commentIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ postId: 1, createdAt: -1 }, { name: 'idx_post_comments_time' }],
             [{ userId: 1, createdAt: -1 }, { name: 'idx_user_comments_time' }],
             [{ parentCommentId: 1 }, { name: 'idx_comment_replies' }],
@@ -168,9 +174,9 @@ const createIndexes = async () => {
         // NOTIFICATION INDEXES
         // =============================================================================
         console.log('\n🔔 Notification Collection Indexes:');
-        const notificationCollection = db.collection('notifications');
-        
-        const notificationIndexes = [
+        const notificationCollection = db.collection('notifications') as unknown as Collection;
+
+        const notificationIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ userId: 1, isRead: 1, createdAt: -1 }, { name: 'idx_user_notifications' }],
             [{ senderId: 1, createdAt: -1 }, { name: 'idx_sender_notifications' }],
             [{ type: 1, createdAt: -1 }, { name: 'idx_notification_type' }],
@@ -186,9 +192,9 @@ const createIndexes = async () => {
         // BUSINESS INDEXES
         // =============================================================================
         console.log('\n🏢 Business Collection Indexes:');
-        const businessCollection = db.collection('businesses');
-        
-        const businessIndexes = [
+        const businessCollection = db.collection('businesses') as unknown as Collection;
+
+        const businessIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ category: 1, 'location.city': 1, 'rating.average': -1 }, { name: 'idx_business_discovery' }],
             [{ status: 1, isVerified: 1 }, { name: 'idx_business_status' }],
             [{ ownerId: 1 }, { name: 'idx_business_owner' }],
@@ -204,9 +210,9 @@ const createIndexes = async () => {
         // STORY INDEXES (with TTL)
         // =============================================================================
         console.log('\n📖 Story Collection Indexes:');
-        const storyCollection = db.collection('stories');
+        const storyCollection = db.collection('stories') as unknown as Collection;
 
-        const storyIndexes = [
+        const storyIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ createdAt: 1 }, { name: 'idx_story_expire', expireAfterSeconds: 86400 }], // 24 hours
             [{ userId: 1, createdAt: -1 }, { name: 'idx_user_stories' }],
             [{ isHighlight: 1 }, { name: 'idx_story_highlights' }],
@@ -222,9 +228,9 @@ const createIndexes = async () => {
         // BLOCK COLLECTION INDEXES
         // =============================================================================
         console.log('\n🚫 Block Collection Indexes:');
-        const blockCollection = db.collection('blocks');
+        const blockCollection = db.collection('blocks') as unknown as Collection;
 
-        const blockIndexes = [
+        const blockIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ blockerId: 1, blockedId: 1 }, { name: 'idx_blocker_blocked', unique: true }],
             [{ blockerId: 1, createdAt: -1 }, { name: 'idx_blocker_time' }],
             [{ blockedId: 1, createdAt: -1 }, { name: 'idx_blocked_time' }],
@@ -240,9 +246,9 @@ const createIndexes = async () => {
         // FOLLOWER COLLECTION INDEXES
         // =============================================================================
         console.log('\n👥 Follower Collection Indexes:');
-        const followerCollection = db.collection('followers');
+        const followerCollection = db.collection('followers') as unknown as Collection;
 
-        const followerIndexes = [
+        const followerIndexes: [IndexSpecification, CreateIndexesOptions][] = [
             [{ userId: 1, followerId: 1 }, { name: 'idx_user_follower', unique: true }],
             [{ userId: 1, createdAt: -1 }, { name: 'idx_user_followers_time' }],
             [{ followerId: 1, createdAt: -1 }, { name: 'idx_follower_following_time' }],
@@ -273,17 +279,17 @@ const createIndexes = async () => {
     }
 };
 
-const listExistingIndexes = async () => {
+const listExistingIndexes = async (): Promise<void> => {
     try {
         await connectDB();
         console.log('\n📋 Current Database Indexes:\n');
-        
-        const collections = await mongoose.connection.db.listCollections().toArray();
+
+        const collections = await mongoose.connection.db!.listCollections().toArray();
         const importantCollections = ['users', 'posts', 'chats', 'messages', 'likes', 'comments', 'notifications', 'businesses', 'stories', 'blocks', 'followers'];
-        
+
         for (const collection of collections) {
             if (importantCollections.includes(collection.name)) {
-                const indexes = await mongoose.connection.db.collection(collection.name).indexes();
+                const indexes = await mongoose.connection.db!.collection(collection.name).indexes();
                 console.log(`${collection.name}:`);
                 indexes.forEach(index => {
                     console.log(`  - ${index.name}`);
@@ -291,7 +297,7 @@ const listExistingIndexes = async () => {
                 console.log('');
             }
         }
-        
+
         await mongoose.connection.close();
     } catch (error) {
         console.error('❌ Error listing indexes:', error);
@@ -299,7 +305,7 @@ const listExistingIndexes = async () => {
 };
 
 // Main execution
-const main = async () => {
+const main = async (): Promise<void> => {
     try {
         await connectDB();
         await createIndexes();

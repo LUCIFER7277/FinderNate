@@ -1,22 +1,23 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
-import { User } from '../src/models/user.models.js';
+import { User } from '../models/user.models.js';
+import type { IUser } from '../types/user.types.js';
 
 dotenv.config();
 
-async function checkUser() {
+async function checkUser(): Promise<void> {
     try {
-        await mongoose.connect(process.env.MONGODB_URI);
-        const user = await User.findOne({ username: 'darksuryansh' })
+        await mongoose.connect(process.env.MONGODB_URI!);
+        const user: IUser | null = await User.findOne({ username: 'darksuryansh' })
             .select('username isBusinessProfile businessDetails');
         console.log('User info:');
         console.log(JSON.stringify(user, null, 2));
-        
-        if (!user.isBusinessProfile) {
+
+        if (!user!.isBusinessProfile) {
             console.log('\n⚠️ User is NOT a business profile!');
             console.log('The "My Sales" tab only shows for business profiles.');
             console.log('\nUpdating user to have business profile...');
-            
+
             await User.updateOne(
                 { username: 'darksuryansh' },
                 { $set: { isBusinessProfile: true } }

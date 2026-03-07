@@ -1,21 +1,22 @@
 import mongoose from "mongoose";
-import Order from "../src/models/order.models.js";
-import { User } from "../src/models/user.models.js";
+import Order from "../models/order.models.js";
+import { User } from "../models/user.models.js";
+import type { IUser } from "../types/user.types.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI!;
 
-const transferOrders = async () => {
+const transferOrders = async (): Promise<void> => {
     try {
         console.log("🔌 Connecting to MongoDB...");
         await mongoose.connect(MONGODB_URI);
         console.log("✅ Connected to MongoDB\n");
 
         // Find both users
-        const fromUser = await User.findOne({ username: "lucifer7277" });
-        const toUser = await User.findOne({ username: "darksuryansh" });
+        const fromUser: IUser | null = await User.findOne({ username: "lucifer7277" });
+        const toUser: IUser | null = await User.findOne({ username: "darksuryansh" });
 
         if (!fromUser) {
             console.log("❌ Source user 'lucifer7277' not found");
@@ -31,7 +32,7 @@ const transferOrders = async () => {
         console.log(`👤 To: ${toUser.username} (${toUser._id})\n`);
 
         // Count orders to transfer
-        const orderCount = await Order.countDocuments({ buyerId: fromUser._id });
+        const orderCount: number = await Order.countDocuments({ buyerId: fromUser._id });
         console.log(`📦 Found ${orderCount} orders to transfer\n`);
 
         if (orderCount === 0) {
