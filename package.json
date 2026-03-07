@@ -68,7 +68,11 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@types/mongoose": "^5.11.96",
+    "@types/node": "^25.3.5",
     "nodemon": "^3.1.10",
-    "pm2": "^6.0.8"
+    "pm2": "^6.0.8",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   }
 }
