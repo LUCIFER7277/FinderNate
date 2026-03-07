@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IChat } from '../types/chat.types.js';
 
-const ChatSchema = new mongoose.Schema({
+const ChatSchema = new mongoose.Schema<IChat>({
     // 👥 Users involved in the chat (1-on-1 or group)
     participants: [{
         type: mongoose.Schema.Types.ObjectId,

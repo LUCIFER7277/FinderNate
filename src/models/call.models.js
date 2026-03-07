@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ICall } from '../types/call.types.js';
 
-const CallSchema = new mongoose.Schema({
+const CallSchema = new mongoose.Schema<ICall>({
     // 📞 Call participants
     participants: [{
         type: mongoose.Schema.Types.ObjectId,

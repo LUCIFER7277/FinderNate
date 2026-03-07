@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { IOrder } from '../types/order.types.js';
 
 const ShippingAddressSchema = new mongoose.Schema({
     fullName: String,
@@ -66,7 +67,7 @@ const GuestBuyerDetailsSchema = new mongoose.Schema({
     phoneNumber: String
 }, { _id: false });
 
-const OrderSchema = new mongoose.Schema({
+const OrderSchema = new mongoose.Schema<IOrder>({
     orderNumber: { type: String, required: true, unique: true },
     buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Optional for guest checkout
     buyerDetails: GuestBuyerDetailsSchema, // For guest buyers via shareable links

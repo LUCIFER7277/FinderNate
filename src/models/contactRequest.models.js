@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IContactRequest } from '../types/contactRequest.types.js';
 
-const ContactRequestSchema = new mongoose.Schema({
+const ContactRequestSchema = new mongoose.Schema<IContactRequest>({
     requester: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

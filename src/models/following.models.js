@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IFollowing } from '../types/following.types.js';
 
-const FollowingSchema = new mongoose.Schema({
+const FollowingSchema = new mongoose.Schema<IFollowing>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

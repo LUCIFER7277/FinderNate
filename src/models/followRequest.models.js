@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IFollowRequest } from '../types/followRequest.types.js';
 
-const FollowRequestSchema = new mongoose.Schema({
+const FollowRequestSchema = new mongoose.Schema<IFollowRequest>({
     requesterId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

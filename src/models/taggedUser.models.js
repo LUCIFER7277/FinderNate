@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ITaggedUser } from '../types/taggedUser.types.js';
 
-const TaggedUserSchema = new mongoose.Schema({
+const TaggedUserSchema = new mongoose.Schema<ITaggedUser>({
     taggedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'

@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IEvent } from '../types/event.types.js';
 
-const EventSchema = new mongoose.Schema({
+const EventSchema = new mongoose.Schema<IEvent>({
     title: {
         type: String,
         required: true,

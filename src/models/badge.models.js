@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IBadge } from '../types/badge.types.js';
 
-const BadgeSchema = new mongoose.Schema({
+const BadgeSchema = new mongoose.Schema<IBadge>({
     name: {
         type: String,
         required: true,

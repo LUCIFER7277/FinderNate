@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { IReel } from '../types/reel.types.js';
 
-const ReelSchema = new mongoose.Schema({
+const ReelSchema = new mongoose.Schema<IReel>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

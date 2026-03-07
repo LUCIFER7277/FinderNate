@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { ISearchHistory } from '../types/searchHistory.types.js';
 
-const SearchHistorySchema = new mongoose.Schema({
+const SearchHistorySchema = new mongoose.Schema<ISearchHistory>({
     userId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
