@@ -1,24 +1,26 @@
 import mongoose from 'mongoose';
 import { Admin } from '../models/admin.models.js';
+import type { IAdmin } from '../types/admin.types.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const createAdmin = async () => {
+/** @returns {Promise<void>} */
+const createAdmin = async (): Promise<void> => {
     try {
         // Connect to database
-        await mongoose.connect(process.env.MONGODB_URI);
+        await mongoose.connect(process.env.MONGODB_URI!);
         console.log('Connected to MongoDB');
 
         // Check if admin already exists
-        const existingAdmin = await Admin.findOne({ role: 'admin' });
+        const existingAdmin: IAdmin | null = await Admin.findOne({ role: 'admin' });
         if (existingAdmin) {
             console.log('Admin already exists:', existingAdmin.email);
             process.exit(0);
         }
 
         // Create admin with full permissions (admin IS the super admin)
-        const admin = await Admin.create({
+        const admin: IAdmin = await Admin.create({
             uid: `admin_${Date.now()}`,
             username: 'admin',
             email: 'admin@findernate.com', // Change this to your desired email
