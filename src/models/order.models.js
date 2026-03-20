@@ -99,6 +99,8 @@ const OrderSchema = new mongoose.Schema({
     razorpayOrderId: String,
     razorpayPaymentId: String,
     razorpaySignature: String,
+    phonePeMerchantTransactionId: String,
+    phonePeTransactionId: String,
     shippingAddress: ShippingAddressSchema,
     shippingInfo: ShippingInfoSchema,
     buyerProof: BuyerProofSchema,
@@ -132,5 +134,6 @@ OrderSchema.index({ buyerId: 1, createdAt: -1 });
 OrderSchema.index({ sellerId: 1, createdAt: -1 });
 OrderSchema.index({ orderStatus: 1 });
 OrderSchema.index({ paymentStatus: 1 });
+OrderSchema.index({ phonePeMerchantTransactionId: 1 }); // fast webhook lookup
 
 export default mongoose.model('Order', OrderSchema);
