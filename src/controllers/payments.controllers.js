@@ -555,12 +555,6 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Checkout link not found");
     }
 
-    if (paymentLink.status === 'expired' || (paymentLink.expiresAt && new Date() > paymentLink.expiresAt)) {
-        paymentLink.status = 'expired';
-        await paymentLink.save();
-        throw new ApiError(400, "Checkout link has expired");
-    }
-
     if (paymentLink.status === 'paid') {
         throw new ApiError(400, "Payment already completed");
     }
@@ -1408,13 +1402,6 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
     }
 
     const checkout = message.checkoutDetails;
-
-    // Check if expired
-    if (checkout.expiresAt && new Date() > checkout.expiresAt) {
-        checkout.checkoutStatus = 'expired';
-        message.checkoutDetails.checkoutStatus = 'expired';
-        await message.save();
-    }
 
     // Determine user role
     const isSeller = checkout.sellerId?.toString() === userId.toString();
