@@ -3,12 +3,12 @@ import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js"
 import {
     createPaymentLink,
     getPaymentLinkDetails,
-    createRazorpayOrder,
+    createPhonePeOrder,
     verifyPayment,
-    razorpayWebhook,
+    phonePeWebhook,
     createShareablePaymentLink,
     getShareablePaymentLinkDetails,
-    createShareableRazorpayOrder,
+    createShareablePhonePeOrder,
     getCheckoutByLinkId,
     showProductInterest,
     sendCheckoutMessage,
@@ -19,8 +19,8 @@ import {
 
 const router = Router();
 
-// Webhook (no auth - called by Razorpay)
-router.post("/webhook", razorpayWebhook);
+// PhonePe S2S webhook (no auth - called by PhonePe)
+router.post("/webhook", phonePeWebhook);
 
 // Public route - get payment link details
 router.get("/link/:linkId", getPaymentLinkDetails);
@@ -34,8 +34,8 @@ router.get("/link/:linkId", getPaymentLinkDetails);
 // Used when someone accesses /post/:postId/pay/:amount
 router.get("/post/:postId/pay/:amount", getShareablePaymentLinkDetails);
 
-// Create Razorpay order for shareable payment link (optional auth - can be used by guests)
-router.post("/post/create-order", optionalVerifyJWT, createShareableRazorpayOrder);
+// Create PhonePe payment for shareable link (optional auth - can be used by guests)
+router.post("/post/create-order", optionalVerifyJWT, createShareablePhonePeOrder);
 
 // Public route - get checkout details by linkId (for shareable checkout links)
 // Used when someone accesses /checkout/:linkId
@@ -50,8 +50,8 @@ router.post("/create-link", createPaymentLink);
 // Business account creates shareable payment link for a post
 router.post("/create-shareable-link", createShareablePaymentLink);
 
-// Buyer creates Razorpay order
-router.post("/create-order", createRazorpayOrder);
+// Buyer initiates PhonePe payment
+router.post("/create-order", createPhonePeOrder);
 
 // Verify payment after completion
 router.post("/verify", verifyPayment);
@@ -60,10 +60,10 @@ router.post("/verify", verifyPayment);
 router.post("/checkout", sendCheckoutMessage);
 
 // E-commerce checkout flow (Flipkart/Myntra style)
-// Step 2: Buyer clicks "Proceed to Pay" → fills address → creates Razorpay order
+// Step 2: Buyer clicks "Proceed to Pay" → fills address → initiates PhonePe payment
 router.post("/checkout/initiate", initiateCheckoutPayment);
 
-// Step 3: Buyer completes Razorpay payment → verify & confirm order
+// Step 3: After PhonePe redirect → verify & confirm order
 router.post("/checkout/verify", verifyCheckoutPayment);
 
 // Step 1: Buyer views checkout details from a checkout message (param route last)

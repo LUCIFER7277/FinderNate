@@ -3,8 +3,11 @@ import { ApiResponse } from '../utlis/ApiResponse.js';
 import { ApiError } from '../utlis/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
-import razorpay from '../config/razorpay.config.js';
-import crypto from 'crypto';
+import {
+    initiatePhonePePayment,
+    checkPhonePePaymentStatus,
+    generateMerchantTransactionId
+} from '../config/phonepe.config.js';
 import {
     PaymentLogger,
     SubscriptionLogger,
@@ -34,7 +37,7 @@ const SUBSCRIPTION_PLANS = {
     }
 };
 
-// Helper function to convert rupees to paise (Razorpay requires amount in paise: 1 INR = 100 paise)
+// PhonePe requires amount in paise (1 INR = 100 paise)
 const convertToPaise = (rupees) => rupees * 100;
 
 /**
@@ -297,7 +300,7 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
 });
 
 /**
- * Create Razorpay order for subscription upgrade
+ * Create PhonePe order for subscription upgrade
  * This initiates the payment flow for upgrading to a paid plan
  */
 export const createSubscriptionOrder = asyncHandler(async (req, res) => {
@@ -316,97 +319,67 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'User not found');
     }
 
-    // Check if user already has an active subscription
-    const existingSubscription = await Subscription.findOne({
-        userId: userId,
-        status: 'active',
-        endDate: { $gt: new Date() }
-    });
-
     // Get plan details
     const planDetails = SUBSCRIPTION_PLANS[plan];
     if (!planDetails) {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
-    // Verify Razorpay configuration
-    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-        console.error('❌ Razorpay credentials missing!');
-        throw new ApiError(500, 'Payment gateway not configured. Please contact support.');
-    }
+    const merchantTransactionId = generateMerchantTransactionId();
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://findernate.com';
+    const BACKEND_URL = process.env.BACKEND_URL || 'https://api.findernate.com';
 
     try {
-        // Create Razorpay order
-        // Generate a short receipt ID (max 40 chars for Razorpay)
-        const shortReceipt = `sub_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`.substring(0, 40);
-
-        const razorpayOrder = await razorpay.orders.create({
-            amount: convertToPaise(planDetails.price), // Convert ₹999 to 99900 paise
-            currency: 'INR',
-            receipt: shortReceipt,
-            notes: {
-                userId: userId.toString(),
-                plan: plan,
-                planName: planDetails.name,
-                type: 'subscription_upgrade',
-                existingPlan: existingSubscription?.plan || 'free'
+        const paymentData = {
+            merchantOrderId: merchantTransactionId,
+            amount: convertToPaise(planDetails.price),
+            expireAfter: 1200,
+            paymentFlow: {
+                type: 'PG_CHECKOUT',
+                message: `FinderNate ${planDetails.name} Subscription`,
+                merchantUrls: {
+                    redirectUrl: `${FRONTEND_URL}/subscription/success?txnId=${merchantTransactionId}&plan=${plan}`
+                }
             }
-        });
+        };
 
-        // Log payment initiation
-        PaymentLogger.logPaymentInitiated(userId.toString(), razorpayOrder.id, plan, planDetails.price);
+        const phonePeResponse = await initiatePhonePePayment(paymentData);
+
+        if (!phonePeResponse?.redirectUrl) {
+            throw new Error(phonePeResponse?.message || 'Failed to get PhonePe redirect URL');
+        }
+
+        const phonePeRedirectUrl = phonePeResponse.redirectUrl;
+
+        PaymentLogger.logPaymentInitiated(userId.toString(), merchantTransactionId, plan, planDetails.price);
         MetricsCollector.recordPaymentAttempt();
 
         res.status(200).json(
             new ApiResponse(200, {
-                razorpayOrderId: razorpayOrder.id,
-                razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-                amount: razorpayOrder.amount,
-                currency: razorpayOrder.currency,
-                plan: plan,
+                merchantTransactionId,
+                phonePeRedirectUrl,
+                plan,
                 planName: planDetails.name,
                 planPrice: planDetails.price
-            }, 'Razorpay order created for subscription')
+            }, 'PhonePe payment initiated for subscription')
         );
-    } catch (razorpayError) {
-        console.error('❌ Razorpay order creation failed:', razorpayError);
-        console.error('Error details:', razorpayError.error || razorpayError.message);
-
-        // Log error
-        ErrorLogger.logRazorpayError(userId.toString(), null, razorpayError);
-
-        throw new ApiError(500, `Payment gateway error: ${razorpayError.error?.description || razorpayError.message}`);
+    } catch (error) {
+        console.error('❌ PhonePe subscription order creation failed:', error);
+        ErrorLogger.logRazorpayError(userId.toString(), null, error);
+        throw new ApiError(500, `Payment gateway error: ${error.message}`);
     }
 });
 
 /**
- * Verify Razorpay payment and activate subscription
- * Called after successful payment on frontend
+ * Verify PhonePe payment and activate subscription
+ * Called from /subscription/success page after PhonePe redirect
  */
 export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
     const userId = req.user._id;
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan } = req.body;
+    const { merchantTransactionId, plan } = req.body;
 
-    // Validate required fields
-    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !plan) {
-        throw new ApiError(400, 'Missing required payment verification fields');
-    }
-
-    // Verify Razorpay signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(body.toString())
-        .digest("hex");
-
-    const isValid = expectedSignature === razorpay_signature;
-
-    // Log verification attempt
-    PaymentLogger.logPaymentVerification(userId.toString(), razorpay_payment_id, razorpay_order_id, isValid);
-
-    if (!isValid) {
-        MetricsCollector.recordPaymentFailure();
-        throw new ApiError(400, "Invalid payment signature");
+    if (!merchantTransactionId || !plan) {
+        throw new ApiError(400, 'Missing required fields: merchantTransactionId and plan');
     }
 
     // Validate plan
@@ -415,43 +388,57 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
+    // Verify with PhonePe status API
+    let statusResponse;
+    try {
+        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
+    } catch (error) {
+        throw new ApiError(400, 'Failed to verify payment status with PhonePe');
+    }
+
+    const isSuccess = statusResponse?.state === 'COMPLETED';
+    const phonePeTransactionId = statusResponse?.transactionId || merchantTransactionId;
+
+    PaymentLogger.logPaymentVerification(userId.toString(), phonePeTransactionId, merchantTransactionId, isSuccess);
+
+    if (!isSuccess) {
+        MetricsCollector.recordPaymentFailure();
+        throw new ApiError(400, `Payment not completed: ${statusResponse?.message || 'Unknown error'}`);
+    }
+
     // Get user
     const user = await User.findById(userId);
     if (!user) {
         throw new ApiError(404, 'User not found');
     }
 
-    // Map subscription plan names to business plan names
     const planMapping = {
         'small_business': 'plan2',
         'corporate': 'plan3'
     };
 
-    // Calculate subscription dates
     const now = new Date();
     const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + 1); // 1 month from now
+    endDate.setMonth(endDate.getMonth() + 1);
 
-    // Find existing subscription or create new one
+    // Upsert subscription
     let subscription = await Subscription.findOne({ userId });
 
     if (subscription) {
-        // Update existing subscription
         subscription.plan = plan;
         subscription.status = 'active';
         subscription.startDate = now;
         subscription.endDate = endDate;
-        subscription.paymentId = razorpay_payment_id;
+        subscription.paymentId = phonePeTransactionId;
         await subscription.save();
     } else {
-        // Create new subscription
         subscription = await Subscription.create({
-            userId: userId,
-            plan: plan,
+            userId,
+            plan,
             status: 'active',
             startDate: now,
             endDate: endDate,
-            paymentId: razorpay_payment_id
+            paymentId: phonePeTransactionId
         });
     }
 
@@ -466,38 +453,31 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
     }
 
-    // Invalidate all feed caches when subscription changes
+    // Invalidate feed caches
     try {
         const { FeedCacheManager } = await import('../utlis/cache.utils.js');
-
         await Promise.allSettled([
             FeedCacheManager.invalidateUserFeed(userId),
             FeedCacheManager.invalidateExploreFeed(),
             FeedCacheManager.invalidateTrendingFeed()
         ]);
-
         const { redisClient } = await import('../config/redis.config.js');
         const feedKeys = await redisClient.keys('fn:user:*:feed:*');
-        if (feedKeys.length > 0) {
-            await redisClient.del(...feedKeys);
-        }
-
+        if (feedKeys.length > 0) await redisClient.del(...feedKeys);
         console.log(`✅ Cache invalidated for user ${userId} after subscription upgrade`);
     } catch (cacheError) {
         console.error('Cache invalidation error:', cacheError);
     }
 
-    // Get subscription status with features
     const hasCallingAccess = ['small_business', 'corporate'].includes(plan);
 
-    // Log successful payment and subscription creation
-    PaymentLogger.logPaymentSuccess(userId.toString(), razorpay_payment_id, razorpay_order_id, plan, SUBSCRIPTION_PLANS[plan].price);
+    PaymentLogger.logPaymentSuccess(userId.toString(), phonePeTransactionId, merchantTransactionId, plan, SUBSCRIPTION_PLANS[plan].price);
     SubscriptionLogger.logSubscriptionCreated(userId.toString(), plan, subscription.startDate, subscription.endDate);
     MetricsCollector.recordPaymentSuccess(SUBSCRIPTION_PLANS[plan].price, plan);
 
     res.status(200).json(
         new ApiResponse(200, {
-            subscription: subscription,
+            subscription,
             business: business ? { plan: business.plan, subscriptionStatus: business.subscriptionStatus } : null,
             tier: plan,
             features: {
@@ -509,9 +489,42 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
                 }
             },
             message: `Successfully upgraded to ${SUBSCRIPTION_PLANS[plan].name} plan!`,
-            paymentId: razorpay_payment_id
+            paymentId: phonePeTransactionId
         }, 'Subscription activated successfully')
     );
+});
+
+/**
+ * PhonePe webhook for subscription payments
+ * Called asynchronously by PhonePe after payment completion
+ */
+export const subscriptionWebhook = asyncHandler(async (req, res) => {
+    // v2: Authorization: SHA256(username:password)
+    const authHeader = req.headers['authorization'] || '';
+    if (authHeader) {
+        const { verifyPhonePeWebhookSignature } = await import('../config/phonepe.config.js');
+        const isValid = verifyPhonePeWebhookSignature(authHeader);
+        if (!isValid) {
+            console.error('❌ Invalid PhonePe subscription webhook signature');
+            return res.status(200).json({ success: true }); // always 200 to PhonePe
+        }
+    }
+
+    // v2 body is plain JSON
+    const payload = req.body;
+    const state   = payload?.state;
+    const merchantTransactionId = payload?.merchantOrderId || payload?.merchantTransactionId;
+
+    if (state !== 'COMPLETED' || !merchantTransactionId) {
+        return res.status(200).json({ success: true });
+    }
+
+    // Subscription activation is handled by verifySubscriptionPayment on the success page.
+    // Webhook just logs for audit.
+    console.log(`✅ Subscription PhonePe webhook received: txn=${merchantTransactionId}, amount=${payload.amount}`);
+    PaymentLogger.logPaymentSuccess('webhook', payload.transactionId || '', merchantTransactionId, 'subscription', payload.amount / 100);
+
+    return res.status(200).json({ success: true });
 });
 
 /**

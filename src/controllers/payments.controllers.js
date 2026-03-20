@@ -1,5 +1,9 @@
-import razorpay from "../config/razorpay.config.js";
-import crypto from "crypto";
+import {
+    initiatePhonePePayment,
+    checkPhonePePaymentStatus,
+    verifyPhonePeWebhookSignature,
+    generateMerchantTransactionId
+} from "../config/phonepe.config.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
@@ -115,8 +119,8 @@ export const getPaymentLinkDetails = asyncHandler(async (req, res) => {
     );
 });
 
-// Create Razorpay order for payment
-export const createRazorpayOrder = asyncHandler(async (req, res) => {
+// Create PhonePe payment for chat payment link
+export const createPhonePeOrder = asyncHandler(async (req, res) => {
     const { linkId, shippingAddress } = req.body;
     const buyerId = req.user._id;
 
@@ -125,10 +129,20 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Payment link not found or expired");
     }
 
-    const orderNumber = generateOrderNumber();
-    const platformFee = 0; // No platform fee
-    const sellerAmount = paymentLink.amount;
+    // --- IDEMPOTENCY: block if already paid, delete stale pending on retry ---
+    if (paymentLink.orderId) {
+        const existingOrder = await Order.findById(paymentLink.orderId);
+        if (existingOrder?.paymentStatus === 'held' || existingOrder?.paymentStatus === 'released') {
+            throw new ApiError(400, "Payment for this link has already been completed");
+        }
+        if (existingOrder?.paymentStatus === 'pending') {
+            await Order.findByIdAndDelete(existingOrder._id);
+            paymentLink.orderId = null;
+            await paymentLink.save();
+        }
+    }
 
+    const orderNumber = generateOrderNumber();
     const order = await Order.create({
         orderNumber,
         buyerId,
@@ -138,61 +152,66 @@ export const createRazorpayOrder = asyncHandler(async (req, res) => {
         paymentLinkId: paymentLink._id,
         productDetails: paymentLink.productDetails,
         amount: paymentLink.amount,
-        platformFee,
-        sellerAmount,
+        platformFee: 0,
+        sellerAmount: paymentLink.amount,
         shippingAddress,
         orderStatus: 'payment_pending',
         paymentStatus: 'pending'
     });
-
-    let razorpayOrder;
-    try {
-        razorpayOrder = await razorpay.orders.create({
-            amount: paymentLink.amount * 100,
-            currency: 'INR',
-            receipt: order.orderNumber,
-            notes: {
-                orderId: order._id.toString(),
-                buyerId: buyerId.toString(),
-                sellerId: paymentLink.sellerId.toString()
-            }
-        });
-    } catch (razorpayError) {
-        await Order.findByIdAndDelete(order._id);
-        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
-        throw new ApiError(400, errorMsg);
-    }
-
-    order.razorpayOrderId = razorpayOrder.id;
-    await order.save();
-
     paymentLink.orderId = order._id;
     await paymentLink.save();
 
+    const merchantTransactionId = generateMerchantTransactionId();
+    const frontendUrl = getFrontendUrl();
+
+
+    const phonePePayload = {
+        merchantOrderId: merchantTransactionId,
+        amount: paymentLink.amount * 100, // paise
+        expireAfter: 1200,
+        paymentFlow: {
+            type: 'PG_CHECKOUT',
+            message: `Payment for order ${order.orderNumber}`,
+            merchantUrls: {
+                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}`,
+            }
+        }
+    };
+
+    let phonePeResponse;
+    try {
+        phonePeResponse = await initiatePhonePePayment(phonePePayload);
+    } catch (phonePeError) {
+        await Order.findByIdAndDelete(order._id);
+        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
+        throw new ApiError(400, errorMsg);
+    }
+
+    const redirectUrl = phonePeResponse?.redirectUrl;
+    if (!redirectUrl) {
+        await Order.findByIdAndDelete(order._id);
+        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+    }
+
+    order.phonePeMerchantTransactionId = merchantTransactionId;
+    await order.save();
+
     return res.status(200).json(
         new ApiResponse(200, {
-            razorpayOrderId: razorpayOrder.id,
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-            amount: razorpayOrder.amount,
-            currency: razorpayOrder.currency,
+            merchantTransactionId,
+            phonePeRedirectUrl: redirectUrl,
             orderId: order._id,
             orderNumber: order.orderNumber
-        }, "Razorpay order created")
+        }, "PhonePe payment initiated")
     );
 });
 
-// Verify payment and hold in escrow
+// Verify PhonePe payment and hold in escrow (called after redirect from PhonePe)
 export const verifyPayment = asyncHandler(async (req, res) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const { merchantTransactionId, orderId } = req.body;
 
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(body.toString())
-        .digest("hex");
-
-    if (expectedSignature !== razorpay_signature) {
-        throw new ApiError(400, "Invalid payment signature");
+    if (!merchantTransactionId || !orderId) {
+        throw new ApiError(400, "merchantTransactionId and orderId are required");
     }
 
     const order = await Order.findById(orderId);
@@ -200,67 +219,125 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Order not found");
     }
 
-    order.razorpayPaymentId = razorpay_payment_id;
-    order.razorpaySignature = razorpay_signature;
-    order.paymentStatus = 'held';
-    order.orderStatus = 'payment_received';
-    await order.save();
+    // --- IDEMPOTENCY GUARD: already verified (by this endpoint or webhook) ---
+    if (order.paymentStatus === 'held' || order.paymentStatus === 'released') {
+        return res.status(200).json(
+            new ApiResponse(200, {
+                order: {
+                    _id: order._id,
+                    orderNumber: order.orderNumber,
+                    orderStatus: order.orderStatus,
+                    paymentStatus: order.paymentStatus,
+                    amount: order.amount,
+                    productDetails: order.productDetails
+                }
+            }, "Payment already verified")
+        );
+    }
 
-    await PaymentLink.findByIdAndUpdate(order.paymentLinkId, {
-        status: 'paid',
-        paidAt: new Date()
-    });
+    // --- Verify with PhonePe ---
+    let statusResponse;
+    try {
+        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
+    } catch (error) {
+        throw new ApiError(400, "Failed to verify payment status with PhonePe");
+    }
 
+    if (statusResponse?.state !== 'COMPLETED') {
+        order.paymentStatus = 'failed';
+        order.orderStatus = 'payment_pending';
+        await order.save();
+        throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
+    }
+
+    // --- Atomic guard: only one of verifyPayment / webhook wins ---
+    const updated = await Order.findOneAndUpdate(
+        { _id: order._id, paymentStatus: 'pending' },
+        {
+            phonePeTransactionId: statusResponse?.transactionId,
+            paymentStatus: 'held',
+            orderStatus: 'payment_received'
+        },
+        { new: true }
+    );
+
+    if (!updated) {
+        // Webhook already processed it — re-fetch and return
+        const refreshed = await Order.findById(order._id);
+        return res.status(200).json(
+            new ApiResponse(200, {
+                order: {
+                    _id: refreshed._id,
+                    orderNumber: refreshed.orderNumber,
+                    orderStatus: refreshed.orderStatus,
+                    paymentStatus: refreshed.paymentStatus,
+                    amount: refreshed.amount,
+                    productDetails: refreshed.productDetails
+                }
+            }, "Payment verified and held in escrow")
+        );
+    }
+
+    await PaymentLink.findByIdAndUpdate(
+        order.paymentLinkId,
+        { status: 'paid', paidAt: new Date() }
+    );
     const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.holdFunds(order, order.amount, `Payment for order ${order.orderNumber}`);
+    await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
 
     return res.status(200).json(
         new ApiResponse(200, {
             order: {
-                _id: order._id,
-                orderNumber: order.orderNumber,
-                orderStatus: order.orderStatus,
-                paymentStatus: order.paymentStatus
+                _id: updated._id,
+                orderNumber: updated.orderNumber,
+                orderStatus: updated.orderStatus,
+                paymentStatus: updated.paymentStatus,
+                amount: updated.amount,
+                productDetails: updated.productDetails
             }
         }, "Payment verified and held in escrow")
     );
 });
 
-// Razorpay webhook handler
-export const razorpayWebhook = asyncHandler(async (req, res) => {
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    const signature = req.headers['x-razorpay-signature'];
-
-    const body = JSON.stringify(req.body);
-    const expectedSignature = crypto
-        .createHmac('sha256', secret)
-        .update(body)
-        .digest('hex');
-
-    if (signature !== expectedSignature) {
-        throw new ApiError(400, "Invalid webhook signature");
+// PhonePe S2S webhook handler (v2)
+export const phonePeWebhook = asyncHandler(async (req, res) => {
+    // v2 webhooks send Authorization: SHA256(username:password)
+    const authHeader = req.headers['authorization'] || '';
+    if (authHeader) {
+        const isValid = verifyPhonePeWebhookSignature(authHeader);
+        if (!isValid) {
+            console.error('Invalid PhonePe webhook signature');
+            return res.status(200).json({ status: 'ok' }); // always 200 to PhonePe
+        }
     }
 
-    const event = req.body.event;
-    const payload = req.body.payload;
+    // v2 body is plain JSON (not base64 encoded)
+    const payload = req.body;
+    const merchantOrderId = payload?.merchantOrderId || payload?.merchantTransactionId;
+    const transactionId   = payload?.transactionId;
+    const state           = payload?.state;
 
-    if (event === 'payment.captured') {
-        const razorpayOrderId = payload.payment.entity.order_id;
-        const order = await Order.findOne({ razorpayOrderId });
+    if (state === 'COMPLETED' && merchantOrderId) {
+        const order = await Order.findOne({ phonePeMerchantTransactionId: merchantOrderId });
 
         if (order && order.paymentStatus === 'pending') {
-            order.razorpayPaymentId = payload.payment.entity.id;
-            order.paymentStatus = 'held';
-            order.orderStatus = 'payment_received';
-            await order.save();
-
-            await PaymentLink.findByIdAndUpdate(order.paymentLinkId, {
-                status: 'paid',
-                paidAt: new Date()
-            });
-
-            const escrowWallet = await EscrowWallet.getWallet();
-            await escrowWallet.holdFunds(order, order.amount, `Payment for order ${order.orderNumber}`);
+            const updated = await Order.findOneAndUpdate(
+                { _id: order._id, paymentStatus: 'pending' },
+                {
+                    phonePeTransactionId: transactionId,
+                    paymentStatus: 'held',
+                    orderStatus: 'payment_received'
+                },
+                { new: true }
+            );
+            if (updated) {
+                await PaymentLink.findByIdAndUpdate(
+                    order.paymentLinkId,
+                    { status: 'paid', paidAt: new Date() }
+                );
+                const escrowWallet = await EscrowWallet.getWallet();
+                await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
+            }
         }
     }
 
@@ -621,8 +698,8 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     );
 });
 
-// Create Razorpay order for shareable payment link (can be used by guests too)
-export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
+// Create PhonePe payment for shareable payment link (can be used by guests too)
+export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     const { postId, amount, buyerDetails, shippingAddress } = req.body;
     const buyerId = req.user?._id; // May be null for guest checkout
 
@@ -705,51 +782,72 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Payment link has expired");
     }
 
-    const orderNumber = generateOrderNumber();
-    const platformFee = 0;
-    const sellerAmount = numericAmount;
+    // --- DOUBLE BOOKING GUARD + IDEMPOTENCY ---
+    if (buyerId) {
+        const existingOrder = await Order.findOne({
+            postId,
+            buyerId,
+            amount: numericAmount,
+            paymentStatus: { $in: ['pending', 'held', 'released'] }
+        });
+        if (existingOrder?.paymentStatus === 'held' || existingOrder?.paymentStatus === 'released') {
+            throw new ApiError(400, "You have already purchased this product");
+        }
+        if (existingOrder?.paymentStatus === 'pending') {
+            await Order.findByIdAndDelete(existingOrder._id);
+        }
+    }
 
-    // Create order
     const order = await Order.create({
-        orderNumber,
+        orderNumber: generateOrderNumber(),
         buyerId: buyerId || null,
-        buyerDetails: !buyerId ? buyerDetails : undefined, // Store guest buyer details
+        buyerDetails: !buyerId ? buyerDetails : undefined,
         sellerId: seller._id,
         postId,
         paymentLinkId: paymentLink._id,
         productDetails,
         amount: numericAmount,
-        platformFee,
-        sellerAmount,
+        platformFee: 0,
+        sellerAmount: numericAmount,
         shippingAddress,
         orderStatus: 'payment_pending',
         paymentStatus: 'pending',
         isShareableOrder: true
     });
 
-    // Create Razorpay order
-    let razorpayOrder;
-    try {
-        razorpayOrder = await razorpay.orders.create({
-            amount: numericAmount * 100, // Razorpay expects amount in paise
-            currency: 'INR',
-            receipt: order.orderNumber,
-            notes: {
-                orderId: order._id.toString(),
-                buyerId: buyerId?.toString() || 'guest',
-                sellerId: seller._id.toString(),
-                postId: postId,
-                isShareable: 'true'
+    const merchantTransactionId = generateMerchantTransactionId();
+    const frontendUrl = getFrontendUrl();
+
+
+    const phonePePayload = {
+        merchantOrderId: merchantTransactionId,
+        amount: numericAmount * 100, // paise
+        expireAfter: 1200,
+        paymentFlow: {
+            type: 'PG_CHECKOUT',
+            message: `Payment for ${productDetails.name}`,
+            merchantUrls: {
+                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}`,
             }
-        });
-    } catch (razorpayError) {
-        // Clean up the order since Razorpay failed
+        }
+    };
+
+    let phonePeResponse;
+    try {
+        phonePeResponse = await initiatePhonePePayment(phonePePayload);
+    } catch (phonePeError) {
         await Order.findByIdAndDelete(order._id);
-        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
+        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
     }
 
-    order.razorpayOrderId = razorpayOrder.id;
+    const redirectUrl = phonePeResponse?.redirectUrl;
+    if (!redirectUrl) {
+        await Order.findByIdAndDelete(order._id);
+        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+    }
+
+    order.phonePeMerchantTransactionId = merchantTransactionId;
     await order.save();
 
     paymentLink.orderId = order._id;
@@ -757,17 +855,15 @@ export const createShareableRazorpayOrder = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, {
-            razorpayOrderId: razorpayOrder.id,
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-            amount: razorpayOrder.amount,
-            currency: razorpayOrder.currency,
+            merchantTransactionId,
+            phonePeRedirectUrl: redirectUrl,
             orderId: order._id,
             orderNumber: order.orderNumber,
             seller: {
                 name: seller.fullName,
                 username: seller.username
             }
-        }, "Razorpay order created for shareable payment")
+        }, "PhonePe payment initiated for shareable link")
     );
 });
 
@@ -1480,10 +1576,21 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Payment link expired or not found. Ask seller to resend checkout.");
     }
 
-    // Create order
-    const orderNumber = generateOrderNumber();
+    // --- DOUBLE BOOKING GUARD + IDEMPOTENCY ---
+    const existingCheckoutOrder = await Order.findOne({
+        paymentLinkId: paymentLink._id,
+        buyerId,
+        paymentStatus: { $in: ['pending', 'held', 'released'] }
+    });
+    if (existingCheckoutOrder?.paymentStatus === 'held' || existingCheckoutOrder?.paymentStatus === 'released') {
+        throw new ApiError(400, "Payment for this checkout has already been completed");
+    }
+    if (existingCheckoutOrder?.paymentStatus === 'pending') {
+        await Order.findByIdAndDelete(existingCheckoutOrder._id);
+    }
+
     const order = await Order.create({
-        orderNumber,
+        orderNumber: generateOrderNumber(),
         buyerId,
         sellerId: checkout.sellerId,
         postId: checkout.postId,
@@ -1499,33 +1606,46 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         amount: checkout.totalPrice,
         platformFee: 0,
         sellerAmount: checkout.totalPrice,
-        shippingAddress: shippingAddress,
+        shippingAddress,
         orderStatus: 'payment_pending',
         paymentStatus: 'pending'
     });
+    paymentLink.orderId = order._id;
+    await paymentLink.save();
 
-    // Create Razorpay order
-    let razorpayOrder;
-    try {
-        razorpayOrder = await razorpay.orders.create({
-            amount: checkout.totalPrice * 100, // paise
-            currency: checkout.currency || 'INR',
-            receipt: order.orderNumber,
-            notes: {
-                orderId: order._id.toString(),
-                buyerId: buyerId.toString(),
-                sellerId: checkout.sellerId.toString(),
-                checkoutMessageId: messageId,
-                type: 'checkout'
+    const merchantTransactionId = generateMerchantTransactionId();
+    const frontendUrl = getFrontendUrl();
+
+
+    const phonePePayload = {
+        merchantOrderId: merchantTransactionId,
+        amount: checkout.totalPrice * 100, // paise
+        expireAfter: 1200,
+        paymentFlow: {
+            type: 'PG_CHECKOUT',
+            message: `Payment for ${checkout.productName}`,
+            merchantUrls: {
+                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}&msgId=${messageId}`,
             }
-        });
-    } catch (razorpayError) {
+        }
+    };
+
+    let phonePeResponse;
+    try {
+        phonePeResponse = await initiatePhonePePayment(phonePePayload);
+    } catch (phonePeError) {
         await Order.findByIdAndDelete(order._id);
-        const errorMsg = razorpayError?.error?.description || razorpayError?.message || "Failed to create payment order";
+        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
     }
 
-    order.razorpayOrderId = razorpayOrder.id;
+    const redirectUrl = phonePeResponse?.redirectUrl;
+    if (!redirectUrl) {
+        await Order.findByIdAndDelete(order._id);
+        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+    }
+
+    order.phonePeMerchantTransactionId = merchantTransactionId;
     await order.save();
 
     paymentLink.orderId = order._id;
@@ -1533,10 +1653,8 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, {
-            razorpayOrderId: razorpayOrder.id,
-            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-            amount: razorpayOrder.amount,
-            currency: razorpayOrder.currency,
+            merchantTransactionId,
+            phonePeRedirectUrl: redirectUrl,
             orderId: order._id,
             orderNumber: order.orderNumber,
             checkoutMessageId: messageId,
@@ -1549,23 +1667,16 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
                 name: checkout.sellerName,
                 username: checkout.sellerUsername
             }
-        }, "Razorpay order created - proceed to payment")
+        }, "PhonePe payment initiated - proceed to payment")
     );
 });
 
 // Verify checkout payment & update message status
 export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId, checkoutMessageId } = req.body;
+    const { merchantTransactionId, orderId, checkoutMessageId } = req.body;
 
-    // Verify signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(body.toString())
-        .digest("hex");
-
-    if (expectedSignature !== razorpay_signature) {
-        throw new ApiError(400, "Invalid payment signature");
+    if (!merchantTransactionId || !orderId) {
+        throw new ApiError(400, "merchantTransactionId and orderId are required");
     }
 
     const order = await Order.findById(orderId);
@@ -1573,51 +1684,99 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Order not found");
     }
 
-    // Update order
-    order.razorpayPaymentId = razorpay_payment_id;
-    order.razorpaySignature = razorpay_signature;
-    order.paymentStatus = 'held';
-    order.orderStatus = 'payment_received';
-    await order.save();
+    if (order.paymentStatus === 'held' || order.paymentStatus === 'released') {
+        return res.status(200).json(
+            new ApiResponse(200, {
+                order: {
+                    _id: order._id,
+                    orderNumber: order.orderNumber,
+                    orderStatus: order.orderStatus,
+                    paymentStatus: order.paymentStatus,
+                    amount: order.amount,
+                    productDetails: order.productDetails
+                },
+                checkoutStatus: 'paid',
+                message: "Payment already verified!"
+            }, "Payment already verified")
+        );
+    }
 
-    // Update payment link
-    await PaymentLink.findByIdAndUpdate(order.paymentLinkId, {
-        status: 'paid',
-        paidAt: new Date()
-    });
+    // Verify with PhonePe
+    let statusResponse;
+    try {
+        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
+    } catch (error) {
+        throw new ApiError(400, "Failed to verify payment status with PhonePe");
+    }
 
-    // Hold funds in escrow
+    if (statusResponse?.state !== 'COMPLETED') {
+        order.paymentStatus = 'failed';
+        order.orderStatus = 'payment_pending';
+        await order.save();
+        throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
+    }
+
+    // Atomic guard: only one of verifyCheckoutPayment / webhook wins
+    const activeOrder = await Order.findOneAndUpdate(
+        { _id: order._id, paymentStatus: 'pending' },
+        {
+            phonePeTransactionId: statusResponse?.transactionId,
+            paymentStatus: 'held',
+            orderStatus: 'payment_received'
+        },
+        { new: true }
+    );
+
+    if (!activeOrder) {
+        // Webhook already processed — re-fetch and return
+        const refreshed = await Order.findById(order._id);
+        return res.status(200).json(
+            new ApiResponse(200, {
+                order: {
+                    _id: refreshed._id,
+                    orderNumber: refreshed.orderNumber,
+                    orderStatus: refreshed.orderStatus,
+                    paymentStatus: refreshed.paymentStatus,
+                    amount: refreshed.amount,
+                    productDetails: refreshed.productDetails
+                },
+                checkoutStatus: 'paid',
+                message: "Payment already verified!"
+            }, "Payment already verified")
+        );
+    }
+
+    await PaymentLink.findByIdAndUpdate(
+        activeOrder.paymentLinkId,
+        { status: 'paid', paidAt: new Date() }
+    );
     const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.holdFunds(order, order.amount, `Payment for order ${order.orderNumber}`);
+    await escrowWallet.holdFunds(activeOrder, activeOrder.amount, `Payment for order ${activeOrder.orderNumber}`);
 
-    // Update checkout message status to 'paid'
+    let populatedConfirm;
     if (checkoutMessageId) {
         const checkoutMessage = await Message.findById(checkoutMessageId);
         if (checkoutMessage && checkoutMessage.checkoutDetails) {
             checkoutMessage.checkoutDetails.checkoutStatus = 'paid';
             await checkoutMessage.save();
 
-            // Send payment confirmation message in chat
-            const buyer = await User.findById(order.buyerId).select('fullName username');
-            const confirmationText = `✅ Payment Confirmed!\n\nOrder: #${order.orderNumber}\nAmount: ₹${order.amount.toLocaleString('en-IN')}\nProduct: ${checkoutMessage.checkoutDetails.productName}\n\nPayment is held securely in escrow. Seller will be notified to ship your order.`;
+            const confirmationText = `✅ Payment Confirmed!\n\nOrder: #${activeOrder.orderNumber}\nAmount: ₹${activeOrder.amount.toLocaleString('en-IN')}\nProduct: ${checkoutMessage.checkoutDetails.productName}\n\nPayment is held securely in escrow. Seller will be notified to ship your order.`;
 
             const recipients = [];
             const chat = await Chat.findById(checkoutMessage.chatId);
             if (chat) {
                 chat.participants.forEach(p => {
-                    if (p.toString() !== order.buyerId.toString()) {
-                        recipients.push(p);
-                    }
+                    if (p.toString() !== activeOrder.buyerId.toString()) recipients.push(p);
                 });
             }
 
             const confirmMsg = await Message.create({
                 chatId: checkoutMessage.chatId,
-                sender: order.buyerId,
+                sender: activeOrder.buyerId,
                 message: confirmationText,
                 messageType: 'text',
                 timestamp: new Date(),
-                readBy: [order.buyerId],
+                readBy: [activeOrder.buyerId],
                 deliveryStatus: recipients.map(recipientId => ({
                     userId: recipientId,
                     status: 'sent',
@@ -1626,45 +1785,50 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
                 }))
             });
 
-            // Update chat last message
             if (chat) {
                 chat.lastMessageAt = new Date();
                 chat.lastMessage = {
-                    sender: order.buyerId,
-                    message: `✅ Payment confirmed for #${order.orderNumber}`,
+                    sender: activeOrder.buyerId,
+                    message: `✅ Payment confirmed for #${activeOrder.orderNumber}`,
                     timestamp: new Date()
                 };
                 chat.lastMessageId = confirmMsg._id;
                 await chat.save();
             }
 
-            // Emit socket events
-            const populatedConfirm = await Message.findById(confirmMsg._id)
+            populatedConfirm = { _id: confirmMsg._id, chatId: confirmMsg.chatId };
+        }
+    }
+
+    // Emit socket events
+    if (checkoutMessageId && populatedConfirm) {
+        const checkoutMessage = await Message.findById(checkoutMessageId);
+        if (checkoutMessage) {
+            const fullConfirm = await Message.findById(populatedConfirm._id)
                 .populate('sender', 'username fullName profileImageUrl')
                 .lean();
 
-            safeEmitToChat(checkoutMessage.chatId.toString(), 'new_message', {
-                chatId: checkoutMessage.chatId,
-                message: populatedConfirm
-            });
+            if (fullConfirm) {
+                safeEmitToChat(checkoutMessage.chatId.toString(), 'new_message', {
+                    chatId: checkoutMessage.chatId,
+                    message: fullConfirm
+                });
+            }
 
-            // Notify seller about the payment
-            safeEmitToUser(order.sellerId.toString(), 'checkout_paid', {
+            safeEmitToUser(activeOrder.sellerId.toString(), 'checkout_paid', {
                 chatId: checkoutMessage.chatId,
                 messageId: checkoutMessageId,
-                orderId: order._id,
-                orderNumber: order.orderNumber,
-                amount: order.amount,
-                buyerName: buyer?.fullName || 'Buyer'
+                orderId: activeOrder._id,
+                orderNumber: activeOrder.orderNumber,
+                amount: activeOrder.amount
             });
 
-            // Notify buyer about updated checkout status
-            safeEmitToUser(order.buyerId.toString(), 'checkout_status_updated', {
+            safeEmitToUser(activeOrder.buyerId.toString(), 'checkout_status_updated', {
                 chatId: checkoutMessage.chatId,
                 messageId: checkoutMessageId,
                 checkoutStatus: 'paid',
-                orderId: order._id,
-                orderNumber: order.orderNumber
+                orderId: activeOrder._id,
+                orderNumber: activeOrder.orderNumber
             });
         }
     }
@@ -1672,10 +1836,12 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
     return res.status(200).json(
         new ApiResponse(200, {
             order: {
-                _id: order._id,
-                orderNumber: order.orderNumber,
-                orderStatus: order.orderStatus,
-                paymentStatus: order.paymentStatus
+                _id: activeOrder._id,
+                orderNumber: activeOrder.orderNumber,
+                orderStatus: activeOrder.orderStatus,
+                paymentStatus: activeOrder.paymentStatus,
+                amount: activeOrder.amount,
+                productDetails: activeOrder.productDetails
             },
             checkoutStatus: 'paid',
             message: "Payment verified! Your order has been confirmed."
