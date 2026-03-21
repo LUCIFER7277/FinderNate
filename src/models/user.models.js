@@ -63,6 +63,7 @@ const UserSchema = new mongoose.Schema({
         default: 'active'
     },
     isDeleted: { type: Boolean, default: false },
+    
     deletedAt: { type: Date, default: null },
     adminActionReason: { type: String, default: null },
     // Service post preferences

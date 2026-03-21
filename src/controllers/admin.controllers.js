@@ -498,9 +498,16 @@ export const getAllUsers = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Insufficient permissions to manage users");
     }
 
-    const { page = 1, limit = 20, search, accountStatus } = req.query;
+    const { page = 1, limit = 20, search, accountStatus, isDeleted } = req.query;
 
     let filter = {};
+
+    // By default exclude deleted users; pass isDeleted=true to fetch only deleted users
+    if (isDeleted === 'true') {
+        filter.isDeleted = true;
+    } else {
+        filter.isDeleted = { $ne: true };
+    }
 
     if (search) {
         filter.$or = [
@@ -1225,5 +1232,43 @@ export const updateAdminPermissions = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, admin, "Admin permissions updated successfully")
+    );
+});
+
+// DELETE /api/v1/admin/users/:userId
+export const deleteUser = asyncHandler(async (req, res) => {
+    if (!req.admin.permissions.manageUsers) {
+        throw new ApiError(403, "Insufficient permissions to manage users");
+    }
+
+    const { userId } = req.params;
+    const { reason } = req.body;
+
+    const user = await User.findByIdAndUpdate(
+        userId,
+        { isDeleted: true, deletedAt: new Date(), adminActionReason: reason || null },
+        { new: true }
+    ).select('-password -refreshToken');
+
+    if (!user) {
+        throw new ApiError(404, "User not found");
+    }
+
+    // Invalidate auth cache
+    await invalidateAuthCache(userId);
+
+    // Notify chat partners in real-time
+    await notifyStatusChange(userId.toString(), 'deleted');
+
+    // Log admin activity
+    await req.admin.logActivity(
+        'user_deleted',
+        'user',
+        userId,
+        `Soft deleted user: ${user.username}. Reason: ${reason || 'none'}`
+    );
+
+    return res.status(200).json(
+        new ApiResponse(200, { userId }, "User deleted successfully")
     );
 });
