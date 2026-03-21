@@ -104,11 +104,11 @@ export const getPaymentLinkDetails = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Payment link not found");
     }
 
-    if (paymentLink.status === 'expired' || (paymentLink.expiresAt && new Date() > paymentLink.expiresAt)) {
-        paymentLink.status = 'expired';
-        await paymentLink.save();
-        throw new ApiError(400, "Payment link has expired");
-    }
+    // if (paymentLink.status === 'expired' || (paymentLink.expiresAt && new Date() > paymentLink.expiresAt)) {
+    //     paymentLink.status = 'expired';
+    //     await paymentLink.save();
+    //     throw new ApiError(400, "Payment link has expired");
+    // }
 
     if (paymentLink.status === 'paid') {
         throw new ApiError(400, "Payment already completed");
@@ -770,11 +770,11 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     }
 
     // Check if link is expired
-    if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
-        paymentLink.status = 'expired';
-        await paymentLink.save();
-        throw new ApiError(400, "Payment link has expired");
-    }
+    // if (paymentLink.expiresAt && new Date() > paymentLink.expiresAt) {
+    //     paymentLink.status = 'expired';
+    //     await paymentLink.save();
+    //     throw new ApiError(400, "Payment link has expired");
+    // }
 
     // --- DOUBLE BOOKING GUARD + IDEMPOTENCY ---
     if (buyerId) {
@@ -1538,11 +1538,11 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "This checkout has already been paid");
     }
 
-    if (checkout.expiresAt && new Date() > checkout.expiresAt) {
-        message.checkoutDetails.checkoutStatus = 'expired';
-        await message.save();
-        throw new ApiError(400, "This checkout has expired. Ask the seller to send a new one.");
-    }
+    // if (checkout.expiresAt && new Date() > checkout.expiresAt) {
+    //     message.checkoutDetails.checkoutStatus = 'expired';
+    //     await message.save();
+    //     throw new ApiError(400, "This checkout has expired. Ask the seller to send a new one.");
+    // }
 
     // Always validate shipping address
     if (!shippingAddress) {
