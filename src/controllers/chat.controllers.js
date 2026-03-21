@@ -436,10 +436,14 @@ export const getUserChats = asyncHandler(async (req, res) => {
         }
 
         // Strip admin-only fields before sending to client
-        chatWithUsers.participants = chatWithUsers.participants.map(p => {
-            const { accountStatus, isDeleted, ...rest } = p;
-            return rest;
-        });
+        // NOTE: p may be a Mongoose document (not lean), so use explicit field access
+        // instead of spread — spreading Mongoose docs can miss schema path getters
+        chatWithUsers.participants = chatWithUsers.participants.map(p => ({
+            _id: p._id,
+            username: p.username,
+            fullName: p.fullName,
+            profileImageUrl: p.profileImageUrl || null
+        }));
 
         // Update lastMessage with non-deleted message if available
         const chatId = chat._id.toString();
