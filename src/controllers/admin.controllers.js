@@ -6,10 +6,13 @@ import Report from "../models/report.models.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import Comment from "../models/comment.models.js";
+import Chat from "../models/chat.models.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import mongoose from "mongoose";
+import socketManager from "../config/socket.js";
+import notificationCache from "../utlis/notificationCache.utils.js";
 
 // ===============================
 // ADMIN AUTHENTICATION
@@ -369,6 +372,35 @@ export const getAllReports = asyncHandler(async (req, res) => {
     );
 });
 
+// Helper: emit socket event + invalidate cache when a user is deactivated/banned/deleted
+const notifyStatusChange = async (userId, status) => {
+    try {
+        const affectedChats = await Chat.find({
+            participants: userId,
+            chatType: 'direct'
+        }).select('_id participants').lean();
+
+        affectedChats.forEach(chat => {
+            if (socketManager.isReady()) {
+                socketManager.emitToChat(chat._id.toString(), 'participant_status_changed', {
+                    userId,
+                    status
+                });
+            }
+        });
+
+        const partnerIds = new Set();
+        affectedChats.forEach(chat => {
+            chat.participants.forEach(p => {
+                if (p.toString() !== userId) partnerIds.add(p.toString());
+            });
+        });
+        await Promise.all([...partnerIds].map(pid => notificationCache.invalidateAllCache(pid)));
+    } catch (err) {
+        console.error('notifyStatusChange error:', err);
+    }
+};
+
 // PUT /api/v1/admin/reports/:reportId/status
 export const updateReportStatus = asyncHandler(async (req, res) => {
     const { reportId } = req.params;
@@ -408,10 +440,14 @@ export const updateReportStatus = asyncHandler(async (req, res) => {
             await User.findByIdAndUpdate(report.reportedUserId._id, {
                 accountStatus: 'banned'
             });
+            await invalidateAuthCache(report.reportedUserId._id);
+            await notifyStatusChange(report.reportedUserId._id.toString(), 'banned');
         } else if (action === 'suspend_user' && report.reportedUserId) {
             await User.findByIdAndUpdate(report.reportedUserId._id, {
                 accountStatus: 'deactivated'
             });
+            await invalidateAuthCache(report.reportedUserId._id);
+            await notifyStatusChange(report.reportedUserId._id.toString(), 'deactivated');
         }
     }
 
@@ -541,6 +577,13 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
 
     // Invalidate Redis auth cache so the user is immediately affected
     await invalidateAuthCache(userId);
+
+    // If user is banned, suspended, or deleted — notify chat partners in real-time
+    const isDeactivated = accountStatus === 'banned' || accountStatus === 'deactivated' || isDeleted === true;
+    if (isDeactivated) {
+        const notifyStatus = isDeleted === true ? 'deleted' : accountStatus;
+        await notifyStatusChange(userId.toString(), notifyStatus);
+    }
 
     // Log admin activity
     const actionDesc = [];
