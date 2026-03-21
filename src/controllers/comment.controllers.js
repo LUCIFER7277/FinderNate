@@ -97,7 +97,11 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     // ✅ OPTIMIZED: Only fetch top-level comments (parentCommentId: null)
     const [comments, total] = await Promise.all([
         Comment.find({ postId, parentCommentId: null, isDeleted: false })
-            .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+            .populate({
+                path: 'userId',
+                select: 'username fullName profileImageUrl bio location isBusinessProfile',
+                match: { accountStatus: 'active', isDeleted: { $ne: true } }
+            })
             .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
             .sort({ createdAt: 1 })
             .skip(skip)
@@ -106,8 +110,11 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
         Comment.countDocuments({ postId, parentCommentId: null, isDeleted: false })
     ]);
 
+    // Filter out comments from banned/deleted users (populate returns null userId when match fails)
+    const visibleComments = comments.filter(c => c.userId != null);
+
     // Populate likes from Like collection for each comment
-    const commentIds = comments.map(c => c._id);
+    const commentIds = visibleComments.map(c => c._id);
     const [likes, replyCounts] = await Promise.all([
         Like.find({ commentId: { $in: commentIds } })
             .populate('userId', 'username profileImageUrl fullName')
@@ -153,7 +160,7 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     });
 
     // Add likes and isLikedBy to each comment
-    const enrichedComments = comments.map(comment => {
+    const enrichedComments = visibleComments.map(comment => {
         const commentLikes = likesByComment[comment._id.toString()] || [];
         const isLikedBy = userId ? commentLikes.some(u => u._id.toString() === userId) : false;
 

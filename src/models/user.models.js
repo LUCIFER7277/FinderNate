@@ -62,6 +62,9 @@ const UserSchema = new mongoose.Schema({
         enum: ['active', 'deactivated', 'banned'],
         default: 'active'
     },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+    adminActionReason: { type: String, default: null },
     // Service post preferences
     servicePostPreferences: {
         enableAutoFill: { type: Boolean, default: true }

@@ -58,6 +58,18 @@ export const verifyJWT = asyncHandler(async (req, _, next) => {
             }
         }
 
+        if (user.isDeleted) {
+            throw new ApiError(403, "Your account has been deleted. Please contact Find support.");
+        }
+
+        if (user.accountStatus === 'banned') {
+            throw new ApiError(403, "Your account has been banned. Please contact Find support.");
+        }
+
+        if (user.accountStatus === 'deactivated') {
+            throw new ApiError(403, "Your account has been deactivated. Please contact Find support.");
+        }
+
         req.user = user;
 
         next();
