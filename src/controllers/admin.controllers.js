@@ -1,5 +1,6 @@
 import { Admin } from "../models/admin.models.js";
 import { User } from "../models/user.models.js";
+import { invalidateAuthCache } from "../middlewares/auth.middleware.js";
 import Business from "../models/business.models.js";
 import Report from "../models/report.models.js";
 import Post from "../models/userPost.models.js";
@@ -506,15 +507,31 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
     }
 
     const { userId } = req.params;
-    const { accountStatus, reason } = req.body;
+    const { accountStatus, isDeleted, reason } = req.body;
 
-    if (!['active', 'deactivated', 'banned'].includes(accountStatus)) {
-        throw new ApiError(400, "Invalid account status");
+    // Must provide at least one action
+    if (accountStatus === undefined && isDeleted === undefined) {
+        throw new ApiError(400, "Provide accountStatus or isDeleted");
+    }
+
+    if (accountStatus !== undefined && !['active', 'deactivated', 'banned'].includes(accountStatus)) {
+        throw new ApiError(400, "Invalid accountStatus. Must be active, deactivated, or banned");
+    }
+
+    const updateFields = { adminActionReason: reason || null };
+
+    if (accountStatus !== undefined) {
+        updateFields.accountStatus = accountStatus;
+    }
+
+    if (isDeleted !== undefined) {
+        updateFields.isDeleted = isDeleted;
+        updateFields.deletedAt = isDeleted ? new Date() : null;
     }
 
     const user = await User.findByIdAndUpdate(
         userId,
-        { accountStatus },
+        updateFields,
         { new: true }
     ).select('-password -refreshToken');
 
@@ -522,16 +539,23 @@ export const updateUserStatus = asyncHandler(async (req, res) => {
         throw new ApiError(404, "User not found");
     }
 
+    // Invalidate Redis auth cache so the user is immediately affected
+    await invalidateAuthCache(userId);
+
     // Log admin activity
+    const actionDesc = [];
+    if (accountStatus !== undefined) actionDesc.push(`status → ${accountStatus}`);
+    if (isDeleted !== undefined) actionDesc.push(`isDeleted → ${isDeleted}`);
+
     await req.admin.logActivity(
         `user_status_changed`,
         'user',
         userId,
-        `User status changed to ${accountStatus}. Reason: ${reason || 'none'}`
+        `User ${actionDesc.join(', ')}. Reason: ${reason || 'none'}`
     );
 
     return res.status(200).json(
-        new ApiResponse(200, user, `User status updated to ${accountStatus}`)
+        new ApiResponse(200, user, `User updated: ${actionDesc.join(', ')}`)
     );
 });
 

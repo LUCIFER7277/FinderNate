@@ -421,9 +421,25 @@ export const getUserChats = asyncHandler(async (req, res) => {
     // Populate the chats with participants
     const populatedChatsPromise = Promise.all(deduplicatedChats.map(async (chat) => {
         const chatWithUsers = await Chat.populate(chat, [
-            { path: 'participants', select: 'username fullName profileImageUrl' },
+            { path: 'participants', select: 'username fullName profileImageUrl accountStatus isDeleted' },
             { path: 'createdBy', select: 'username fullName profileImageUrl' }
         ]);
+
+        // For direct chats, hide if the other participant is banned or deleted
+        if (chatWithUsers.chatType === 'direct') {
+            const otherParticipant = chatWithUsers.participants.find(
+                p => p._id.toString() !== currentUserId.toString()
+            );
+            if (otherParticipant && (otherParticipant.isDeleted || otherParticipant.accountStatus !== 'active')) {
+                return null; // Will be filtered out below
+            }
+        }
+
+        // Strip admin-only fields before sending to client
+        chatWithUsers.participants = chatWithUsers.participants.map(p => {
+            const { accountStatus, isDeleted, ...rest } = p;
+            return rest;
+        });
 
         // Update lastMessage with non-deleted message if available
         const chatId = chat._id.toString();
@@ -483,7 +499,8 @@ export const getUserChats = asyncHandler(async (req, res) => {
         return chatWithUsers;
     }));
 
-    const populatedChats = await populatedChatsPromise;
+    // Filter out nulls (chats with banned/deleted participants)
+    const populatedChats = (await populatedChatsPromise).filter(Boolean);
 
     // Update total count to reflect deduplication
     const deduplicatedTotal = deduplicatedChats.length;
@@ -497,6 +514,7 @@ export const getUserChats = asyncHandler(async (req, res) => {
             const socket = io.sockets.sockets.get(userSocketId);
             if (socket) {
                 populatedChats.forEach(chat => {
+                    if (!chat) return;
                     const chatId = chat._id.toString();
                     socket.join(`chat:${chatId}`);
                     socket.chatRooms = socket.chatRooms || new Set();

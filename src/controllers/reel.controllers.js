@@ -57,8 +57,10 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         // For reels (discovery feed like Instagram/TikTok), we want to show reels from ALL users
         // Not just from people you follow - this is different from the home feed
 
-        // Get ALL public users (users with privacy: 'public' or null/undefined)
+        // Get ALL public active users (exclude banned/deleted)
         const publicUsers = await User.find({
+            accountStatus: 'active',
+            isDeleted: { $ne: true },
             $or: [
                 { privacy: 'public' },
                 { privacy: { $exists: false } },
@@ -78,10 +80,12 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             const following = await Follower.find({ followerId: currentUserId }).select('userId').lean();
             const followingIds = following.map(f => f.userId);
 
-            // Get which of the followed users have private accounts
+            // Get which of the followed users have private accounts (active only)
             const privateFollowedUsers = await User.find({
                 _id: { $in: followingIds },
-                privacy: 'private'
+                privacy: 'private',
+                accountStatus: 'active',
+                isDeleted: { $ne: true }
             }).select('_id').lean();
 
             const privateFollowedUserIds = privateFollowedUsers.map(u =>

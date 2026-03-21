@@ -369,6 +369,13 @@ export const getPostById = asyncHandler(async (req, res) => {
 
     if (!post) throw new ApiError(404, "Post not found");
 
+    // Block access if post author is banned or deleted
+    const postOwner = await User.findById(post.userId?._id || post.userId)
+        .select('accountStatus isDeleted').lean();
+    if (!postOwner || postOwner.isDeleted || postOwner.accountStatus !== 'active') {
+        throw new ApiError(404, "Post not found");
+    }
+
     // Get viewer's following/followers for privacy check
     let viewerFollowing = [];
     let viewerFollowers = [];

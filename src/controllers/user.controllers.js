@@ -155,6 +155,18 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(401, "Invalid credentials");
     }
 
+    if (user.isDeleted) {
+        throw new ApiError(403, "Your account has been deleted. Please contact Find support.");
+    }
+
+    if (user.accountStatus === 'banned') {
+        throw new ApiError(403, "Your account has been banned. Please contact Find support.");
+    }
+
+    if (user.accountStatus === 'deactivated') {
+        throw new ApiError(403, "Your account has been deactivated. Please contact Find support.");
+    }
+
     if (!user.isEmailVerified) {
         throw new ApiError(403, "Email is not verified. Please verify your email to login");
     }
@@ -570,9 +582,10 @@ const searchUsers = asyncHandler(async (req, res) => {
         }
     }
 
-    // Build search query excluding blocked users
+    // Build search query excluding blocked, banned, and deleted users
     const searchQuery = {
         accountStatus: "active",
+        isDeleted: { $ne: true },
         $or: [
             { username: new RegExp(query, "i") },
             { fullName: new RegExp(query, "i") },
@@ -600,6 +613,7 @@ const searchUsers = asyncHandler(async (req, res) => {
 
         const fallbackQuery = {
             accountStatus: "active",
+            isDeleted: { $ne: true },
             $or: [
                 { username: new RegExp(query, "i") },
                 { fullName: new RegExp(query, "i") }
