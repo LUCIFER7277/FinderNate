@@ -4,6 +4,10 @@ import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
 import { sendEmail } from "../utlis/sendEmail.js"
+import { TempUser } from "../models/tempUser.models.js";
+import { AuthOtp } from "../models/authOtp.models.js";
+import { sendSms } from "../utlis/sendSms.js";
+import bcrypt from "bcrypt";
 import { uploadBufferToBunny } from "../utlis/bunny.js";
 import { setCache } from "../middlewares/cache.middleware.js";
 import Follower from "../models/follower.models.js";
@@ -62,65 +66,202 @@ const generateAcessAndRefreshToken = async (userId) => {
 const registerUser = asyncHandler(async (req, res) => {
     const { fullName, username, email, password, confirmPassword, phoneNumber, dateOfBirth, gender } = req.body;
 
-    if (!fullName || !username || !email || !password || !confirmPassword) {
+    if (!fullName || !username || !email || !password || !confirmPassword || !phoneNumber) {
         throw new ApiError(400, "All fields are required");
     }
 
     if (password !== confirmPassword) {
         throw new ApiError(400, "Password and confirm password do not match");
     }
+    const [existingEmail, existingPhone, existingUsername] = await Promise.all([
+    User.findOne({ email }),
+    User.findOne({ phoneNumber: phoneNumber.trim() }),
+    User.findOne({ username: username.toLowerCase() })
+    ]);
 
     const errors = [];
-
-    const existingEmail = await User.findOne({ email });
-    if (existingEmail) {
-        errors.push({ field: "email", message: "Email already in use" });
-    }
-
-    const existingUsername = await User.findOne({ username: username.toLowerCase() });
-    if (existingUsername) {
-        errors.push({ field: "username", message: "Username already in use" });
-    }
+    if (existingPhone) errors.push({ field: "phoneNumber", message: "Phone number already in use" });
+    if (existingEmail) errors.push({ field: "email", message: "Email already in use" });
+    if (existingUsername) errors.push({ field: "username", message: "Username already in use" });
 
     if (errors.length > 0) {
-        throw new ApiError(409, "User already exists with this username or email", errors);
+    const errorMessage = errors.map(err => err.message).join(", ");
+    throw new ApiError(409, errorMessage, errors);
+    }
+    // Hash password before storing in TempUser
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Save registration data to TempUser (upsert by phone number)
+    await TempUser.findOneAndUpdate(
+        { phoneNumber },
+        {
+            fullName,
+            fullNameLower: fullName.toLowerCase(),
+            username: username.toLowerCase(),
+            email,
+            password: hashedPassword,
+            phoneNumber,
+            dateOfBirth,
+            gender,
+        },
+        { upsert: true, new: true }
+    );
+
+    // Generate 6-digit OTP
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Upsert OTP record — replace any previous registration OTP for this phone
+    await AuthOtp.findOneAndUpdate(
+        { identifier: phoneNumber, type: "phone", purpose: "registration" },
+        { otp: hashedOtp, expiry },
+        { upsert: true, new: true }
+    );
+
+    // Send OTP via Fast2SMS
+    try {
+        await sendSms({ phone: phoneNumber, otp: plainOtp });
+    } catch (smsErr) {
+        // In development, log the OTP so the flow can be tested without SMS balance
+        if (process.env.NODE_ENV === 'development') {
+            console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${phoneNumber}: ${plainOtp}`);
+            // Allow registration to proceed so the OTP step can be tested
+        } else {
+            // TempUser and OTP record are already saved — surface the real SMS error
+            throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
+        }
     }
 
-    // Directly create user (no OTP, no TempUser)
-    const user = await User.create({
-        uid: uuidv4(),
-        fullName,
-        fullNameLower: fullName.toLowerCase(),
-        username: username.toLowerCase(),
-        email,
-        password,
-        phoneNumber,
-        dateOfBirth,
-        gender,
-        isEmailVerified: true,
+    return res.status(200).json(
+        new ApiResponse(200, { phone: phoneNumber }, "OTP sent to your phone number. Please verify to complete registration.")
+    );
+});
+
+// ─── Verify phone OTP and complete registration ───────────────────────────────
+const verifyRegistrationOTP = asyncHandler(async (req, res) => {
+    const { phone, otp } = req.body;
+
+    if (!phone || !otp) {
+        throw new ApiError(400, "Phone number and OTP are required");
+    }
+
+    // Find the OTP record
+    const otpRecord = await AuthOtp.findOne({
+        identifier: phone,
+        type: "phone",
+        purpose: "registration",
     });
 
-    const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
-    await user.save({ validateBeforeSave: false });
+    if (!otpRecord) {
+        throw new ApiError(404, "OTP not found. Please request a new one.");
+    }
 
-    const options = {
-        httpOnly: true,
-        secure: true
-    };
+    if (new Date() > otpRecord.expiry) {
+        await AuthOtp.deleteOne({ _id: otpRecord._id });
+        throw new ApiError(400, "OTP has expired. Please request a new one.");
+    }
+
+    const isOtpValid = await otpRecord.verifyOtp(otp);
+    if (!isOtpValid) {
+        throw new ApiError(400, "Invalid OTP");
+    }
+
+    // Retrieve pending registration data
+    const tempUser = await TempUser.findOne({ phoneNumber: phone });
+    if (!tempUser) {
+        throw new ApiError(404, "Registration session not found. Please register again.");
+    }
+
+    // Create the actual user — password is already hashed in TempUser, so we
+    // insert directly to skip the pre-save bcrypt hook (avoids double-hashing)
+    const uid = uuidv4();
+    await User.collection.insertOne({
+        uid,
+        fullName: tempUser.fullName,
+        fullNameLower: tempUser.fullNameLower,
+        username: tempUser.username,
+        email: tempUser.email,
+        password: tempUser.password,   // pre-hashed
+        phoneNumber: tempUser.phoneNumber,
+        dateOfBirth: tempUser.dateOfBirth,
+        gender: tempUser.gender,
+        isEmailVerified: true,
+        isPhoneVerified: true,
+        accountStatus: "active",
+        isDeleted: false,
+        deletedAt: null,
+        adminActionReason: null,
+        privacy: "public",
+        isFullPrivate: false,
+        isPhoneNumberHidden: false,
+        isAddressHidden: false,
+        isBusinessProfile: false,
+        isBlueTickVerified: false,
+        messagingPrivacy: { onlineStatus: "everyone", lastSeen: "everyone" },
+        servicePostPreferences: { enableAutoFill: true },
+        productPostPreferences: { enableAutoFill: true },
+        followers: [],
+        following: [],
+        posts: [],
+        fcmToken: null,
+        fcmTokenUpdatedAt: null,
+        lastSeenAt: new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+    });
+
+    const user = await User.findOne({ uid }).select("-password -refreshToken");
+
+    // Clean up temp data
+    await Promise.all([
+        TempUser.deleteOne({ _id: tempUser._id }),
+        AuthOtp.deleteOne({ _id: otpRecord._id }),
+    ]);
+
+    const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
+
+    const options = { httpOnly: true, secure: true };
 
     return res
         .status(201)
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
         .json(
-            new ApiResponse(201,
-                {
-                    user,
-                    accessToken,
-                    refreshToken
-                }, "User registered successfully.")
+            new ApiResponse(201, { user, accessToken, refreshToken }, "Account created successfully")
         );
 });
+
+// ─── Resend registration phone OTP ────────────────────────────────────────────
+const resendRegistrationOTP = asyncHandler(async (req, res) => {
+    const { phone } = req.body;
+
+    if (!phone) {
+        throw new ApiError(400, "Phone number is required");
+    }
+
+    const tempUser = await TempUser.findOne({ phoneNumber: phone });
+    if (!tempUser) {
+        throw new ApiError(404, "Registration session not found. Please register again.");
+    }
+
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    await AuthOtp.findOneAndUpdate(
+        { identifier: phone, type: "phone", purpose: "registration" },
+        { otp: hashedOtp, expiry },
+        { upsert: true, new: true }
+    );
+
+    await sendSms({ phone, otp: plainOtp });
+
+    return res.status(200).json(
+        new ApiResponse(200, {}, "OTP resent successfully")
+    );
+});
+
 
 const loginUser = asyncHandler(async (req, res) => {
     const { email, username, password } = req.body;
@@ -167,9 +308,9 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Your account has been deactivated. Please contact Find support.");
     }
 
-    if (!user.isEmailVerified) {
-        throw new ApiError(403, "Email is not verified. Please verify your email to login");
-    }
+    // if (!user.isEmailVerified) {
+        // throw new ApiError(403, "Email is not verified. Please verify your email to login");
+    // }
 
     const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
     const loggedUser = await User.findById(user._id).select("-password -refreshToken");
@@ -750,42 +891,93 @@ const searchUsers = asyncHandler(async (req, res) => {
         );
 });
 
+/**
+ * Unified email OTP sender.
+ * request_type: "email_verification" | "password_reset"
+ *
+ * For email_verification — stores OTP on User model (existing flow).
+ * For password_reset     — stores hashed OTP in AuthOtp (new flow).
+ * Both are routed to the same endpoint: POST /users/send-verification-otp
+ */
 const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
+    const { email, phone, request_type } = req.body;
 
-    const { email } = req.body;
+    // Determine the actual type from request_type or fall back to legacy behaviour
+    const purposeMap = {
+        email_verification: "email_verification",
+        password_reset: "password_reset",
+    };
+    const purpose = purposeMap[request_type] || "email_verification";
 
-    if (!email) {
-        throw new ApiError(400, "Email is required");
+    // ── Password-reset via phone ────────────────────────────────────────────────
+    if (purpose === "password_reset" && phone) {
+        const user = await User.findOne({ phoneNumber: phone });
+        if (!user) throw new ApiError(404, "No account found with this phone number");
+
+        const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+        const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+        await AuthOtp.findOneAndUpdate(
+            { identifier: phone, type: "phone", purpose: "password_reset" },
+            { otp: hashedOtp, expiry },
+            { upsert: true, new: true }
+        );
+
+        await sendSms({ phone, otp: plainOtp });
+
+        return res.status(200).json(
+            new ApiResponse(200, { type: "phone" }, "OTP sent to your phone successfully")
+        );
     }
+
+    // ── Email-based OTP (verification or password-reset) ───────────────────────
+    if (!email) throw new ApiError(400, "Email is required");
 
     const user = await User.findOne({ email });
+    if (!user) throw new ApiError(404, "User not found with this email");
 
-    if (!user) {
-        throw new ApiError(404, "User not found with this email");
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    if (purpose === "password_reset") {
+        // Store hashed OTP in AuthOtp
+        await AuthOtp.findOneAndUpdate(
+            { identifier: email, type: "email", purpose: "password_reset" },
+            { otp: hashedOtp, expiry },
+            { upsert: true, new: true }
+        );
+    } else {
+        // email_verification — store on User model (existing consumers rely on this)
+        user.emailOTP = plainOtp;
+        user.emailOTPExpiry = expiry;
+        await user.save({ validateBeforeSave: false });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiry = new Date(Date.now() + 10 * 60 * 1000); // valid for 10 minutes
-
-    user.emailOTP = otp;
-    user.emailOTPExpiry = expiry;
-    await user.save({ validateBeforeSave: false });
-
+    const subjects = {
+        email_verification: "Your OTP for Email Verification - FinderNate",
+        password_reset: "Your OTP for Password Reset - FinderNate",
+    };
+    const headings = {
+        email_verification: "Email Verification OTP",
+        password_reset: "Password Reset OTP",
+    };
 
     await sendEmail({
         to: user.email,
-        subject: "Your OTP for Email Verification - Findernate",
+        subject: subjects[purpose] || subjects.email_verification,
         html: `
-            <h3>Email Verification OTP</h3>
-            <h2>Your OTP is: <b>${otp}</b></h2>
+            <h3>${headings[purpose] || headings.email_verification}</h3>
+            <h2>Your OTP is: <b>${plainOtp}</b></h2>
             <p>This OTP is valid for 10 minutes.</p>
             <p>If you did not request this, please ignore this email.</p>
         `
     });
 
-    return res
-        .status(200)
-        .json(new ApiResponse(200, {}, "OTP sent to your email successfully"));
+    return res.status(200).json(
+        new ApiResponse(200, { type: "email" }, "OTP sent to your email successfully")
+    );
 });
 
 
@@ -807,13 +999,12 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invalid or expired OTP");
     }
 
-    user.isEmailVerified = true;
-    user.emailOTP = undefined;
-    user.emailOTPExpiry = undefined;
-    user.emailVerificationToken = undefined;
-    await user.save({ validateBeforeSave: false });
+    await User.findByIdAndUpdate(user._id, {
+        $set: { isEmailVerified: true },
+        $unset: { emailOTP: "", emailOTPExpiry: "", emailVerificationToken: "" },
+    });
 
-    return res.status(200).json(new ApiResponse(200, {}, "Email verified successfully"));
+    return res.status(200).json(new ApiResponse(200, { isEmailVerified: true }, "Email verified successfully"));
 })
 
 const uploadProfileImage = asyncHandler(async (req, res) => {
@@ -840,67 +1031,182 @@ const uploadProfileImage = asyncHandler(async (req, res) => {
 });
 
 const sendPasswordResetOTP = asyncHandler(async (req, res) => {
-    const { email } = req.body;
+    const { email, phone } = req.body;
 
-    if (!email) {
-        throw new ApiError(400, "Email is required");
+    if (!email && !phone) {
+        throw new ApiError(400, "Email or phone number is required");
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-        throw new ApiError(404, "User not found with this email");
+    let user;
+    let identifier;
+    let type;
+
+    if (email) {
+        user = await User.findOne({ email });
+        if (!user) throw new ApiError(404, "No account found with this email");
+        identifier = email;
+        type = "email";
+    } else {
+        user = await User.findOne({ phoneNumber: phone });
+        if (!user) throw new ApiError(404, "No account found with this phone number");
+        identifier = phone;
+        type = "phone";
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiry = new Date(Date.now() + 10 * 60 * 1000); // valid for 10 minutes
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
-    user.passwordResetOTP = otp;
-    user.passwordResetOTPExpiry = expiry;
-    await user.save({ validateBeforeSave: false });
+    // Upsert OTP record (hashed)
+    await AuthOtp.findOneAndUpdate(
+        { identifier, type, purpose: "password_reset" },
+        { otp: hashedOtp, expiry },
+        { upsert: true, new: true }
+    );
 
-    await sendEmail({
-        to: user.email,
-        subject: "Your OTP for Password Reset - FinderNate",
-        html: `
-            <h3>Password Reset OTP </h3>
-            <h2>Your OTP is: <b>${otp}</b></h2>
-            <p>This OTP is valid for 10 minutes.</p>
-            <p>If you did not request this, please ignore this email.</p>`
-    });
-    return res
-        .status(200)
-        .json(new ApiResponse(200, {}, "OTP sent to your email successfully for password reset"));
+    if (type === "email") {
+        await sendEmail({
+            to: user.email,
+            subject: "Your OTP for Password Reset - FinderNate",
+            html: `
+                <h3>Password Reset OTP</h3>
+                <h2>Your OTP is: <b>${plainOtp}</b></h2>
+                <p>This OTP is valid for 10 minutes.</p>
+                <p>If you did not request this, please ignore this email.</p>`
+        });
+    } else {
+        await sendSms({ phone: identifier, otp: plainOtp });
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, { type, identifier }, `OTP sent to your ${type} successfully`)
+    );
 });
+
+// ─── Send OTP to verify / update phone number (for logged-in users) ───────────
+const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
+    const { phone } = req.body;
+    const userId = req.user._id;
+
+    if (!phone) throw new ApiError(400, "Phone number is required");
+
+    // Ensure the new number is not already taken by another user
+    const existing = await User.findOne({ phoneNumber: phone, _id: { $ne: userId } });
+    if (existing) throw new ApiError(409, "This phone number is already in use by another account");
+
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+
+    await AuthOtp.findOneAndUpdate(
+        { identifier: phone, type: "phone", purpose: "phone_verification" },
+        { otp: hashedOtp, expiry },
+        { upsert: true, new: true }
+    );
+
+    try {
+        await sendSms({ phone, otp: plainOtp });
+    } catch (smsErr) {
+        if (process.env.NODE_ENV === 'development') {
+            console.warn(`[DEV] SMS failed (${smsErr.message}). Phone verification OTP for ${phone}: ${plainOtp}`);
+        } else {
+            throw new ApiError(503, `Failed to send OTP: ${smsErr.message}`);
+        }
+    }
+
+    return res.status(200).json(new ApiResponse(200, { phone }, "OTP sent to your phone number"));
+});
+
+// ─── Verify OTP and update / confirm phone number (for logged-in users) ────────
+const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
+    const { phone, otp } = req.body;
+    const userId = req.user._id;
+
+    if (!phone || !otp) throw new ApiError(400, "Phone number and OTP are required");
+
+    const otpRecord = await AuthOtp.findOne({
+        identifier: phone,
+        type: "phone",
+        purpose: "phone_verification",
+    });
+
+    if (!otpRecord) throw new ApiError(404, "OTP not found. Please request a new one.");
+
+    if (new Date() > otpRecord.expiry) {
+        await AuthOtp.deleteOne({ _id: otpRecord._id });
+        throw new ApiError(400, "OTP has expired. Please request a new one.");
+    }
+
+    const isOtpValid = await otpRecord.verifyOtp(otp);
+    if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
+
+    await User.findByIdAndUpdate(userId, {
+        $set: { phoneNumber: phone, isPhoneVerified: true },
+    });
+
+    await AuthOtp.deleteOne({ _id: otpRecord._id });
+
+    return res.status(200).json(new ApiResponse(200, { phone, isPhoneVerified: true }, "Phone number verified and updated successfully"));
+});
+
 const resetPasswordWithOTP = asyncHandler(async (req, res) => {
-    const { otp, newPassword, confirmPassword } = req.body;
-    if (!otp || !newPassword || !confirmPassword) {
-        throw new ApiError(400, "OTP, new password and confirm password are required");
+    const { identifier, otp, newPassword, confirmPassword } = req.body;
+
+    if (!identifier || !otp || !newPassword || !confirmPassword) {
+        throw new ApiError(400, "Identifier, OTP, new password and confirm password are required");
     }
 
     if (newPassword !== confirmPassword) {
         throw new ApiError(400, "New password and confirm password do not match");
     }
 
-    const user = await User.findOne({ passwordResetOTP: otp });
+    // Determine type from identifier format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const type = emailRegex.test(identifier) ? "email" : "phone";
 
-    if (!user) {
-        throw new ApiError(404, "No user found with this OTP");
+    const otpRecord = await AuthOtp.findOne({
+        identifier,
+        type,
+        purpose: "password_reset",
+    });
+
+    if (!otpRecord) {
+        throw new ApiError(404, "OTP not found. Please request a new one.");
     }
 
-    if (!user.passwordResetOTPExpiry || user.passwordResetOTPExpiry < new Date()) {
-        throw new ApiError(400, "OTP has expired");
+    if (new Date() > otpRecord.expiry) {
+        await AuthOtp.deleteOne({ _id: otpRecord._id });
+        throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
+
+    const isOtpValid = await otpRecord.verifyOtp(otp);
+    if (!isOtpValid) {
+        throw new ApiError(400, "Invalid OTP");
+    }
+
+    const user = type === "email"
+        ? await User.findOne({ email: identifier })
+        : await User.findOne({ phoneNumber: identifier });
+
+    if (!user) throw new ApiError(404, "User not found");
 
     user.password = newPassword;
     user.passwordResetOTP = undefined;
     user.passwordResetOTPExpiry = undefined;
-
     await user.save({ validateBeforeSave: false });
+
+    await AuthOtp.deleteOne({ _id: otpRecord._id });
+
+    const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
+    const loggedUser = await User.findById(user._id).select("-password -refreshToken");
+
+    const options = { httpOnly: true, secure: true };
 
     return res
         .status(200)
-        .json(new ApiResponse(200, {}, "Password reset successfully"));
-
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(new ApiResponse(200, { user: loggedUser, accessToken, refreshToken }, "Password reset successfully"));
 })
 
 const getOtherUserProfile = asyncHandler(async (req, res) => {
@@ -1862,6 +2168,8 @@ export const getMessagingPrivacy = asyncHandler(async (req, res) => {
 
 export {
     registerUser,
+    verifyRegistrationOTP,
+    resendRegistrationOTP,
     loginUser,
     logOutUser,
     getUserProfile,
@@ -1871,6 +2179,8 @@ export {
     searchUsers,
     verifyEmailWithOTP,
     sendVerificationOTPForEmail,
+    sendPhoneVerificationOtp,
+    verifyAndUpdatePhone,
     uploadProfileImage,
     sendPasswordResetOTP,
     resetPasswordWithOTP,
