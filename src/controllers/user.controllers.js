@@ -74,7 +74,7 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Password and confirm password do not match");
     }
     const [existingEmail, existingPhone, existingUsername] = await Promise.all([
-    User.findOne({ email }),
+    User.findOne({ email, isEmailVerified: true }),
     User.findOne({ phoneNumber: phoneNumber.trim() }),
     User.findOne({ username: username.toLowerCase() })
     ]);
@@ -186,7 +186,6 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         phoneNumber: tempUser.phoneNumber,
         dateOfBirth: tempUser.dateOfBirth,
         gender: tempUser.gender,
-        isEmailVerified: true,
         isPhoneVerified: true,
         accountStatus: "active",
         isDeleted: false,
