@@ -29,6 +29,9 @@ const AuthOtpSchema = new mongoose.Schema(
             // TTL index: MongoDB auto-deletes the document once expiry time passes
             index: { expireAfterSeconds: 0 },
         },
+        // Rate-limiting: how many OTPs have been sent in the current window
+        sendCount: { type: Number, default: 1 },
+        windowStart: { type: Date, default: Date.now },
     },
     { timestamps: true }
 );
