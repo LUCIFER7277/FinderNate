@@ -10,7 +10,7 @@ import axios from 'axios';
  * @param {string} phone  - Full phone number as stored (e.g. "+919876543210" or "+14155552671")
  * @param {string} otp    - Plain 6-digit OTP string to deliver
  */
-export const sendSms = async ({ phone, otp }) => {
+export const sendSms = async ({ phone, otp, request_type }) => {
     // Strip everything except digits
     const digits = phone.replace(/\D/g, '');
 
@@ -27,23 +27,32 @@ export const sendSms = async ({ phone, otp }) => {
         console.warn(`[SMS] Skipping Fast2SMS for non-Indian number: ${phone}`);
         return { return: true, message: 'SMS skipped for non-Indian number' };
     }
-
+    const BASE_FAST2SMS_URL='https://www.fast2sms.com/dev/bulkV2'
+    const paramsObject= request_type =='password_reset' ?  {
+    authorization: process.env.FAST2SMS_API_KEY,
+    route: 'dlt',
+    sender_id: process.env.FAST2SMS_SENDER_ID || '',
+    message: process.env.FAST2SMS_PASSWORD_RESET_VERIFICATION_TEMPLATE_ID || '',
+    variables_values: `${otp}|`,
+    flash: 0,
+    numbers: mobileNumber
+  }:request_type=='phonenumber_verify' || request_type=='password_reset' ?  
+   { 
+      authorization: process.env.FAST2SMS_API_KEY,
+      route: 'dlt',
+      sender_id: process.env.FAST2SMS_SENDER_ID || '',
+      message: process.env.FAST2SMS_PHONE_NUMBER_VERIFICATION_TEMPLATE_ID || '',
+      variables_values: `${otp}|`,
+      flash: 0,
+      numbers: mobileNumber
+    }:  {}  
     try {
-        const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
-            params: {
-                authorization: process.env.FAST2SMS_API_KEY,
-                route: 'dlt',
-                sender_id: process.env.FAST2SMS_SENDER_ID || 'FRNATE',
-                message: process.env.FAST2SMS_TEMPLATE_ID || '211818',
-                variables_values: `${otp}|`,
-                flash: 0,
-                numbers: mobileNumber,
-            },
+        const response = await axios.get(BASE_FAST2SMS_URL, {
+            params: paramsObject,
             headers: {
                 'cache-control': 'no-cache',
             },
         });
-
         if (!response.data.return) {
             const msg = Array.isArray(response.data.message)
                 ? response.data.message.join(', ')
@@ -55,6 +64,7 @@ export const sendSms = async ({ phone, otp }) => {
         return response.data;
     } catch (err) {
         // Axios throws on 4xx/5xx — extract the actual Fast2SMS error body
+        console.log(error)
         if (err.response) {
             const body = err.response.data;
             const msg = Array.isArray(body?.message)
