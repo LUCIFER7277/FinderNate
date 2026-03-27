@@ -223,6 +223,7 @@ import shareRouter from "./routes/share.routes.js";
 import paymentRouter from "./routes/payment.routes.js";
 import orderRouter from "./routes/order.routes.js";
 import invoiceRouter from "./routes/invoice.routes.js";
+import legalRouter from "./routes/legal.routes.js";
 
 
 
@@ -250,6 +251,7 @@ app.use("/api/v1/share", shareRouter);
 app.use("/api/v1/payments", paymentRouter);
 app.use("/api/v1/orders", orderRouter);
 app.use("/api/v1/invoices", invoiceRouter);
+app.use("/api/v1/legal", legalRouter);
 
 app.use(errorHandler);
 
