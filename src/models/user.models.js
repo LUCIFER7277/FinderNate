@@ -82,6 +82,23 @@ const UserSchema = new mongoose.Schema({
     fcmTokenUpdatedAt: {
         type: Date,
         default: null
+    },
+    // Legal acceptance tracking
+    legalAcceptance: {
+        termsAccepted:         { type: Boolean, default: false },
+        termsAcceptedAt:       { type: Date,    default: null },
+        termsVersion:          { type: String,  default: null },
+        privacyAccepted:       { type: Boolean, default: false },
+        privacyAcceptedAt:     { type: Date,    default: null },
+        privacyVersion:        { type: String,  default: null },
+        sellerTermsAccepted:   { type: Boolean, default: false },
+        sellerTermsAcceptedAt: { type: Date,    default: null },
+        sellerTermsVersion:    { type: String,  default: null },
+        communityAccepted:     { type: Boolean, default: false },
+        communityAcceptedAt:   { type: Date,    default: null },
+        communityVersion:      { type: String,  default: null },
+        acceptanceIP:          { type: String,  default: null },
+        acceptanceUserAgent:   { type: String,  default: null },
     }
 }, { timestamps: true });
 
