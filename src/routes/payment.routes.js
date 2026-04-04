@@ -16,6 +16,11 @@ import {
     initiateCheckoutPayment,
     verifyCheckoutPayment,
 } from "../controllers/payments.controllers.js";
+import {
+    createOnlineStoreOrder,
+    verifyOnlineStorePayment,
+    cashfreeWebhook,
+} from "../controllers/cashfree.payment.controller.js";
 
 const router = Router();
 
@@ -40,6 +45,20 @@ router.post("/post/create-order", optionalVerifyJWT, createShareablePhonePeOrder
 // Public route - get checkout details by linkId (for shareable checkout links)
 // Used when someone accesses /checkout/:linkId
 router.get("/checkout/link/:linkId", getCheckoutByLinkId);
+
+// ============================================
+// ONLINE STORE CHECKOUT — Cashfree (public, supports guest checkout)
+// ============================================
+
+// Cashfree S2S webhook (no auth, called by Cashfree servers)
+router.post("/cashfree/webhook", cashfreeWebhook);
+
+// Step 1: Buyer fills shipping address → creates Cashfree order, returns checkoutUrl
+router.post("/store/create-order", optionalVerifyJWT, createOnlineStoreOrder);
+
+// Step 2: After Cashfree redirect back → verify payment status
+// Public (no auth) so guest buyers can also complete verification
+router.post("/store/verify", verifyOnlineStorePayment);
 
 // Protected routes
 router.use(verifyJWT);

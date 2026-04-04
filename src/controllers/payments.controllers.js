@@ -1612,7 +1612,7 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
             type: 'PG_CHECKOUT',
             message: `Payment for ${checkout.productName}`,
             merchantUrls: {
-                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}&msgId=${messageId}`,
+                redirectUrl: `${'https://findernate.com'}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}&msgId=${messageId}`,
             }
         }
     };
@@ -1621,6 +1621,7 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     try {
         phonePeResponse = await initiatePhonePePayment(phonePePayload);
     } catch (phonePeError) {
+        console.log(phonePeError)
         await Order.findByIdAndDelete(order._id);
         const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
