@@ -111,7 +111,11 @@ app.use(cors({
 }));
 
 // Request parsing middleware - Must come after CORS
-app.use(express.json({ limit: '10mb' })); // Limit JSON payload size
+// Capture raw body for webhook HMAC verification (Cashfree, PhonePe etc.)
+app.use(express.json({
+    limit: '10mb',
+    verify: (req, _res, buf) => { req.rawBody = buf.toString(); }
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 

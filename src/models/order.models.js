@@ -101,6 +101,8 @@ const OrderSchema = new mongoose.Schema({
     razorpaySignature: String,
     phonePeMerchantTransactionId: String,
     phonePeTransactionId: String,
+    cashfreeOrderId: String,      // Cashfree order ID (CF-xxx) stored for webhook lookup
+    cashfreePaymentId: String,    // Cashfree cf_payment_id populated after payment
     shippingAddress: ShippingAddressSchema,
     shippingInfo: ShippingInfoSchema,
     buyerProof: BuyerProofSchema,
@@ -135,5 +137,6 @@ OrderSchema.index({ sellerId: 1, createdAt: -1 });
 OrderSchema.index({ orderStatus: 1 });
 OrderSchema.index({ paymentStatus: 1 });
 OrderSchema.index({ phonePeMerchantTransactionId: 1 }); // fast webhook lookup
+OrderSchema.index({ cashfreeOrderId: 1 });              // fast Cashfree webhook lookup
 
 export default mongoose.model('Order', OrderSchema);

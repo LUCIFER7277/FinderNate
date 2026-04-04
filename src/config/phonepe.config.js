@@ -43,7 +43,7 @@ export const getPhonePeToken = async () => {
 export const generateMerchantTransactionId = () => {
     const timestamp = Date.now().toString(36).toUpperCase();
     const random    = Math.random().toString(36).substring(2, 8).toUpperCase();
-    return `FNPAY-${timestamp}-${random}`;
+    return `CASHPAY-${timestamp}-${random}`;
 };
 
 // ── Initiate payment ──────────────────────────────────────────────────────────
