@@ -32,6 +32,8 @@ const AuthOtpSchema = new mongoose.Schema(
         // Rate-limiting: how many OTPs have been sent in the current window
         sendCount: { type: Number, default: 1 },
         windowStart: { type: Date, default: Date.now },
+        // Cooldown: earliest time the user may request another OTP (now + 60s)
+        retryAfter: { type: Date, default: null },
     },
     { timestamps: true }
 );

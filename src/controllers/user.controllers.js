@@ -50,33 +50,71 @@ import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
 
 
 // ─── Rate-limited OTP upsert ────────────────────────────────────────────────
-const OTP_RATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-const OTP_MAX_SENDS = 5;
+const OTP_EXPIRY_MS       = 5  * 60 * 1000; // 5 minutes
+const RESEND_COOLDOWN_MS  = 60 * 1000;       // 60 seconds between resend requests
+const OTP_RATE_WINDOW_MS  = 10 * 60 * 1000; // 10-minute window for max-send cap
+const OTP_MAX_SENDS       = 5;
 
 const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry }) => {
     const existing = await AuthOtp.findOne({ identifier, type, purpose });
 
-    let sendCount = 1;
+    let sendCount   = 1;
     let windowStart = new Date();
 
     if (existing) {
+        // Enforce 60-second cooldown between requests
+        if (existing.retryAfter && new Date() < existing.retryAfter) {
+            const secondsLeft = Math.ceil((existing.retryAfter.getTime() - Date.now()) / 1000);
+            throw new ApiError(429,
+                `Please wait ${secondsLeft} second${secondsLeft !== 1 ? 's' : ''} before requesting a new OTP.`,
+                [{ retryAfterSeconds: secondsLeft }]
+            );
+        }
+
         const ws = existing.windowStart || existing.createdAt;
         const withinWindow = (Date.now() - ws.getTime()) < OTP_RATE_WINDOW_MS;
         if (withinWindow) {
             if (existing.sendCount >= OTP_MAX_SENDS) {
                 throw new ApiError(429, "Too many OTP requests. Please try again after 10 minutes.");
             }
-            sendCount = (existing.sendCount || 1) + 1;
+            sendCount   = (existing.sendCount || 1) + 1;
             windowStart = ws;
         }
     }
 
+    const retryAfter = new Date(Date.now() + RESEND_COOLDOWN_MS);
+
     return AuthOtp.findOneAndUpdate(
         { identifier, type, purpose },
-        { otp: hashedOtp, expiry, sendCount, windowStart },
+        { otp: hashedOtp, expiry, sendCount, windowStart, retryAfter },
         { upsert: true, new: true }
     );
 };
+
+// ─── GET /users/otp-status — returns cooldown & expiry remaining from DB ─────
+const getOtpStatus = asyncHandler(async (req, res) => {
+    const { identifier, type, purpose } = req.query;
+
+    if (!identifier || !type || !purpose) {
+        throw new ApiError(400, "identifier, type, and purpose are required");
+    }
+
+    const record = await AuthOtp.findOne({ identifier, type, purpose });
+
+    if (!record) {
+        return res.status(200).json(new ApiResponse(200, { retryAfterSeconds: 0, otpExpiresIn: 0 }, "No OTP record found"));
+    }
+
+    const now = Date.now();
+    const retryAfterSeconds = record.retryAfter
+        ? Math.max(0, Math.ceil((record.retryAfter.getTime() - now) / 1000))
+        : 0;
+    const otpExpiresIn = record.expiry
+        ? Math.max(0, Math.ceil((record.expiry.getTime() - now) / 1000))
+        : 0;
+
+    return res.status(200).json(new ApiResponse(200, { retryAfterSeconds, otpExpiresIn }, "OTP status fetched"));
+});
 
 const generateAcessAndRefreshToken = async (userId) => {
     try {
@@ -140,12 +178,12 @@ const registerUser = asyncHandler(async (req, res) => {
     // Generate 6-digit OTP
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiry = new Date(Date.now() + OTP_EXPIRY_MS); // 5 minutes
 
     // Upsert OTP record — replace any previous registration OTP for this phone
     await AuthOtp.findOneAndUpdate(
         { identifier: phoneNumber, type: "phone", purpose: "registration" },
-        { otp: hashedOtp, expiry },
+        { otp: hashedOtp, expiry, retryAfter: new Date(Date.now() + RESEND_COOLDOWN_MS) },
         { upsert: true, new: true }
     );
 
@@ -264,7 +302,7 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
 // ─── Resend registration phone OTP ────────────────────────────────────────────
 const resendRegistrationOTP = asyncHandler(async (req, res) => {
     const { phone } = req.body;
-    const request_type='phonenumber_verify'
+    const request_type = 'phonenumber_verify';
     if (!phone) {
         throw new ApiError(400, "Phone number is required");
     }
@@ -274,20 +312,32 @@ const resendRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Registration session not found. Please register again.");
     }
 
+    // Enforce 60-second cooldown
+    const existing = await AuthOtp.findOne({ identifier: phone, type: "phone", purpose: "registration" });
+    if (existing?.retryAfter && new Date() < existing.retryAfter) {
+        const secondsLeft = Math.ceil((existing.retryAfter.getTime() - Date.now()) / 1000);
+        throw new ApiError(429,
+            `Please wait ${secondsLeft} second${secondsLeft !== 1 ? 's' : ''} before requesting a new OTP.`,
+            [{ retryAfterSeconds: secondsLeft }]
+        );
+    }
+
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+    const expiry    = new Date(Date.now() + OTP_EXPIRY_MS);
+    const retryAfter = new Date(Date.now() + RESEND_COOLDOWN_MS);
 
+    // Expire the old OTP and replace with the new one atomically
     await AuthOtp.findOneAndUpdate(
         { identifier: phone, type: "phone", purpose: "registration" },
-        { otp: hashedOtp, expiry },
+        { otp: hashedOtp, expiry, retryAfter },
         { upsert: true, new: true }
     );
 
-    await sendSms({ phone, otp: plainOtp,request_type });
+    await sendSms({ phone, otp: plainOtp, request_type });
 
     return res.status(200).json(
-        new ApiResponse(200, {}, "OTP resent successfully")
+        new ApiResponse(200, { retryAfterSeconds: 60 }, "OTP resent successfully")
     );
 });
 
@@ -945,14 +995,14 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
 
         const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
         const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-        const expiry = new Date(Date.now() + 10 * 60 * 1000);
+        const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
-        await rateCheckAndUpsertOtp({ identifier: phone, type: "phone", purpose: "password_reset", hashedOtp, expiry });
+        const record = await rateCheckAndUpsertOtp({ identifier: phone, type: "phone", purpose: "password_reset", hashedOtp, expiry });
 
-        await sendSms({ phone, otp: plainOtp,request_type:purpose });
+        await sendSms({ phone, otp: plainOtp, request_type: purpose });
 
         return res.status(200).json(
-            new ApiResponse(200, { type: "phone" }, "OTP sent to your phone successfully")
+            new ApiResponse(200, { type: "phone", retryAfterSeconds: 60 }, "OTP sent to your phone successfully")
         );
     }
 
@@ -964,7 +1014,7 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+    const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
     if (purpose === "password_reset") {
         await rateCheckAndUpsertOtp({ identifier: email, type: "email", purpose: "password_reset", hashedOtp, expiry });
@@ -988,13 +1038,13 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
         html: `
             <h3>${headings[purpose] || headings.email_verification}</h3>
             <h2>Your OTP is: <b>${plainOtp}</b></h2>
-            <p>This OTP is valid for 10 minutes.</p>
+            <p>This OTP is valid for 5 minutes.</p>
             <p>If you did not request this, please ignore this email.</p>
         `
     });
 
     return res.status(200).json(
-        new ApiResponse(200, { type: "email" }, "OTP sent to your email successfully")
+        new ApiResponse(200, { type: "email", retryAfterSeconds: 60 }, "OTP sent to your email successfully")
     );
 });
 
@@ -1074,9 +1124,9 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-    const expiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiry = new Date(Date.now() + OTP_EXPIRY_MS); // 5 minutes
 
-    // Upsert OTP record with rate limiting
+    // Upsert OTP record with rate limiting (enforces 60s cooldown)
     await rateCheckAndUpsertOtp({ identifier, type, purpose: "password_reset", hashedOtp, expiry });
 
     if (type === "email") {
@@ -1086,15 +1136,15 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
             html: `
                 <h3>Password Reset OTP</h3>
                 <h2>Your OTP is: <b>${plainOtp}</b></h2>
-                <p>This OTP is valid for 10 minutes.</p>
+                <p>This OTP is valid for 5 minutes.</p>
                 <p>If you did not request this, please ignore this email.</p>`
         });
     } else {
-        await sendSms({ phone: identifier, otp: plainOtp,request_type:'password_reset' });
+        await sendSms({ phone: identifier, otp: plainOtp, request_type: 'password_reset' });
     }
 
     return res.status(200).json(
-        new ApiResponse(200, { type, identifier }, `OTP sent to your ${type} successfully`)
+        new ApiResponse(200, { type, identifier, retryAfterSeconds: 60 }, `OTP sent to your ${type} successfully`)
     );
 });
 
@@ -1111,12 +1161,12 @@ const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-    const expiry = new Date(Date.now() + 10 * 60 * 1000);
+    const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
     await rateCheckAndUpsertOtp({ identifier: phone, type: "phone", purpose: "phone_verification", hashedOtp, expiry });
 
     try {
-        await sendSms({ phone, otp: plainOtp,request_type });
+        await sendSms({ phone, otp: plainOtp, request_type });
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
             console.warn(`[DEV] SMS failed (${smsErr.message}). Phone verification OTP for ${phone}: ${plainOtp}`);
@@ -1125,7 +1175,7 @@ const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
         }
     }
 
-    return res.status(200).json(new ApiResponse(200, { phone }, "OTP sent to your phone number"));
+    return res.status(200).json(new ApiResponse(200, { phone, retryAfterSeconds: 60 }, "OTP sent to your phone number"));
 });
 
 // ─── Verify OTP and update / confirm phone number (for logged-in users) ────────
@@ -2214,5 +2264,6 @@ export {
     getPreviousProductPostData,
     saveFCMToken,
     testFCMNotification,
-    checkFirebaseStatus
+    checkFirebaseStatus,
+    getOtpStatus
 };
