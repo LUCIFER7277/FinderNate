@@ -12,12 +12,52 @@ const APP_ID     = process.env.CASHFREE_APP_ID;
 const SECRET_KEY = process.env.CASHFREE_SECRET_KEY;
 const API_VERSION = '2023-08-01';
 
-const cfHeaders = () => ({
-    'Content-Type': 'application/json',
-    'x-client-id': APP_ID,
-    'x-client-secret': SECRET_KEY,
-    'x-api-version': API_VERSION,
-});
+// ── RSA private key for dynamic-IP signature auth ──────────────────────────────
+// Store the PEM in CASHFREE_PRIVATE_KEY env var with literal \n for newlines.
+// If not set, falls back to client-secret-only auth (static IP / sandbox).
+const getRawPrivateKey = () => {
+    const raw = process.env.CASHFREE_PRIVATE_KEY;
+    if (!raw) return null;
+    // Support both real newlines and escaped \n (common in .env files)
+    return raw.replace(/\\n/g, '\n');
+};
+
+// ── Generate x-cf-signature ────────────────────────────────────────────────────
+// Cashfree dynamic-IP auth (API v2023-08-01):
+//   signedData = "{clientId}.{timestampSeconds}"
+//   signature  = Base64( RSA-SHA256( signedData, privateKey ) )
+//   headers    = { x-cf-signature, x-timestamp }
+const generateCfSignature = (timestampSec) => {
+    const privateKey = getRawPrivateKey();
+    if (!privateKey) return null;
+
+    const dataToSign = `${APP_ID}.${timestampSec}`;
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(dataToSign);
+    sign.end();
+    return sign.sign(privateKey, 'base64');
+};
+
+// ── Build request headers ──────────────────────────────────────────────────────
+const cfHeaders = () => {
+    const timestampSec = Math.floor(Date.now() / 1000).toString();
+    const signature    = generateCfSignature(timestampSec);
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'x-client-id': APP_ID,
+        'x-client-secret': SECRET_KEY,
+        'x-api-version': API_VERSION,
+    };
+
+    // Add signature headers only when a private key is configured (dynamic IP)
+    if (signature) {
+        headers['x-cf-signature'] = signature;
+        headers['x-timestamp']    = timestampSec;
+    }
+
+    return headers;
+};
 
 // ── Order ID generator ──────────────────────────────────────────────────────────
 // Cashfree: alphanumeric + hyphens/underscores, max 50 chars
@@ -46,9 +86,7 @@ export const createCashfreeOrder = async ({
         throw new Error('CASHFREE_APP_ID or CASHFREE_SECRET_KEY is not configured');
     }
 
-    const expiryTime = new Date(Date.now() + expiryMinutes * 60 * 1000)
-        .toISOString()
-        .replace('Z', '+05:30'); // IST offset
+    const expiryTime = new Date(Date.now() + expiryMinutes * 60 * 1000).toISOString();
 
     const payload = {
         order_id: orderId,
@@ -65,7 +103,7 @@ export const createCashfreeOrder = async ({
         order_meta: {
             return_url: returnUrl,
             notify_url: notifyUrl || undefined,
-            payment_methods: 'cc,dc,upi,nb,wallets'
+            payment_methods: 'cc,dc,upi,nb,app,paylater'
         }
     };
 
@@ -108,7 +146,7 @@ export const buildCashfreeCheckoutUrl = (paymentSessionId) => {
 export const verifyCashfreeWebhook = (timestamp, signature, rawBody) => {
     if (!SECRET_KEY) return true; // skip if not configured
 
-    const data    = `${timestamp}${rawBody}`;
+    const data     = `${timestamp}${rawBody}`;
     const computed = crypto
         .createHmac('sha256', SECRET_KEY)
         .update(data)
