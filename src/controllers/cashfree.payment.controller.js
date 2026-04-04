@@ -20,7 +20,7 @@ const getBackendUrl  = () => process.env.BACKEND_URL  || 'https://apis.findernat
 const generateOrderNumber = () => {
     const ts     = Date.now().toString(36).toUpperCase();
     const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-    return `FN-${ts}-${random}`;
+    return `CF-${ts}-${random}`;
 };
 
 const generateLinkId = () =>
