@@ -188,7 +188,6 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
             expiryMinutes: 20
         });
     } catch (cfError) {
-        console.log(cfError)
         await Order.findByIdAndDelete(order._id);
         const msg =
             cfError?.response?.data?.message ||

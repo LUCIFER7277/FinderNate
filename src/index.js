@@ -1,4 +1,4 @@
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import connectDB from './db/index.js';
 import { app } from './app.js';
 import http from 'http';
@@ -6,9 +6,6 @@ import socketManager from './config/socket.js';
 import './config/firebase-admin.config.js'; // Initialize Firebase Admin on startup
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
 
-dotenv.config({
-    path: './.env'
-});
 
 console.log('🚀 Starting FinderNate Backend...');
 console.log('📊 Environment:', process.env.NODE_ENV);
