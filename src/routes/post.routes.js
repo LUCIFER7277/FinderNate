@@ -26,6 +26,7 @@ import { getProfileTabContent } from "../controllers/switch.controllers.js";
 import { savePost, unsavePost, getSavedPosts, checkPostSaved } from "../controllers/savePost.controllers.js";
 import { reportContent, getReports, updateReportStatus } from "../controllers/report.controllers.js";
 import { trackPostInteraction, hidePost, batchTrackInteractions, getUserInteractionHistory } from "../controllers/postInteraction.controllers.js";
+import { getOnlineStoreProducts } from "../controllers/onlineStoreProducts.controllers.js";
 
 
 const router = Router();
@@ -98,6 +99,9 @@ router.route("/edit/:postId").put(verifyJWT, editPost);
 
 // Toggle post privacy route
 router.route("/:postId/privacy").put(verifyJWT, togglePostPrivacy);
+
+// Online store — public, no auth required (must be before /:postId catch-all)
+router.route("/online-store/products").get(getOnlineStoreProducts);
 
 // Common API - handles get and delete for posts, stories, and reels
 router.route("/:postId").get(verifyJWT, getPostById).delete(verifyJWT, deleteContent);
