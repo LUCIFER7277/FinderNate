@@ -11,6 +11,7 @@ import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import Order from "../models/order.models.js";
 import PaymentLink from "../models/paymentLink.models.js";
+import EscrowWallet from "../models/escrowWallet.models.js";
 import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
 
@@ -312,6 +313,12 @@ export const verifyOnlineStorePayment = asyncHandler(async (req, res) => {
         { status: 'paid', paidAt: new Date() }
     );
 
+    // Record payment in wallet (tracks buyerId, sellerId, amount per order)
+    try {
+        const wallet = await EscrowWallet.getWallet();
+        await wallet.creditPayment(updated, updated.amount, `Store payment for order ${updated.orderNumber}`);
+    } catch { /* non-critical — order is already marked paid */ }
+
     return res.status(200).json(
         new ApiResponse(200, {
             order: {
@@ -373,6 +380,11 @@ export const cashfreeWebhook = asyncHandler(async (req, res) => {
             order.paymentLinkId,
             { status: 'paid', paidAt: new Date() }
         );
+        // Record payment in wallet (non-critical)
+        try {
+            const wallet = await EscrowWallet.getWallet();
+            await wallet.creditPayment(updated, updated.amount, `Store payment for order ${updated.orderNumber}`);
+        } catch { /* non-critical */ }
     }
 
     return res.status(200).json({ status: 'ok' });

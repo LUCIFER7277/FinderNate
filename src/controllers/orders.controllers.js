@@ -971,9 +971,16 @@ export const getBuyerOrderHistory = asyncHandler(async (req, res) => {
         }
     ]);
 
+    // Map 'held' → 'paid' for user display (admin retains 'held' in DB for manual release)
+    const userOrders = orders.map(o => {
+        const obj = o.toObject ? o.toObject() : o;
+        if (obj.paymentStatus === 'held') obj.paymentStatus = 'paid';
+        return obj;
+    });
+
     return res.status(200).json(
         new ApiResponse(200, {
-            orders,
+            orders: userOrders,
             total,
             page: parseInt(page),
             totalPages: Math.ceil(total / limit),
@@ -1061,9 +1068,16 @@ export const getSellerOrderHistory = asyncHandler(async (req, res) => {
         }
     ]);
 
+    // Map 'held' → 'paid' for user display (admin retains 'held' in DB for manual release)
+    const userOrders = orders.map(o => {
+        const obj = o.toObject ? o.toObject() : o;
+        if (obj.paymentStatus === 'held') obj.paymentStatus = 'paid';
+        return obj;
+    });
+
     return res.status(200).json(
         new ApiResponse(200, {
-            orders,
+            orders: userOrders,
             total,
             page: parseInt(page),
             totalPages: Math.ceil(total / limit),
