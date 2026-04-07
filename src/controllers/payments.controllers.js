@@ -1,9 +1,11 @@
 import {
-    initiatePhonePePayment,
-    checkPhonePePaymentStatus,
-    verifyPhonePeWebhookSignature,
-    generateMerchantTransactionId
-} from "../config/phonepe.config.js";
+    generateCashfreeOrderId,
+    createCashfreeOrder,
+    getCashfreeOrderStatus,
+    getCashfreePayments,
+    buildCashfreeCheckoutUrl,
+    verifyCashfreeWebhook,
+} from "../config/cashfree.config.js";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
@@ -20,6 +22,12 @@ import socketManager from "../config/socket.js";
 const getFrontendUrl = () => {
     return process.env.FRONTEND_URL || 'https://findernate.com';
 };
+
+const getBackendUrl = () => process.env.BACKEND_URL || 'https://apis.findernate.com';
+
+// Maps internal 'held' status to 'paid' for user-facing responses.
+// Admin sees 'held' in DB so they can manually transfer funds.
+const toUserPaymentStatus = (s) => s === 'held' ? 'paid' : s;
 
 const generateOrderNumber = () => {
     const timestamp = Date.now().toString(36).toUpperCase();
@@ -161,57 +169,64 @@ export const createPhonePeOrder = asyncHandler(async (req, res) => {
     paymentLink.orderId = order._id;
     await paymentLink.save();
 
-    const merchantTransactionId = generateMerchantTransactionId();
+    // ── Cashfree payment initiation ────────────────────────────────────────────
+    // const merchantTransactionId = generateMerchantTransactionId();
+    const cashfreeOrderId = generateCashfreeOrderId();
     const frontendUrl = getFrontendUrl();
+    const backendUrl = getBackendUrl();
 
-
-    const phonePePayload = {
-        merchantOrderId: merchantTransactionId,
-        amount: paymentLink.amount * 100, // paise
-        expireAfter: 1200,
-        paymentFlow: {
-            type: 'PG_CHECKOUT',
-            message: `Payment for order ${order.orderNumber}`,
-            merchantUrls: {
-                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}`,
-            }
-        }
-    };
-
-    let phonePeResponse;
+    let cfOrder;
     try {
-        phonePeResponse = await initiatePhonePePayment(phonePePayload);
-    } catch (phonePeError) {
+        cfOrder = await createCashfreeOrder({
+            orderId:       cashfreeOrderId,
+            amount:        paymentLink.amount,
+            customerId:    buyerId.toString(),
+            customerName:  req.user?.fullName || 'Customer',
+            customerEmail: req.user?.email    || 'noreply@findernate.com',
+            customerPhone: req.user?.phoneNumber || '9999999999',
+            orderNote:     `Payment for order ${order.orderNumber}`,
+            returnUrl:     `${frontendUrl}/payment/success?txnId=${cashfreeOrderId}&orderId=${order._id}`,
+            notifyUrl:     `${backendUrl}/api/v1/payments/webhook`, // escrow webhook — NOT /cashfree/webhook (store only)
+            expiryMinutes: 20
+        });
+    } catch (cfError) {
         await Order.findByIdAndDelete(order._id);
-        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
+        paymentLink.orderId = null;
+        await paymentLink.save();
+        const errorMsg = cfError?.response?.data?.message || cfError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
     }
 
-    const redirectUrl = phonePeResponse?.redirectUrl;
-    if (!redirectUrl) {
+    const paymentSessionId = cfOrder?.payment_session_id;
+    if (!paymentSessionId) {
         await Order.findByIdAndDelete(order._id);
-        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+        throw new ApiError(400, "Failed to get payment session from Cashfree");
     }
 
-    order.phonePeMerchantTransactionId = merchantTransactionId;
+    order.cashfreeOrderId = cashfreeOrderId;
     await order.save();
+
+    const checkoutUrl = buildCashfreeCheckoutUrl(paymentSessionId);
 
     return res.status(200).json(
         new ApiResponse(200, {
-            merchantTransactionId,
-            phonePeRedirectUrl: redirectUrl,
+            cashfreeOrderId,
+            checkoutUrl,
+            paymentSessionId,
+            cashfreeMode: process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox',
             orderId: order._id,
             orderNumber: order.orderNumber
-        }, "PhonePe payment initiated")
+        }, "Cashfree payment initiated")
     );
 });
 
-// Verify PhonePe payment and hold in escrow (called after redirect from PhonePe)
+// Verify Cashfree payment — chat/link flow (called after redirect from Cashfree)
 export const verifyPayment = asyncHandler(async (req, res) => {
-    const { merchantTransactionId, orderId } = req.body;
+    const { txnId, cashfreeOrderId: cfIdBody, orderId } = req.body;
+    const cashfreeOrderId = cfIdBody || txnId;
 
-    if (!merchantTransactionId || !orderId) {
-        throw new ApiError(400, "merchantTransactionId and orderId are required");
+    if (!cashfreeOrderId || !orderId) {
+        throw new ApiError(400, "txnId (cashfreeOrderId) and orderId are required");
     }
 
     const order = await Order.findById(orderId);
@@ -227,7 +242,7 @@ export const verifyPayment = asyncHandler(async (req, res) => {
                     _id: order._id,
                     orderNumber: order.orderNumber,
                     orderStatus: order.orderStatus,
-                    paymentStatus: order.paymentStatus,
+                    paymentStatus: toUserPaymentStatus(order.paymentStatus),
                     amount: order.amount,
                     productDetails: order.productDetails
                 }
@@ -235,26 +250,49 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         );
     }
 
-    // --- Verify with PhonePe ---
-    let statusResponse;
+    // --- Verify with Cashfree ---
+    // // --- Verify with PhonePe ---
+    // let statusResponse;
+    // try {
+    //     statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
+    // } catch (error) {
+    //     throw new ApiError(400, "Failed to verify payment status with PhonePe");
+    // }
+
+    // if (statusResponse?.state !== 'COMPLETED') {
+    //     order.paymentStatus = 'failed';
+    //     order.orderStatus = 'payment_pending';
+    //     await order.save();
+    //     throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
+    // }
+
+    let cfOrder;
     try {
-        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
-    } catch (error) {
-        throw new ApiError(400, "Failed to verify payment status with PhonePe");
+        cfOrder = await getCashfreeOrderStatus(cashfreeOrderId);
+    } catch {
+        throw new ApiError(400, "Failed to fetch order status from Cashfree");
     }
 
-    if (statusResponse?.state !== 'COMPLETED') {
+    if (cfOrder?.order_status !== 'PAID') {
         order.paymentStatus = 'failed';
         order.orderStatus = 'payment_pending';
         await order.save();
-        throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
+        throw new ApiError(400, `Payment not completed. Status: ${cfOrder?.order_status || 'unknown'}`);
     }
+
+    let cfPaymentId = null;
+    try {
+        const payments = await getCashfreePayments(cashfreeOrderId);
+        const paid = payments?.find?.(p => p.payment_status === 'SUCCESS');
+        cfPaymentId = paid?.cf_payment_id?.toString() || null;
+    } catch { /* non-critical */ }
 
     // --- Atomic guard: only one of verifyPayment / webhook wins ---
     const updated = await Order.findOneAndUpdate(
         { _id: order._id, paymentStatus: 'pending' },
         {
-            phonePeTransactionId: statusResponse?.transactionId,
+            cashfreeOrderId,
+            cashfreePaymentId: cfPaymentId,
             paymentStatus: 'held',
             orderStatus: 'payment_received'
         },
@@ -270,11 +308,11 @@ export const verifyPayment = asyncHandler(async (req, res) => {
                     _id: refreshed._id,
                     orderNumber: refreshed.orderNumber,
                     orderStatus: refreshed.orderStatus,
-                    paymentStatus: refreshed.paymentStatus,
+                    paymentStatus: toUserPaymentStatus(refreshed.paymentStatus),
                     amount: refreshed.amount,
                     productDetails: refreshed.productDetails
                 }
-            }, "Payment verified and held in escrow")
+            }, "Payment verified")
         );
     }
 
@@ -291,54 +329,64 @@ export const verifyPayment = asyncHandler(async (req, res) => {
                 _id: updated._id,
                 orderNumber: updated.orderNumber,
                 orderStatus: updated.orderStatus,
-                paymentStatus: updated.paymentStatus,
+                paymentStatus: toUserPaymentStatus(updated.paymentStatus),
                 amount: updated.amount,
                 productDetails: updated.productDetails
             }
-        }, "Payment verified and held in escrow")
+        }, "Payment verified")
     );
 });
 
-// PhonePe S2S webhook handler (v2)
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/payments/webhook
+// Cashfree S2S webhook — chat/escrow orders (no auth, called by Cashfree).
+// Same format as /cashfree/webhook but sets paymentStatus:'held' + escrow hold.
+// ─────────────────────────────────────────────────────────────────────────────
 export const phonePeWebhook = asyncHandler(async (req, res) => {
-    // v2 webhooks send Authorization: SHA256(username:password)
-    const authHeader = req.headers['authorization'] || '';
-    if (authHeader) {
-        const isValid = verifyPhonePeWebhookSignature(authHeader);
+    const timestamp = req.headers['x-webhook-timestamp'] || '';
+    const signature = req.headers['x-webhook-signature'] || '';
+    const rawBody   = req.rawBody || JSON.stringify(req.body);
+
+    if (timestamp && signature) {
+        const isValid = verifyCashfreeWebhook(timestamp, signature, rawBody);
         if (!isValid) {
-            console.error('Invalid PhonePe webhook signature');
-            return res.status(200).json({ status: 'ok' }); // always 200 to PhonePe
+            console.error('[Cashfree chat webhook] Invalid signature');
+            return res.status(200).json({ status: 'ok' });
         }
     }
 
-    // v2 body is plain JSON (not base64 encoded)
-    const payload = req.body;
-    const merchantOrderId = payload?.merchantOrderId || payload?.merchantTransactionId;
-    const transactionId   = payload?.transactionId;
-    const state           = payload?.state;
+    const payload       = req.body;
+    const cfOrderId     = payload?.data?.order?.order_id;
+    const orderStatus   = payload?.data?.order?.order_status;
+    const cfPaymentId   = payload?.data?.payment?.cf_payment_id?.toString();
+    const paymentStatus = payload?.data?.payment?.payment_status;
 
-    if (state === 'COMPLETED' && merchantOrderId) {
-        const order = await Order.findOne({ phonePeMerchantTransactionId: merchantOrderId });
+    if (orderStatus !== 'PAID' || paymentStatus !== 'SUCCESS' || !cfOrderId) {
+        return res.status(200).json({ status: 'ok' });
+    }
 
-        if (order && order.paymentStatus === 'pending') {
-            const updated = await Order.findOneAndUpdate(
-                { _id: order._id, paymentStatus: 'pending' },
-                {
-                    phonePeTransactionId: transactionId,
-                    paymentStatus: 'held',
-                    orderStatus: 'payment_received'
-                },
-                { new: true }
-            );
-            if (updated) {
-                await PaymentLink.findByIdAndUpdate(
-                    order.paymentLinkId,
-                    { status: 'paid', paidAt: new Date() }
-                );
-                const escrowWallet = await EscrowWallet.getWallet();
-                await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
-            }
-        }
+    const order = await Order.findOne({ cashfreeOrderId: cfOrderId });
+    if (!order || order.paymentStatus !== 'pending') {
+        return res.status(200).json({ status: 'ok' });
+    }
+
+    const updated = await Order.findOneAndUpdate(
+        { _id: order._id, paymentStatus: 'pending' },
+        {
+            cashfreePaymentId: cfPaymentId || null,
+            paymentStatus: 'held',           // escrow — store webhook uses 'paid'
+            orderStatus:   'payment_received'
+        },
+        { new: true }
+    );
+
+    if (updated) {
+        await PaymentLink.findByIdAndUpdate(
+            order.paymentLinkId,
+            { status: 'paid', paidAt: new Date() }
+        );
+        const escrowWallet = await EscrowWallet.getWallet();
+        await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
     }
 
     return res.status(200).json({ status: 'ok' });
@@ -662,12 +710,12 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                     description: 'Returns accepted within 7 days of delivery for eligible items. Items must be in original condition with tags and packaging intact.'
                 },
                 buyerNotices: [
-                    {
-                        type: 'escrow_protection',
-                        title: 'Escrow Payment Protection',
-                        message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
-                        priority: 'medium'
-                    },
+                    // {
+                        // type: 'escrow_protection',
+                        // title: 'Escrow Payment Protection',
+                        // // message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
+                        // priority: 'medium'
+                    // },
                     {
                         type: 'package_opening',
                         title: 'Record Package Opening',
@@ -809,55 +857,64 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
         isShareableOrder: true
     });
 
-    const merchantTransactionId = generateMerchantTransactionId();
+    // ── Cashfree payment initiation ────────────────────────────────────────────
+    // const merchantTransactionId = generateMerchantTransactionId();
+    const cashfreeOrderId = generateCashfreeOrderId();
     const frontendUrl = getFrontendUrl();
+    const backendUrl  = getBackendUrl();
 
+    const customerName  = buyerDetails?.fullName || req.user?.fullName || 'Customer';
+    const customerEmail = buyerDetails?.email     || req.user?.email    || 'noreply@findernate.com';
+    const customerPhone = buyerDetails?.phoneNumber || req.user?.phoneNumber || '9999999999';
+    const customerId    = buyerId ? buyerId.toString() : `guest_${order._id}`;
 
-    const phonePePayload = {
-        merchantOrderId: merchantTransactionId,
-        amount: numericAmount * 100, // paise
-        expireAfter: 1200,
-        paymentFlow: {
-            type: 'PG_CHECKOUT',
-            message: `Payment for ${productDetails.name}`,
-            merchantUrls: {
-                redirectUrl: `${frontendUrl}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}`,
-            }
-        }
-    };
-
-    let phonePeResponse;
+    let cfOrder;
     try {
-        phonePeResponse = await initiatePhonePePayment(phonePePayload);
-    } catch (phonePeError) {
+        cfOrder = await createCashfreeOrder({
+            orderId:       cashfreeOrderId,
+            amount:        numericAmount,
+            customerId,
+            customerName,
+            customerEmail,
+            customerPhone,
+            orderNote:     `Payment for ${productDetails.name}`,
+            returnUrl:     `${frontendUrl}/payment/success?txnId=${cashfreeOrderId}&orderId=${order._id}`,
+            notifyUrl:     `${backendUrl}/api/v1/payments/webhook`, // escrow webhook — NOT /cashfree/webhook (store only)
+            expiryMinutes: 20
+        });
+    } catch (cfError) {
         await Order.findByIdAndDelete(order._id);
-        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
+        const errorMsg = cfError?.response?.data?.message || cfError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
     }
 
-    const redirectUrl = phonePeResponse?.redirectUrl;
-    if (!redirectUrl) {
+    const paymentSessionId = cfOrder?.payment_session_id;
+    if (!paymentSessionId) {
         await Order.findByIdAndDelete(order._id);
-        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+        throw new ApiError(400, "Failed to get payment session from Cashfree");
     }
 
-    order.phonePeMerchantTransactionId = merchantTransactionId;
+    order.cashfreeOrderId = cashfreeOrderId;
     await order.save();
 
     paymentLink.orderId = order._id;
     await paymentLink.save();
 
+    const checkoutUrl = buildCashfreeCheckoutUrl(paymentSessionId);
+
     return res.status(200).json(
         new ApiResponse(200, {
-            merchantTransactionId,
-            phonePeRedirectUrl: redirectUrl,
+            cashfreeOrderId,
+            checkoutUrl,
+            paymentSessionId,
+            cashfreeMode: process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox',
             orderId: order._id,
             orderNumber: order.orderNumber,
             seller: {
                 name: seller.fullName,
                 username: seller.username
             }
-        }, "PhonePe payment initiated for shareable link")
+        }, "Cashfree payment initiated for shareable link")
     );
 });
 
@@ -1015,7 +1072,7 @@ export const showProductInterest = asyncHandler(async (req, res) => {
     }
 
     // Always send payment link message in chat (every time buyer shows interest)
-    const paymentMessage = `💰 Pay for "${productName}" - ₹${productPrice}\n\nClick below to pay securely. Your payment will be held safely in escrow until you confirm delivery.`;
+    const paymentMessage = `💰 Pay for "${productName}" - ₹${productPrice}\n\nClick below to pay securely.`;
 
     const recipients = chat.participants.filter(
         p => p.toString() !== sellerId.toString()
@@ -1458,12 +1515,12 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                     description: 'Returns accepted within 7 days of delivery for eligible items. Items must be in original condition with tags and packaging intact.'
                 },
                 buyerNotices: !isSeller ? [
-                    {
-                        type: 'escrow_protection',
-                        title: 'Escrow Payment Protection',
-                        message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
-                        priority: 'medium'
-                    },
+                    // {
+                        // type: 'escrow_protection',
+                        // title: 'Escrow Payment Protection',
+                        // // message: 'Your payment is held securely in escrow and only released to the seller after you confirm delivery. If there is any issue, you can raise a dispute.',
+                        // priority: 'medium'
+                    // },
                     {
                         type: 'package_opening',
                         title: 'Record Package Opening',
@@ -1538,12 +1595,6 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "This checkout has already been paid");
     }
 
-    // if (checkout.expiresAt && new Date() > checkout.expiresAt) {
-    //     message.checkoutDetails.checkoutStatus = 'expired';
-    //     await message.save();
-    //     throw new ApiError(400, "This checkout has expired. Ask the seller to send a new one.");
-    // }
-
     // Always validate shipping address
     if (!shippingAddress) {
         throw new ApiError(400, "Shipping address is required");
@@ -1600,49 +1651,50 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     paymentLink.orderId = order._id;
     await paymentLink.save();
 
-    const merchantTransactionId = generateMerchantTransactionId();
+    const cashfreeOrderId = generateCashfreeOrderId();
     const frontendUrl = getFrontendUrl();
+    const backendUrl  = getBackendUrl();
 
-
-    const phonePePayload = {
-        merchantOrderId: merchantTransactionId,
-        amount: checkout.totalPrice * 100, // paise
-        expireAfter: 1200,
-        paymentFlow: {
-            type: 'PG_CHECKOUT',
-            message: `Payment for ${checkout.productName}`,
-            merchantUrls: {
-                redirectUrl: `${'https://findernate.com'}/payment/success?txnId=${merchantTransactionId}&orderId=${order._id}&msgId=${messageId}`,
-            }
-        }
-    };
-
-    let phonePeResponse;
+    let cfOrder;
     try {
-        phonePeResponse = await initiatePhonePePayment(phonePePayload);
-    } catch (phonePeError) {
-        console.log(phonePeError)
+        cfOrder = await createCashfreeOrder({
+            orderId:       cashfreeOrderId,
+            amount:        checkout.totalPrice,
+            customerId:    buyerId.toString(),
+            customerName:  req.user?.fullName   || 'Customer',
+            customerEmail: req.user?.email      || 'noreply@findernate.com',
+            customerPhone: req.user?.phoneNumber || '9999999999',
+            orderNote:     `Payment for ${checkout.productName}`,
+            returnUrl:     `${frontendUrl}/payment/success?txnId=${cashfreeOrderId}&orderId=${order._id}&msgId=${messageId}`,
+            notifyUrl:     `${backendUrl}/api/v1/payments/webhook`, // escrow webhook — NOT /cashfree/webhook (store only)
+            expiryMinutes: 20
+        });
+    } catch (cfError) {
         await Order.findByIdAndDelete(order._id);
-        const errorMsg = phonePeError?.response?.data?.message || phonePeError?.message || "Failed to create payment order";
+        const errorMsg = cfError?.response?.data?.message || cfError?.message || "Failed to create payment order";
         throw new ApiError(400, errorMsg);
     }
 
-    const redirectUrl = phonePeResponse?.redirectUrl;
-    if (!redirectUrl) {
+    const paymentSessionId = cfOrder?.payment_session_id;
+    if (!paymentSessionId) {
         await Order.findByIdAndDelete(order._id);
-        throw new ApiError(400, "Failed to get payment URL from PhonePe");
+        throw new ApiError(400, "Failed to get payment session from Cashfree");
     }
 
-    order.phonePeMerchantTransactionId = merchantTransactionId;
+    order.cashfreeOrderId = cashfreeOrderId;
     await order.save();
 
     paymentLink.orderId = order._id;
     await paymentLink.save();
 
+    const checkoutUrl = buildCashfreeCheckoutUrl(paymentSessionId);
+
     return res.status(200).json(
         new ApiResponse(200, {
-            merchantTransactionId,
-            phonePeRedirectUrl: redirectUrl,
+            cashfreeOrderId,
+            checkoutUrl,
+            paymentSessionId,
+            cashfreeMode: process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox',
             orderId: order._id,
             orderNumber: order.orderNumber,
             checkoutMessageId: messageId,
@@ -1655,16 +1707,17 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
                 name: checkout.sellerName,
                 username: checkout.sellerUsername
             }
-        }, "PhonePe payment initiated - proceed to payment")
+        }, "Cashfree payment initiated - proceed to payment")
     );
 });
 
 // Verify checkout payment & update message status
 export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
-    const { merchantTransactionId, orderId, checkoutMessageId } = req.body;
+    const { txnId, cashfreeOrderId: cfIdBody, orderId, checkoutMessageId } = req.body;
+    const cashfreeOrderId = cfIdBody || txnId;
 
-    if (!merchantTransactionId || !orderId) {
-        throw new ApiError(400, "merchantTransactionId and orderId are required");
+    if (!cashfreeOrderId || !orderId) {
+        throw new ApiError(400, "txnId (cashfreeOrderId) and orderId are required");
     }
 
     const order = await Order.findById(orderId);
@@ -1679,7 +1732,7 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
                     _id: order._id,
                     orderNumber: order.orderNumber,
                     orderStatus: order.orderStatus,
-                    paymentStatus: order.paymentStatus,
+                    paymentStatus: toUserPaymentStatus(order.paymentStatus),
                     amount: order.amount,
                     productDetails: order.productDetails
                 },
@@ -1689,26 +1742,33 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
         );
     }
 
-    // Verify with PhonePe
-    let statusResponse;
+    let cfOrder;
     try {
-        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
-    } catch (error) {
-        throw new ApiError(400, "Failed to verify payment status with PhonePe");
+        cfOrder = await getCashfreeOrderStatus(cashfreeOrderId);
+    } catch {
+        throw new ApiError(400, "Failed to fetch order status from Cashfree");
     }
 
-    if (statusResponse?.state !== 'COMPLETED') {
+    if (cfOrder?.order_status !== 'PAID') {
         order.paymentStatus = 'failed';
         order.orderStatus = 'payment_pending';
         await order.save();
-        throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
+        throw new ApiError(400, `Payment not completed. Status: ${cfOrder?.order_status || 'unknown'}`);
     }
+
+    let cfPaymentId = null;
+    try {
+        const payments = await getCashfreePayments(cashfreeOrderId);
+        const paid = payments?.find?.(p => p.payment_status === 'SUCCESS');
+        cfPaymentId = paid?.cf_payment_id?.toString() || null;
+    } catch { /* non-critical */ }
 
     // Atomic guard: only one of verifyCheckoutPayment / webhook wins
     const activeOrder = await Order.findOneAndUpdate(
         { _id: order._id, paymentStatus: 'pending' },
         {
-            phonePeTransactionId: statusResponse?.transactionId,
+            cashfreeOrderId,
+            cashfreePaymentId: cfPaymentId,
             paymentStatus: 'held',
             orderStatus: 'payment_received'
         },
@@ -1724,7 +1784,7 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
                     _id: refreshed._id,
                     orderNumber: refreshed.orderNumber,
                     orderStatus: refreshed.orderStatus,
-                    paymentStatus: refreshed.paymentStatus,
+                    paymentStatus: toUserPaymentStatus(refreshed.paymentStatus),
                     amount: refreshed.amount,
                     productDetails: refreshed.productDetails
                 },
@@ -1748,7 +1808,7 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
             checkoutMessage.checkoutDetails.checkoutStatus = 'paid';
             await checkoutMessage.save();
 
-            const confirmationText = `✅ Payment Confirmed!\n\nOrder: #${activeOrder.orderNumber}\nAmount: ₹${activeOrder.amount.toLocaleString('en-IN')}\nProduct: ${checkoutMessage.checkoutDetails.productName}\n\nPayment is held securely in escrow. Seller will be notified to ship your order.`;
+            const confirmationText = `✅ Payment Confirmed!\n\nOrder: #${activeOrder.orderNumber}\nAmount: ₹${activeOrder.amount.toLocaleString('en-IN')}\nProduct: ${checkoutMessage.checkoutDetails.productName}\n\n. Seller will be notified to ship your order.`;
 
             const recipients = [];
             const chat = await Chat.findById(checkoutMessage.chatId);
@@ -1827,12 +1887,12 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
                 _id: activeOrder._id,
                 orderNumber: activeOrder.orderNumber,
                 orderStatus: activeOrder.orderStatus,
-                paymentStatus: activeOrder.paymentStatus,
+                paymentStatus: toUserPaymentStatus(activeOrder.paymentStatus),
                 amount: activeOrder.amount,
                 productDetails: activeOrder.productDetails
             },
             checkoutStatus: 'paid',
             message: "Payment verified! Your order has been confirmed."
-        }, "Checkout payment verified and held in escrow")
+        }, "Checkout payment verified")
     );
 });
