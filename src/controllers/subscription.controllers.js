@@ -29,7 +29,7 @@ const SUBSCRIPTION_PLANS = {
     small_business: {
         id: 'small_business',
         name: 'Small Business',
-        price: 999, // ₹999 per month
+        price: 1, // ₹999 per month
         duration: 'monthly'
     },
     corporate: {
@@ -130,7 +130,7 @@ export const getUpgradePrompt = asyncHandler(async (req, res) => {
             {
                 id: 'small_business',
                 name: 'Small Business',
-                price: '₹999/month',
+                price: '₹1/month',
                 features: [
                     'Enhanced business profile',
                     'Unlimited posts',
@@ -263,7 +263,7 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
         {
             id: 'small_business',
             name: 'Small Business',
-            price: '₹999',
+            price: '₹1',
             period: 'per month',
             features: [
                 'Enhanced business profile',
