@@ -353,10 +353,14 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         PaymentLogger.logPaymentInitiated(userId.toString(), cashfreeOrderId, plan, planDetails.price);
         MetricsCollector.recordPaymentAttempt();
 
+        const cashfreeMode = process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox';
+
         res.status(200).json(
             new ApiResponse(200, {
                 cashfreeOrderId,
                 checkoutUrl,
+                paymentSessionId,
+                cashfreeMode,
                 plan,
                 planName: planDetails.name,
                 planPrice: planDetails.price
