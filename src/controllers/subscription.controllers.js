@@ -4,10 +4,13 @@ import { ApiError } from '../utlis/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
 import {
-    initiatePhonePePayment,
-    checkPhonePePaymentStatus,
-    generateMerchantTransactionId
-} from '../config/phonepe.config.js';
+    generateCashfreeOrderId,
+    createCashfreeOrder,
+    getCashfreeOrderStatus,
+    getCashfreePayments,
+    buildCashfreeCheckoutUrl,
+    verifyCashfreeWebhook,
+} from '../config/cashfree.config.js';
 import {
     PaymentLogger,
     SubscriptionLogger,
@@ -36,9 +39,6 @@ const SUBSCRIPTION_PLANS = {
         duration: 'monthly'
     }
 };
-
-// PhonePe requires amount in paise (1 INR = 100 paise)
-const convertToPaise = (rupees) => rupees * 100;
 
 /**
  * Get current user's subscription status
@@ -300,7 +300,7 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
 });
 
 /**
- * Create PhonePe order for subscription upgrade
+ * Create Cashfree order for subscription upgrade
  * This initiates the payment flow for upgrading to a paid plan
  */
 export const createSubscriptionOrder = asyncHandler(async (req, res) => {
@@ -325,61 +325,60 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
-    const merchantTransactionId = generateMerchantTransactionId();
+    const cashfreeOrderId = generateCashfreeOrderId();
     const FRONTEND_URL = process.env.FRONTEND_URL || 'https://findernate.com';
     const BACKEND_URL = process.env.BACKEND_URL || 'https://api.findernate.com';
 
     try {
-        const paymentData = {
-            merchantOrderId: merchantTransactionId,
-            amount: convertToPaise(planDetails.price),
-            expireAfter: 1200,
-            paymentFlow: {
-                type: 'PG_CHECKOUT',
-                message: `FinderNate ${planDetails.name} Subscription`,
-                merchantUrls: {
-                    redirectUrl: `${FRONTEND_URL}/subscription/success?txnId=${merchantTransactionId}&plan=${plan}`
-                }
-            }
-        };
+        const cfOrder = await createCashfreeOrder({
+            orderId:       cashfreeOrderId,
+            amount:        planDetails.price,
+            customerId:    userId.toString(),
+            customerName:  user.fullName || user.username || 'Customer',
+            customerEmail: user.email || 'noreply@findernate.com',
+            customerPhone: user.phoneNumber || '9999999999',
+            orderNote:     `FinderNate ${planDetails.name} Subscription`,
+            returnUrl:     `${FRONTEND_URL}/subscription/success?txnId=${cashfreeOrderId}&plan=${plan}`,
+            notifyUrl:     `${BACKEND_URL}/api/v1/subscription/webhook`,
+            expiryMinutes: 20
+        });
 
-        const phonePeResponse = await initiatePhonePePayment(paymentData);
-
-        if (!phonePeResponse?.redirectUrl) {
-            throw new Error(phonePeResponse?.message || 'Failed to get PhonePe redirect URL');
+        const paymentSessionId = cfOrder?.payment_session_id;
+        if (!paymentSessionId) {
+            throw new Error('Failed to get payment session from Cashfree');
         }
 
-        const phonePeRedirectUrl = phonePeResponse.redirectUrl;
+        const checkoutUrl = buildCashfreeCheckoutUrl(paymentSessionId);
 
-        PaymentLogger.logPaymentInitiated(userId.toString(), merchantTransactionId, plan, planDetails.price);
+        PaymentLogger.logPaymentInitiated(userId.toString(), cashfreeOrderId, plan, planDetails.price);
         MetricsCollector.recordPaymentAttempt();
 
         res.status(200).json(
             new ApiResponse(200, {
-                merchantTransactionId,
-                phonePeRedirectUrl,
+                cashfreeOrderId,
+                checkoutUrl,
                 plan,
                 planName: planDetails.name,
                 planPrice: planDetails.price
-            }, 'PhonePe payment initiated for subscription')
+            }, 'Cashfree payment initiated for subscription')
         );
     } catch (error) {
-        console.error('❌ PhonePe subscription order creation failed:', error);
+        console.error('❌ Cashfree subscription order creation failed:', error);
         ErrorLogger.logRazorpayError(userId.toString(), null, error);
         throw new ApiError(500, `Payment gateway error: ${error.message}`);
     }
 });
 
 /**
- * Verify PhonePe payment and activate subscription
- * Called from /subscription/success page after PhonePe redirect
+ * Verify Cashfree payment and activate subscription
+ * Called from /subscription/success page after Cashfree redirect
  */
 export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
     const userId = req.user._id;
-    const { merchantTransactionId, plan } = req.body;
+    const { cashfreeOrderId, plan } = req.body;
 
-    if (!merchantTransactionId || !plan) {
-        throw new ApiError(400, 'Missing required fields: merchantTransactionId and plan');
+    if (!cashfreeOrderId || !plan) {
+        throw new ApiError(400, 'Missing required fields: cashfreeOrderId and plan');
     }
 
     // Validate plan
@@ -388,22 +387,33 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
-    // Verify with PhonePe status API
-    let statusResponse;
+    // Verify with Cashfree status API
+    let cfOrder;
     try {
-        statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
+        cfOrder = await getCashfreeOrderStatus(cashfreeOrderId);
     } catch (error) {
-        throw new ApiError(400, 'Failed to verify payment status with PhonePe');
+        throw new ApiError(400, 'Failed to verify payment status with Cashfree');
     }
 
-    const isSuccess = statusResponse?.state === 'COMPLETED';
-    const phonePeTransactionId = statusResponse?.transactionId || merchantTransactionId;
+    const isSuccess = cfOrder?.order_status === 'PAID';
 
-    PaymentLogger.logPaymentVerification(userId.toString(), phonePeTransactionId, merchantTransactionId, isSuccess);
+    // Fetch Cashfree payment ID
+    let cfPaymentId = cashfreeOrderId;
+    if (isSuccess) {
+        try {
+            const payments = await getCashfreePayments(cashfreeOrderId);
+            const paid = payments?.find?.(p => p.payment_status === 'SUCCESS');
+            if (paid?.cf_payment_id) {
+                cfPaymentId = paid.cf_payment_id.toString();
+            }
+        } catch { /* non-critical */ }
+    }
+
+    PaymentLogger.logPaymentVerification(userId.toString(), cfPaymentId, cashfreeOrderId, isSuccess);
 
     if (!isSuccess) {
         MetricsCollector.recordPaymentFailure();
-        throw new ApiError(400, `Payment not completed: ${statusResponse?.message || 'Unknown error'}`);
+        throw new ApiError(400, `Payment not completed. Status: ${cfOrder?.order_status || 'unknown'}`);
     }
 
     // Get user
@@ -429,7 +439,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         subscription.status = 'active';
         subscription.startDate = now;
         subscription.endDate = endDate;
-        subscription.paymentId = phonePeTransactionId;
+        subscription.paymentId = cfPaymentId;
         await subscription.save();
     } else {
         subscription = await Subscription.create({
@@ -438,7 +448,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
             status: 'active',
             startDate: now,
             endDate: endDate,
-            paymentId: phonePeTransactionId
+            paymentId: cfPaymentId
         });
     }
 
@@ -471,7 +481,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
 
     const hasCallingAccess = ['small_business', 'corporate'].includes(plan);
 
-    PaymentLogger.logPaymentSuccess(userId.toString(), phonePeTransactionId, merchantTransactionId, plan, SUBSCRIPTION_PLANS[plan].price);
+    PaymentLogger.logPaymentSuccess(userId.toString(), cfPaymentId, cashfreeOrderId, plan, SUBSCRIPTION_PLANS[plan].price);
     SubscriptionLogger.logSubscriptionCreated(userId.toString(), plan, subscription.startDate, subscription.endDate);
     MetricsCollector.recordPaymentSuccess(SUBSCRIPTION_PLANS[plan].price, plan);
 
@@ -489,40 +499,42 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
                 }
             },
             message: `Successfully upgraded to ${SUBSCRIPTION_PLANS[plan].name} plan!`,
-            paymentId: phonePeTransactionId
+            paymentId: cfPaymentId
         }, 'Subscription activated successfully')
     );
 });
 
 /**
- * PhonePe webhook for subscription payments
- * Called asynchronously by PhonePe after payment completion
+ * Cashfree webhook for subscription payments
+ * Called asynchronously by Cashfree after payment completion
  */
 export const subscriptionWebhook = asyncHandler(async (req, res) => {
-    // v2: Authorization: SHA256(username:password)
-    const authHeader = req.headers['authorization'] || '';
-    if (authHeader) {
-        const { verifyPhonePeWebhookSignature } = await import('../config/phonepe.config.js');
-        const isValid = verifyPhonePeWebhookSignature(authHeader);
+    const timestamp = req.headers['x-webhook-timestamp'] || '';
+    const signature = req.headers['x-webhook-signature'] || '';
+    const rawBody   = req.rawBody || JSON.stringify(req.body);
+
+    if (timestamp && signature) {
+        const isValid = verifyCashfreeWebhook(timestamp, signature, rawBody);
         if (!isValid) {
-            console.error('❌ Invalid PhonePe subscription webhook signature');
-            return res.status(200).json({ success: true }); // always 200 to PhonePe
+            console.error('❌ Invalid Cashfree subscription webhook signature');
+            return res.status(200).json({ success: true }); // always 200 to Cashfree
         }
     }
 
-    // v2 body is plain JSON
-    const payload = req.body;
-    const state   = payload?.state;
-    const merchantTransactionId = payload?.merchantOrderId || payload?.merchantTransactionId;
+    const payload       = req.body;
+    const cfOrderId     = payload?.data?.order?.order_id;
+    const orderStatus   = payload?.data?.order?.order_status;
+    const cfPaymentId   = payload?.data?.payment?.cf_payment_id?.toString();
+    const paymentStatus = payload?.data?.payment?.payment_status;
 
-    if (state !== 'COMPLETED' || !merchantTransactionId) {
+    if (orderStatus !== 'PAID' || paymentStatus !== 'SUCCESS' || !cfOrderId) {
         return res.status(200).json({ success: true });
     }
 
     // Subscription activation is handled by verifySubscriptionPayment on the success page.
     // Webhook just logs for audit.
-    console.log(`✅ Subscription PhonePe webhook received: txn=${merchantTransactionId}, amount=${payload.amount}`);
-    PaymentLogger.logPaymentSuccess('webhook', payload.transactionId || '', merchantTransactionId, 'subscription', payload.amount / 100);
+    console.log(`✅ Subscription Cashfree webhook received: orderId=${cfOrderId}, cfPaymentId=${cfPaymentId}`);
+    PaymentLogger.logPaymentSuccess('webhook', cfPaymentId || '', cfOrderId, 'subscription', payload?.data?.order?.order_amount || 0);
 
     return res.status(200).json({ success: true });
 });
