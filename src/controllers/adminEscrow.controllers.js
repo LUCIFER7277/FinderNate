@@ -1,8 +1,16 @@
+import mongoose from "mongoose";
 import { asyncHandler } from "../utlis/asyncHandler.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
+import {
+    generateCashfreeRefundId,
+    getCashfreeOrderStatus,
+    getCashfreeRefund,
+    createCashfreeRefund,
+} from "../config/cashfree.config.js";
+
 
 // Get escrow wallet dashboard (Admin only)
 export const getEscrowDashboard = asyncHandler(async (req, res) => {
@@ -179,28 +187,24 @@ const calculateFeeBreakdown = async (order) => {
 // Resolve dispute (Admin only)
 export const resolveDispute = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
-    const { resolution, action } = req.body;
+    const { resolution, action, forceResolve = false } = req.body;
 
     const order = await Order.findById(orderId);
-    if (!order) {
-        throw new ApiError(404, "Order not found");
-    }
+    if (!order) throw new ApiError(404, "Order not found");
 
     if (order.orderStatus !== 'disputed') {
         throw new ApiError(400, "Order is not in disputed status");
     }
 
-    // Handle edge case: payment already released or refunded
+    // Edge case: already released or refunded — just close the dispute record
     if (order.paymentStatus === 'released' || order.paymentStatus === 'refunded') {
         if (order.dispute) {
             order.dispute.status = 'resolved';
             order.dispute.resolution = resolution || `Dispute resolved - payment was already ${order.paymentStatus}`;
             order.dispute.resolvedAt = new Date();
         }
-
         order.orderStatus = order.paymentStatus === 'released' ? 'confirmed' : 'refunded';
         await order.save();
-
         return res.status(200).json(
             new ApiResponse(200, { order }, `Dispute resolved - payment was already ${order.paymentStatus}`)
         );
@@ -210,75 +214,139 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Payment is not in held status - cannot resolve");
     }
 
+    if (action !== 'refund_buyer' && action !== 'release_seller') {
+        throw new ApiError(400, "Invalid action. Use: refund_buyer or release_seller");
+    }
+
     const escrowWallet = await EscrowWallet.getWallet();
-    const { forceResolve = false } = req.body;
+    const insufficientBalance = escrowWallet.heldBalance < order.amount;
 
-    if (escrowWallet.heldBalance < order.amount) {
-        if (!forceResolve) {
-            throw new ApiError(400, `Insufficient escrow balance. Wallet has ${escrowWallet.heldBalance} held, but order requires ${order.amount}. Use forceResolve: true to resolve without fund movement.`);
-        }
-
-        if (order.dispute) {
-            order.dispute.status = 'resolved';
-            order.dispute.resolution = resolution || `Force resolved due to insufficient escrow balance`;
-            order.dispute.resolvedAt = new Date();
-        }
-
-        if (action === 'refund_buyer') {
-            order.paymentStatus = 'refunded';
-            order.orderStatus = 'refunded';
-        } else {
-            order.paymentStatus = 'released';
-            order.orderStatus = 'confirmed';
-        }
-
-        await order.save();
-
-        return res.status(200).json(
-            new ApiResponse(200, { order, warning: 'Force resolved without fund movement due to insufficient escrow balance' }, "Dispute force resolved")
+    if (insufficientBalance && !forceResolve) {
+        throw new ApiError(400,
+            `Insufficient escrow balance. Wallet has ₹${escrowWallet.heldBalance} held but order requires ₹${order.amount}. Use forceResolve: true to proceed without escrow movement.`
         );
     }
 
     let feeBreakdown = null;
+    let refundStatus = null;
+    let refundId = null;
 
     if (action === 'refund_buyer') {
-        // Fee-based refund calculation
+        if (!order.cashfreeOrderId) {
+            throw new ApiError(400, "No Cashfree order ID on this order - cannot initiate refund");
+        }
+
         feeBreakdown = await calculateFeeBreakdown(order);
+        refundId = order.refundId || generateCashfreeRefundId();
 
-        // Refund buyer (order amount minus deductions)
-        if (feeBreakdown.buyerRefund > 0) {
-            await escrowWallet.refundFunds(order, feeBreakdown.buyerRefund, `Refund for dispute resolution - Order ${order.orderNumber}`);
+        let cashfreeOrder;
+        try {
+            cashfreeOrder = await getCashfreeOrderStatus(order.cashfreeOrderId);
+        } catch (err) {
+            throw new ApiError(502, `Failed to fetch Cashfree order status: ${err.message}`);
         }
 
-        // Release remaining to cover shipping (seller) and fees (Finderate)
-        const remainingAmount = order.amount - feeBreakdown.buyerRefund;
-        if (remainingAmount > 0) {
-            await escrowWallet.releaseFunds(order, remainingAmount, feeBreakdown.finerateEarnings, `Fees & shipping settlement - Order ${order.orderNumber}`);
+        if (cashfreeOrder.order_status !== 'PAID') {
+            throw new ApiError(400, `Cashfree order is not PAID (status: ${cashfreeOrder.order_status})`);
         }
 
-        order.paymentStatus = 'refunded';
-        order.orderStatus = 'refunded';
-        order.platformFee = feeBreakdown.finerateEarnings;
-        order.sellerAmount = feeBreakdown.sellerSettlement;
-    } else if (action === 'release_seller') {
-        await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released after dispute resolution - Order ${order.orderNumber}`);
-        order.paymentStatus = 'released';
-        order.orderStatus = 'confirmed';
-    } else {
-        throw new ApiError(400, "Invalid action. Use: refund_buyer or release_seller");
+        if (order.refundId) {
+            try {
+                const existing = await getCashfreeRefund(order.cashfreeOrderId, order.refundId);
+                refundStatus = existing.refund_status;
+            } catch (error) {
+            }
+        }
+
+        if (refundStatus !== 'SUCCESS') {
+            let cfRefund;
+            try {
+                cfRefund = await createCashfreeRefund(
+                    order.cashfreeOrderId,
+                    refundId,
+                    feeBreakdown.buyerRefund,
+                    `Dispute resolution refund - Order ${order.orderNumber}`
+                );
+            } catch (err) {
+                throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
+            }
+            refundStatus = cfRefund.refund_status;
+        }
+
+        if (refundStatus !== 'SUCCESS' && refundStatus !== 'PENDING') {
+            throw new ApiError(502, `Cashfree refund in unexpected state: ${refundStatus}`);
+        }
     }
 
-    if (order.dispute) {
-        order.dispute.status = 'resolved';
-        order.dispute.resolution = resolution;
-        order.dispute.resolvedAt = new Date();
+    const session = await mongoose.startSession();
+    try {
+        await session.withTransaction(async () => {
+            if (action === 'refund_buyer') {
+                if (!insufficientBalance) {
+                    // Fetch wallet inside transaction for a consistent view
+                    const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+
+                    if (feeBreakdown.buyerRefund > 0) {
+                        await wallet.refundFunds(
+                            order,
+                            feeBreakdown.buyerRefund,
+                            `Dispute refund: ${resolution || 'resolved'} - Order ${order.orderNumber}`,
+                            { session }
+                        );
+                    }
+                    const remaining = order.amount - feeBreakdown.buyerRefund;
+                    if (remaining > 0) {
+                        await wallet.releaseFunds(
+                            order,
+                            remaining,
+                            feeBreakdown.finerateEarnings,
+                            `Fees & shipping settlement - Order ${order.orderNumber}`,
+                            { session }
+                        );
+                    }
+                }
+
+                order.refundId = refundId;
+                order.paymentStatus = 'refunded';
+                order.orderStatus = 'refunded';
+                order.platformFee = feeBreakdown.finerateEarnings;
+                order.sellerAmount = feeBreakdown.sellerSettlement;
+
+            } else {
+                // release_seller
+                const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+                await wallet.releaseFunds(
+                    order,
+                    order.amount,
+                    0,
+                    `Payment released after dispute resolution - Order ${order.orderNumber}`,
+                    { session }
+                );
+                order.paymentStatus = 'released';
+                order.orderStatus = 'confirmed';
+            }
+
+            if (order.dispute) {
+                order.dispute.status = 'resolved';
+                order.dispute.resolution = resolution || (insufficientBalance ? 'Force resolved - insufficient escrow balance' : 'Resolved by admin');
+                order.dispute.resolvedAt = new Date();
+            }
+            order.paymentReleasedAt = new Date();
+            await order.save({ session });
+        });
+    } finally {
+        await session.endSession();
     }
 
-    order.paymentReleasedAt = new Date();
-    await order.save();
+    const warning = insufficientBalance
+        ? 'Force resolved - escrow balance was insufficient; no escrow movement recorded'
+        : undefined;
 
     return res.status(200).json(
-        new ApiResponse(200, { order, feeBreakdown }, "Dispute resolved successfully")
+        new ApiResponse(200,
+            { order, feeBreakdown, refundStatus, ...(warning && { warning }) },
+            "Dispute resolved successfully"
+        )
     );
 });
 
@@ -339,38 +407,102 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
     const { reason } = req.body;
 
     const order = await Order.findById(orderId);
-    if (!order) {
-        throw new ApiError(404, "Order not found");
-    }
+    if (!order) throw new ApiError(404, "Order not found");
 
     if (order.paymentStatus !== 'held') {
         throw new ApiError(400, "Payment is not in held status");
     }
 
-    // Fee-based refund calculation
+    if (!order.cashfreeOrderId) {
+        throw new ApiError(400, "No Cashfree order ID on this order - cannot initiate refund");
+    }
+
     const feeBreakdown = await calculateFeeBreakdown(order);
+    const refundId = order.refundId || generateCashfreeRefundId();
 
-    const escrowWallet = await EscrowWallet.getWallet();
-
-    // Refund buyer (order amount minus deductions)
-    if (feeBreakdown.buyerRefund > 0) {
-        await escrowWallet.refundFunds(order, feeBreakdown.buyerRefund, `Manual refund by admin: ${reason || 'Admin action'}`);
+    // ── 1. Verify Cashfree order is PAID ──────────────────────────────────────
+    let cashfreeOrder;
+    try {
+        cashfreeOrder = await getCashfreeOrderStatus(order.cashfreeOrderId);
+    } catch (err) {
+        throw new ApiError(502, `Failed to fetch Cashfree order status: ${err.message}`);
     }
 
-    // Release remaining to cover shipping (seller) and fees (Finderate)
-    const remainingAmount = order.amount - feeBreakdown.buyerRefund;
-    if (remainingAmount > 0) {
-        await escrowWallet.releaseFunds(order, remainingAmount, feeBreakdown.finerateEarnings, `Fees & shipping settlement - Order ${order.orderNumber}`);
+    if (cashfreeOrder.order_status !== 'PAID') {
+        throw new ApiError(400, `Cashfree order is not PAID (status: ${cashfreeOrder.order_status})`);
     }
 
-    order.paymentStatus = 'refunded';
-    order.orderStatus = 'refunded';
-    order.platformFee = feeBreakdown.finerateEarnings;
-    order.sellerAmount = feeBreakdown.sellerSettlement;
-    await order.save();
+    // ── 2. Check if a refund already exists ───────────────────────────────────
+    let refundStatus = null;
+
+    if (order.refundId) {
+        try {
+            const existing = await getCashfreeRefund(order.cashfreeOrderId, order.refundId);
+            refundStatus = existing.refund_status;
+        } catch (_) {
+            // Refund not found on Cashfree — will create below
+        }
+    }
+
+    // ── 3. Create refund on Cashfree if not already SUCCESS ───────────────────
+    if (refundStatus !== 'SUCCESS') {
+        let cfRefund;
+        try {
+            cfRefund = await createCashfreeRefund(
+                order.cashfreeOrderId,
+                refundId,
+                feeBreakdown.buyerRefund,
+                `Admin manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`
+            );
+        } catch (err) {
+            throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
+        }
+        refundStatus = cfRefund.refund_status;
+    }
+
+    if (refundStatus !== 'SUCCESS' && refundStatus !== 'PENDING') {
+        throw new ApiError(502, `Cashfree refund in unexpected state: ${refundStatus}`);
+    }
+
+    // ── 4. Atomic DB update ───────────────────────────────────────────────────
+    const session = await mongoose.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+
+            if (feeBreakdown.buyerRefund > 0) {
+                await wallet.refundFunds(
+                    order,
+                    feeBreakdown.buyerRefund,
+                    `Manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`,
+                    { session }
+                );
+            }
+
+            const remaining = order.amount - feeBreakdown.buyerRefund;
+            if (remaining > 0) {
+                await wallet.releaseFunds(
+                    order,
+                    remaining,
+                    feeBreakdown.finerateEarnings,
+                    `Fees & shipping settlement - Order ${order.orderNumber}`,
+                    { session }
+                );
+            }
+
+            order.refundId = refundId;
+            order.paymentStatus = 'refunded';
+            order.orderStatus = 'refunded';
+            order.platformFee = feeBreakdown.finerateEarnings;
+            order.sellerAmount = feeBreakdown.sellerSettlement;
+            await order.save({ session });
+        });
+    } finally {
+        await session.endSession();
+    }
 
     return res.status(200).json(
-        new ApiResponse(200, { order, feeBreakdown }, "Payment refunded manually")
+        new ApiResponse(200, { order, feeBreakdown, refundStatus }, "Payment refunded manually")
     );
 });
 
