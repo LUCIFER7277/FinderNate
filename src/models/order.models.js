@@ -103,6 +103,7 @@ const OrderSchema = new mongoose.Schema({
     phonePeTransactionId: String,
     cashfreeOrderId: String,      // Cashfree order ID (CF-xxx) stored for webhook lookup
     cashfreePaymentId: String,    // Cashfree cf_payment_id populated after payment
+    refundId: String,             // Cashfree refund ID once a refund is initiated
     shippingAddress: ShippingAddressSchema,
     shippingInfo: ShippingInfoSchema,
     buyerProof: BuyerProofSchema,

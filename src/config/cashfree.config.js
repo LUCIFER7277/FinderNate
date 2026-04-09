@@ -39,7 +39,7 @@ const generateCfSignature = (timestampSec) => {
 };
 
 // ── Build request headers ──────────────────────────────────────────────────────
-const cfHeaders = () => {
+export const cfHeaders = () => {
     const timestampSec = Math.floor(Date.now() / 1000).toString();
     const signature    = generateCfSignature(timestampSec);
 
@@ -65,6 +65,13 @@ export const generateCashfreeOrderId = () => {
     const timestamp = Date.now().toString(36).toUpperCase();
     const random    = Math.random().toString(36).substring(2, 8).toUpperCase();
     return `CF-${timestamp}-${random}`; // ~18 chars, well within limit
+};
+
+// RefundId generator
+export const generateCashfreeRefundId = () => {
+    const timestamp = Date.now().toString(36).toUpperCase();
+    const random    = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `refund-${timestamp}-${random}`;
 };
 
 // ── Create a Cashfree payment order ────────────────────────────────────────────
@@ -121,6 +128,29 @@ export const getCashfreeOrderStatus = async (orderId) => {
         headers: cfHeaders()
     });
     return response.data;
+};
+
+// ── Get a specific refund for an order ─────────────────────────────────────────
+export const getCashfreeRefund = async (orderId, refundId) => {
+    const response = await axios.get(`${BASE_URL}/orders/${orderId}/refunds/${refundId}`, {
+        headers: cfHeaders()
+    });
+    return response.data; // single refund object
+};
+
+// ── Create a refund for an order ───────────────────────────────────────────────
+export const createCashfreeRefund = async (orderId, refundId, amount, note = 'Admin initiated refund') => {
+    const response = await axios.post(
+        `${BASE_URL}/orders/${orderId}/refunds`,
+        {
+            refund_id: refundId,
+            refund_amount: Number(Number(amount).toFixed(2)),
+            refund_note: note,
+            refund_speed: 'STANDARD'
+        },
+        { headers: cfHeaders() }
+    );
+    return response.data; // single refund object with refund_status
 };
 
 // ── Get payments for an order ───────────────────────────────────────────────────

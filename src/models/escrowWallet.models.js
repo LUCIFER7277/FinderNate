@@ -30,7 +30,7 @@ EscrowWalletSchema.statics.getWallet = async function() {
     return wallet;
 };
 
-EscrowWalletSchema.methods.holdFunds = async function(order, amount, description) {
+EscrowWalletSchema.methods.holdFunds = async function(order, amount, description, opts = {}) {
     this.heldBalance += amount;
     this.totalBalance += amount;
     this.transactions.push({
@@ -43,10 +43,10 @@ EscrowWalletSchema.methods.holdFunds = async function(order, amount, description
         description: description || 'Payment held in escrow'
     });
     this.lastUpdated = new Date();
-    return this.save();
+    return this.save(opts);
 };
 
-EscrowWalletSchema.methods.releaseFunds = async function(order, amount, platformFee, description) {
+EscrowWalletSchema.methods.releaseFunds = async function(order, amount, platformFee, description, opts = {}) {
     if (this.heldBalance < amount) {
         throw new Error('Insufficient held balance');
     }
@@ -64,10 +64,10 @@ EscrowWalletSchema.methods.releaseFunds = async function(order, amount, platform
         description: description || `Payment released to seller (Platform fee: ${platformFee})`
     });
     this.lastUpdated = new Date();
-    return this.save();
+    return this.save(opts);
 };
 
-EscrowWalletSchema.methods.refundFunds = async function(order, amount, description) {
+EscrowWalletSchema.methods.refundFunds = async function(order, amount, description, opts = {}) {
     if (this.heldBalance < amount) {
         throw new Error('Insufficient held balance for refund');
     }
@@ -84,7 +84,7 @@ EscrowWalletSchema.methods.refundFunds = async function(order, amount, descripti
         description: description || 'Payment refunded to buyer'
     });
     this.lastUpdated = new Date();
-    return this.save();
+    return this.save(opts);
 };
 
 export default mongoose.model('EscrowWallet', EscrowWalletSchema);
