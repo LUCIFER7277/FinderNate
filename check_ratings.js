@@ -18,21 +18,12 @@ async function checkRatings() {
         const ratings = await BusinessRating.find().limit(10);
         console.log('\nTotal ratings in BusinessRating:', await BusinessRating.countDocuments());
         
-<<<<<<< Updated upstream
-        if (ratings.length > 0) {
-            console.log('\nSample ratings:');
-            for (const rating of ratings) {
-                console.log('- Rating:', rating.rating, '| Business ID:', rating.businessId, '| User ID:', rating.userId);
-            }
-        }
-=======
         // if (ratings.length > 0) {
             // console.log('\nSample ratings:');
             // for (const rating of ratings) {
                 // console.log('- Rating:', rating.rating, '| Business ID:', rating.businessId, '| User ID:', rating.userId);
             // }
         // }
->>>>>>> Stashed changes
         
         // Check Business collection
         const businesses = await Business.countDocuments();
