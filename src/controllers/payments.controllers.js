@@ -1578,7 +1578,7 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Checkout message not found");
     }
     
-    const post=await post.findById(mongoose.Types.ObjectId(message.postId))
+    const post=await Post.findById(mongoose.Types.ObjectId(message.postId))
     if(!post){
          throw new ApiError(404, `${message.contentType} not found`);
     }
