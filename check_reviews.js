@@ -12,7 +12,7 @@ async function checkReviews() {
 
         // Find all businesses
         const businesses = await Business.find().select('_id userId businessName isBusinessProfile');
-        console.log('Total businesses:', businesses.length);
+        // console.log('Total businesses:', businesses.length);
         
         for (const business of businesses) {
             // Get ratings for this business
@@ -29,10 +29,11 @@ async function checkReviews() {
                 
                 // Get user details
                 const user = await User.findById(business.userId).select('username fullName');
-                if (user) {
+            {/*    if (user) {
                     console.log('Username:', user.username);
                     console.log('Full Name:', user.fullName);
                 }
+              */}      
             }
         }
 
