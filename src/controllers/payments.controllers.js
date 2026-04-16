@@ -1578,11 +1578,11 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Checkout message not found");
     }
     
-    const post=await post.findById(mongoose.Types.ObjectId(message.postId))
+    const post=await Post.findById(mongoose.Types.ObjectId(message.postId))
     if(!post){
          throw new ApiError(404, `${message.contentType} not found`);
     }
-    if(!post.inStock && post.contentType=="product"){
+    if(post.contentType=="product" && !post.customization.product?.inStock){
         throw new ApiError(400, "Product is Out of stock");
     }
     const checkout = message.checkoutDetails;
