@@ -17,6 +17,7 @@ import { User } from "../models/user.models.js";
 import Chat from "../models/chat.models.js";
 import Message from "../models/message.models.js";
 import socketManager from "../config/socket.js";
+import mongoose from "mongoose";
 
 // Always use configured FRONTEND_URL for payment links (never use request origin)
 const getFrontendUrl = () => {
@@ -676,6 +677,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                 variants,
                 deliveryOptions,
                 sellerLocation,
+                isInStock: post.inStock,
                 priceBreakdown: {
                     basePrice,
                     shippingCharges,
@@ -1471,7 +1473,10 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
     // Determine user role
     const isSeller = checkout.sellerId?.toString() === userId.toString();
     const userRole = isSeller ? 'seller' : 'buyer';
-
+    const post=await Post.findById(new mongoose.Types.ObjectId(checkout.postId))
+    if (!post){
+        throw new ApiError(404, `${checkout?.productType} not found, please contact the seller `);
+    } 
     return res.status(200).json(
         new ApiResponse(200, {
             messageId: message._id,
@@ -1488,6 +1493,7 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 variants: checkout.variants,
                 deliveryOptions: checkout.deliveryOptions,
                 sellerLocation: checkout.sellerLocation,
+                isInStock: post.inStock,
                 priceBreakdown: {
                     basePrice: checkout.basePrice,
                     shippingCharges: checkout.shippingCharges,
@@ -1569,18 +1575,24 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     if (!messageId) {
         throw new ApiError(400, "Checkout message ID is required");
     }
-
     // Find the checkout message
     const message = await Message.findOne({
         _id: messageId,
         messageType: 'checkout',
         isDeleted: false
     });
-
+    
     if (!message) {
         throw new ApiError(404, "Checkout message not found");
     }
-
+    
+    const post=await post.findById(mongoose.Types.ObjectId(message.postId))
+    if(!post){
+         throw new ApiError(404, `${message.contentType} not found`);
+    }
+    if(!post.inStock && post.contentType=="product"){
+        throw new ApiError(400, "Product is Out of stock");
+    }
     const checkout = message.checkoutDetails;
 
     // Verify buyer is in the chat
