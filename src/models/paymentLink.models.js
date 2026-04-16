@@ -14,6 +14,9 @@ const PaymentLinkSchema = new mongoose.Schema({
         category: String
     },
     amount: { type: Number, required: true },
+    shippingCharges: { type: Number, default: 0 },
+    gstAmount: { type: Number, default: 0 },
+    gstPercent: { type: Number, default: 0 },
     currency: { type: String, default: 'INR' },
     status: {
         type: String,
