@@ -1578,11 +1578,11 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Checkout message not found");
     }
     
-    const post=await Post.findById(message.postId)
-    if(!post){
-         throw new ApiError(404, `${message.contentType} not found`);
+    const post = await Post.findById(message.checkoutDetails.postId);
+    if (!post) {
+        throw new ApiError(404, `${message.checkoutDetails.productType || 'Product'} not found`);
     }
-    if(post.contentType=="product" && !post.customization.product?.inStock){
+    if (post.contentType === "product" && post.customization?.product?.inStock === false) {
         throw new ApiError(400, "Product is Out of stock");
     }
     const checkout = message.checkoutDetails;
