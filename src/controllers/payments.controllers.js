@@ -1473,7 +1473,7 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
     // Determine user role
     const isSeller = checkout.sellerId?.toString() === userId.toString();
     const userRole = isSeller ? 'seller' : 'buyer';
-    const post=await Post.findById(new mongoose.Types.ObjectId(checkout.postId))
+    const post=await Post.findById(checkout.postId)
     if (!post){
         throw new ApiError(404, `${checkout?.productType} not found, please contact the seller `);
     } 
@@ -1586,7 +1586,7 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Checkout message not found");
     }
     
-    const post=await Post.findById(mongoose.Types.ObjectId(message.postId))
+    const post=await Post.findById(message.postId)
     if(!post){
          throw new ApiError(404, `${message.contentType} not found`);
     }
