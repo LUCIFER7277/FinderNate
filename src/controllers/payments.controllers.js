@@ -161,6 +161,8 @@ export const createPhonePeOrder = asyncHandler(async (req, res) => {
         paymentLinkId: paymentLink._id,
         productDetails: paymentLink.productDetails,
         amount: paymentLink.amount,
+        shippingCharges: paymentLink.shippingCharges || 0,
+        gstAmount: paymentLink.gstAmount || 0,
         platformFee: 0,
         sellerAmount: paymentLink.amount,
         shippingAddress,
@@ -1272,8 +1274,8 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
 
     // Calculate price breakdown using seller-provided GST & shipping
     const basePrice = productPrice;
-    const gstAmount = Number(((basePrice * gstPercent) / 100).toFixed(2));
-    const totalPrice = basePrice + shippingCharges + gstAmount;
+    const gstAmount = parseFloat(((basePrice * gstPercent) / 100).toFixed(2));
+    const totalPrice = parseFloat((basePrice + shippingCharges + gstAmount).toFixed(2));
 
     // Get seller info
     const seller = await User.findById(sellerId).select('fullName username profileImageUrl');
@@ -1304,6 +1306,9 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
                 category: productCategory
             },
             amount: totalPrice,
+            shippingCharges,
+            gstAmount,
+            gstPercent,
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             paymentUrl: `${frontendUrl}/post/${postId}/pay/${totalPrice}`,
             shortUrl: `${frontendUrl}/p/${linkId}`
@@ -1313,6 +1318,9 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
         const correctUrl = `${frontendUrl}/post/${postId}/pay/${totalPrice}`;
         if (paymentLink.paymentUrl !== correctUrl || paymentLink.amount !== totalPrice) {
             paymentLink.amount = totalPrice;
+            paymentLink.shippingCharges = shippingCharges;
+            paymentLink.gstAmount = gstAmount;
+            paymentLink.gstPercent = gstPercent;
             paymentLink.paymentUrl = correctUrl;
             paymentLink.productDetails = {
                 name: productName,

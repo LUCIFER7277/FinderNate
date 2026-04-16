@@ -107,9 +107,9 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, "This product does not have a valid price set");
     }
 
-    const gstAmount        = Number(((basePrice * gstPercent) / 100).toFixed(2));
+    const gstAmount        = parseFloat(((basePrice * gstPercent) / 100).toFixed(2));
     const effectiveShipping = basePrice >= 499 ? 0 : shippingCharge; // free shipping on orders ≥ ₹499
-    const numericAmount    = basePrice + effectiveShipping + gstAmount; // server-authoritative total
+    const numericAmount    = parseFloat((basePrice + effectiveShipping + gstAmount).toFixed(2)); // server-authoritative total
 
     // ── Prevent duplicate concurrent sessions (NOT duplicate purchases) ────────
     // A buyer can buy the same product multiple times (separate orders).
@@ -149,19 +149,21 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
 
     // ── Create order document ──────────────────────────────────────────────────
     const order = await Order.create({
-        orderNumber:   generateOrderNumber(),
-        buyerId:       buyerId || null,
-        buyerDetails:  !buyerId ? buyerDetails : undefined,
-        sellerId:      seller._id,
+        orderNumber:     generateOrderNumber(),
+        buyerId:         buyerId || null,
+        buyerDetails:    !buyerId ? buyerDetails : undefined,
+        sellerId:        seller._id,
         postId,
-        paymentLinkId: paymentLink._id,
+        paymentLinkId:   paymentLink._id,
         productDetails,
-        amount:        numericAmount,
-        platformFee:   0,
-        sellerAmount:  numericAmount,
+        amount:          numericAmount,
+        shippingCharges: effectiveShipping,
+        gstAmount,
+        platformFee:     0,
+        sellerAmount:    numericAmount,
         shippingAddress,
-        orderStatus:   'payment_pending',
-        paymentStatus: 'pending',
+        orderStatus:     'payment_pending',
+        paymentStatus:   'pending',
         isShareableOrder: true
     });
 

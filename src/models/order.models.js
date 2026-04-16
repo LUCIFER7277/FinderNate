@@ -83,6 +83,8 @@ const OrderSchema = new mongoose.Schema({
         category: String
     },
     amount: { type: Number, required: true },
+    shippingCharges: { type: Number, default: 0 },
+    gstAmount: { type: Number, default: 0 },
     platformFee: { type: Number, default: 0 },
     sellerAmount: { type: Number, required: true },
     currency: { type: String, default: 'INR' },
