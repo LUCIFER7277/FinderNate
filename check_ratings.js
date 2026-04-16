@@ -18,22 +18,22 @@ async function checkRatings() {
         const ratings = await BusinessRating.find().limit(10);
         // console.log('\nTotal ratings in BusinessRating:', await BusinessRating.countDocuments());
         
-        if (ratings.length > 0) {
+        // if (ratings.length > 0) {
             // console.log('\nSample ratings:');
-            for (const rating of ratings) {
-                console.log('- Rating:', rating.rating, '| Business ID:', rating.businessId, '| User ID:', rating.userId);
-            }
-        }
+            // for (const rating of ratings) {
+                // console.log('- Rating:', rating.rating, '| Business ID:', rating.businessId, '| User ID:', rating.userId);
+            // }
+        // }
         
         // Check Business collection
         const businesses = await Business.countDocuments();
-        console.log('\nTotal businesses:', businesses);
+        // console.log('\nTotal businesses:', businesses);
         
         // Check collection names (case sensitive)
         const businessCollections = collections.filter(c => 
             c.name.toLowerCase().includes('business')
         );
-        console.log('\nBusiness-related collections:', businessCollections.map(c => c.name).join(', '));
+        // console.log('\nBusiness-related collections:', businessCollections.map(c => c.name).join(', '));
 
         await mongoose.connection.close();
     } catch (error) {
