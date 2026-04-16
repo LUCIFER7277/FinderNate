@@ -511,17 +511,17 @@ export const searchAllContent = async (req, res) => {
         const contentWithBadges = await addBadgesToNestedUsers(paginatedContent);
 
         // Add badges to user search results
-        console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({
+        {/* console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({
             username: u.username,
             _id: u._id,
             hasSubscriptionBadge: !!u.subscriptionBadge
-        })));
+        }))); */}
         const usersWithBadges = await addBadgesToUsers(usersWithPosts);
-        console.log('[BADGE DEBUG searchAllContent] After addBadgesToUsers:', usersWithBadges.map(u => ({
+       {/* console.log('[BADGE DEBUG searchAllContent] After addBadgesToUsers:', usersWithBadges.map(u => ({
             username: u.username,
             _id: u._id,
             subscriptionBadge: u.subscriptionBadge
-        })));
+        }))); */}
 
         return res.status(200).json(
             new ApiResponse(200, {

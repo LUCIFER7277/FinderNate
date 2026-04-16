@@ -335,12 +335,12 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             }
         });
 
-        console.log('🎬 Reels Debug - Match criteria:', JSON.stringify(matchCriteria, null, 2));
+        // console.log('🎬 Reels Debug - Match criteria:', JSON.stringify(matchCriteria, null, 2));
 
         // Execute aggregation
         let reels = await Post.aggregate(pipeline);
 
-        console.log('🎬 Reels Debug - Reels found:', reels.length);
+        // console.log('🎬 Reels Debug - Reels found:', reels.length);
 
         // ✅ NOTE: Business payment plan filtering does NOT apply to reels
         // Business accounts can post reels freely without needing a paid plan
@@ -350,11 +350,11 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             // Debug: Check if there are ANY reels in the database
             const totalReelsInDB = await Post.countDocuments({ postType: { $in: ["reel", "video"] } });
             const publishedReels = await Post.countDocuments({ postType: { $in: ["reel", "video"] }, status: "published" });
-            console.log('⚠️ No reels found. Debug info:');
-            console.log('   - Total reels in DB:', totalReelsInDB);
-            console.log('   - Published reels in DB:', publishedReels);
-            console.log('   - Allowed users count:', allowedUserIds.length);
-            console.log('   - Blocked users count:', blockedUsers.length);
+            // console.log('⚠️ No reels found. Debug info:');
+            // console.log('   - Total reels in DB:', totalReelsInDB);
+            // console.log('   - Published reels in DB:', publishedReels);
+            // console.log('   - Allowed users count:', allowedUserIds.length);
+            // console.log('   - Blocked users count:', blockedUsers.length);
         }
 
         // Fetch user details using User model
