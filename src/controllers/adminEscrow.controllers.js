@@ -165,8 +165,8 @@ const calculateFeeBreakdown = async (order) => {
         }
     }
 
-    const gatewayFee = Math.round(productPrice * 0.02);       // 2% payment gateway fee
-    const platformFee = Math.round(productPrice * 0.025);     // 2.5% platform fee
+    const gatewayFee = Number((productPrice * 0.02).toFixed(2));       // 2% payment gateway fee
+    const platformFee = Number((productPrice * 0.025).toFixed(2));     // 2.5% platform fee
     const totalDeductions = shippingCharges + gatewayFee + platformFee;
     const buyerRefund = Math.max(0, order.amount - totalDeductions);
     const sellerSettlement = shippingCharges;

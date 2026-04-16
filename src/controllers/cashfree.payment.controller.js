@@ -107,7 +107,7 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, "This product does not have a valid price set");
     }
 
-    const gstAmount        = Math.round((basePrice * gstPercent) / 100);
+    const gstAmount        = Number(((basePrice * gstPercent) / 100).toFixed(2));
     const effectiveShipping = basePrice >= 499 ? 0 : shippingCharge; // free shipping on orders ≥ ₹499
     const numericAmount    = basePrice + effectiveShipping + gstAmount; // server-authoritative total
 
