@@ -658,7 +658,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     }
 
     const basePrice = paymentLink.amount;
-    const gstAmount = Math.round((basePrice * gstPercent) / 100);
+    const gstAmount = Number(((basePrice * gstPercent) / 100).toFixed(2));
     const totalPrice = basePrice + shippingCharges + gstAmount;
 
     const seller = paymentLink.sellerId;
