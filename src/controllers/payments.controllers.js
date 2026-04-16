@@ -675,7 +675,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                 variants,
                 deliveryOptions,
                 sellerLocation,
-                isInStock: post.inStock,
+                isInStock: post.contentType === 'product' ? (post.customization?.product?.inStock ?? true) : true,
                 priceBreakdown: {
                     basePrice,
                     shippingCharges,
@@ -1485,7 +1485,7 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 variants: checkout.variants,
                 deliveryOptions: checkout.deliveryOptions,
                 sellerLocation: checkout.sellerLocation,
-                isInStock: post.inStock,
+                isInStock: post.contentType === 'product' ? (post.customization?.product?.inStock ?? true) : true,
                 priceBreakdown: {
                     basePrice: checkout.basePrice,
                     shippingCharges: checkout.shippingCharges,
