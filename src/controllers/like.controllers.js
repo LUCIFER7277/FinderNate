@@ -6,6 +6,8 @@ import Post from "../models/userPost.models.js";
 import Comment from "../models/comment.models.js";
 import { createLikeNotification } from "./notification.controllers.js";
 import { createUnlikeNotification } from "./notification.controllers.js";
+import { invalidateCache } from "../middlewares/cache.middleware.js";
+import { RedisKeys } from "../config/redis.config.js";
 
 // Like a post
 export const likePost = asyncHandler(async (req, res) => {
@@ -16,6 +18,8 @@ export const likePost = asyncHandler(async (req, res) => {
     try {
         await Like.create({ userId, postId });
         await Post.findByIdAndUpdate(postId, { $inc: { "engagement.likes": 1 } });
+        // Invalidate user's feed cache so isLikedBy reflects the new like
+        await invalidateCache(`fn:user:${userId}:feed:*`);
 
         // Notify post owner (if not self) - with error handling
         try {
@@ -68,6 +72,8 @@ export const unlikePost = asyncHandler(async (req, res) => {
 
     // Decrement engagement count (MongoDB will handle defaults from schema)
     await Post.findByIdAndUpdate(postId, { $inc: { "engagement.likes": -1 } });
+    // Invalidate user's feed cache so isLikedBy reflects the unlike
+    await invalidateCache(`fn:user:${userId}:feed:*`);
 
     // Notify post owner (if not self) - with error handling
     try {

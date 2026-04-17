@@ -57,7 +57,7 @@ const batchMediaUpload = upload.fields(
 router.route("/create/batch").post(batchMediaUpload, verifyJWT, createBatchPosts);
 router.route("/user/:userId/profile").get(verifyJWT, getUserProfilePosts);
 router.route("/switch/profile/:userId").get(verifyJWT, getProfileTabContent);
-router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, cacheUserFeed, getHomeFeed);
+router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, getHomeFeed);
 router.route("/myPosts").get(verifyJWT, getMyPosts);
 router.route("/notifications").get(verifyJWT, getNotifications);
 
