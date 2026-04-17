@@ -8,7 +8,7 @@ import { asyncHandler } from '../utlis/asyncHandler.js';
 import Like from '../models/like.models.js';
 import PostInteraction from '../models/postInteraction.models.js';
 import { setCache } from '../middlewares/cache.middleware.js';
-import { redisClient } from '../config/redis.config.js';
+import { redisClient, RedisKeys, RedisTTL } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
 import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
 import mongoose from 'mongoose';
@@ -49,13 +49,23 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         console.log('🔍 Feed Debug - userId:', userId);
         console.log('🔍 Feed Debug - blockedUsers count:', blockedUsers.length);
 
-        // Check cache first
-        if (res.locals.cacheKey) {
-            const cachedData = await redisClient.get(res.locals.cacheKey);
-            if (cachedData) {
-                console.log('📦 Returning cached feed');
-                return res.status(200).json(JSON.parse(cachedData));
+        // Check cache first — isLikedBy is never stored in cache, always computed fresh
+        const FEED_CACHE_KEY = RedisKeys.userFeed(userId, page);
+        const cachedRaw = await redisClient.get(FEED_CACHE_KEY);
+        if (cachedRaw) {
+            console.log('📦 Returning cached feed');
+            const cached = JSON.parse(cachedRaw);
+            if (userId && cached?.data?.feed?.length) {
+                const cachedPostIds = cached.data.feed.map(p => p._id);
+                const userLikes = await Like.find({ userId, postId: { $in: cachedPostIds } })
+                    .select('postId').lean();
+                const likedSet = new Set(userLikes.map(l => l.postId.toString()));
+                cached.data.feed = cached.data.feed.map(post => ({
+                    ...post,
+                    isLikedBy: likedSet.has(post._id.toString())
+                }));
             }
+            return res.status(200).json(cached);
         }
 
         const FEED_LIMIT = 50; // Reduced from 100
@@ -425,10 +435,13 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             }
         }, "Home feed generated successfully");
 
-        // Cache the response
-        if (res.locals.cacheKey && res.locals.cacheTTL) {
-            await setCache(res.locals.cacheKey, response, res.locals.cacheTTL);
-        }
+        // Cache WITHOUT isLikedBy — it's always computed fresh to avoid stale heart state
+        const feedToCache = feedDataWithBadges.map(({ isLikedBy, ...rest }) => rest);
+        const responseToCache = new ApiResponse(200, {
+            feed: feedToCache,
+            pagination: { page, limit, total: totalCount, totalPages: Math.ceil(totalCount / limit) }
+        }, "Home feed generated successfully");
+        await setCache(FEED_CACHE_KEY, responseToCache, RedisTTL.USER_FEED);
 
         return res.status(200).json(response);
 
