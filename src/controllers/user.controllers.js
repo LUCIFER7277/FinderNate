@@ -170,7 +170,7 @@ const registerUser = asyncHandler(async (req, res) => {
             password: hashedPassword,
             phoneNumber,
             dateOfBirth,
-            gender,
+            gender: gender || 'prefer-not-to-say',
         },
         { upsert: true, new: true }
     );
@@ -253,7 +253,7 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         password: tempUser.password,   // pre-hashed
         phoneNumber: tempUser.phoneNumber,
         dateOfBirth: tempUser.dateOfBirth,
-        gender: tempUser.gender,
+        gender: tempUser.gender || 'prefer-not-to-say',
         isPhoneVerified: true,
         accountStatus: "active",
         isDeleted: false,
@@ -546,6 +546,19 @@ const updateUserProfile = asyncHandler(async (req, res) => {
         updates.fullNameLower = updates.fullName.toLowerCase();
     }
 
+    if (updates.username !== undefined) {
+        const cleaned = updates.username.trim().toLowerCase();
+        const { isValid, errors } = validateUsername(cleaned);
+        if (!isValid) {
+            throw new ApiError(400, errors[0], errors.map(e => ({ field: "username", message: e })));
+        }
+        const taken = await User.findOne({ username: cleaned, _id: { $ne: req.user._id } }).select("_id");
+        if (taken) {
+            throw new ApiError(409, "Username is already taken", [{ field: "username", message: "Username is already taken" }]);
+        }
+        updates.username = cleaned;
+    }
+
     // Handle profile image upload if file is provided
     if (req.file) {
         const uploadResult = await uploadBufferToBunny(req.file.buffer, "profiles");
@@ -559,7 +572,7 @@ const updateUserProfile = asyncHandler(async (req, res) => {
 
     const updatedUser = await User.findByIdAndUpdate(
         req.user._id,
-        updates,
+        { $set: updates },
         {
             new: true,
             runValidators: true,

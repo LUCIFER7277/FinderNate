@@ -11,7 +11,7 @@ const UserSchema = new mongoose.Schema({
     fullNameLower: { type: String, index: true },
     phoneNumber: String,
     dateOfBirth: String,
-    gender: { type: String, enum: ['male', 'female', 'other','prefer-not-to-say'] },
+    gender: { type: String, enum: ['male', 'female', 'other', 'prefer-not-to-say'], default: 'prefer-not-to-say' },
     bio: String,
     profileImageUrl: String,
     location: String,
