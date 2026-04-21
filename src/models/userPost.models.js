@@ -106,6 +106,7 @@ const ProductDetailsSchema = new mongoose.Schema({
 const ServiceAvailabilitySchema = new mongoose.Schema({
     schedule: [{
         day: String,
+        isClosed: { type: Boolean, default: false },
         timeSlots: [{
             startTime: String,
             endTime: String
@@ -133,6 +134,7 @@ const ServiceDetailsSchema = new mongoose.Schema({
     category: String,
     subcategory: String,
     duration: Number,
+    durationUnit: { type: String, enum: ['minutes', 'hours'], default: 'minutes' },
     serviceType: String,
     // 🚚 Delivery Options
     deliveryOptions: {
@@ -159,7 +161,8 @@ const ServiceDetailsSchema = new mongoose.Schema({
     deliverables: [String],
     tags: [String],
     link: { type: String },
-    
+    isCurrentlyAvailable: { type: Boolean, default: true },
+
 }, { _id: false });
 
 // 🏢 Business Details
