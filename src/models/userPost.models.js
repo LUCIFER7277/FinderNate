@@ -149,6 +149,11 @@ const ServiceDetailsSchema = new mongoose.Schema({
         default: 0,
         min: 0
     },
+    additionalCharges:{
+        type: Number,
+        default: 0,
+        min: 0
+    },
     gstPercent: {
         type: Number,
         default: 0,

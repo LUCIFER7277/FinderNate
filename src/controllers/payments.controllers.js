@@ -1334,7 +1334,8 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
     }
 
     // Build the checkout message
-    const checkoutText = `🛒 Checkout for "${productName}"\n\nBase Price: ₹${basePrice.toLocaleString('en-IN')}\nShipping: ${shippingCharges > 0 ? '₹' + shippingCharges.toLocaleString('en-IN') : 'FREE'}\nGST (${gstPercent}%): ₹${gstAmount.toLocaleString('en-IN')}\n\n💰 Total: ₹${totalPrice.toLocaleString('en-IN')}`;
+    const shippingLabel = productType === 'service' ? 'Additional Charges' : 'Shipping';
+    const checkoutText = `🛒 Checkout for "${productName}"\n\nBase Price: ₹${basePrice.toLocaleString('en-IN')}\n${shippingLabel}: ${shippingCharges > 0 ? '₹' + shippingCharges.toLocaleString('en-IN') : 'FREE'}\nGST (${gstPercent}%): ₹${gstAmount.toLocaleString('en-IN')}\n\n💰 Total: ₹${totalPrice.toLocaleString('en-IN')}`;
 
     const recipients = chat.participants.filter(
         p => p.toString() !== sellerId.toString()
