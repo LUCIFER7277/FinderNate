@@ -116,15 +116,9 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
         const fileType = getFileType(fileBuffer, originalName);
         const filePath = generateFilePath(folder, originalName, fileType);
 
-        console.log('Upload Debug Info:');
-        console.log('- File path:', filePath);
-        console.log('- File type detected:', fileType);
-        console.log('- Buffer size:', fileBuffer.length);
-        console.log('- Original name:', originalName);
 
         // Upload to Bunny.net Storage API
         const uploadUrl = `${BUNNY_CONFIG.storageApiUrl}/${filePath}`;
-        console.log('- Upload URL:', uploadUrl);
 
         const response = await axios.put(uploadUrl, fileBuffer, {
             headers: {
@@ -134,7 +128,6 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
             }
         });
 
-        console.log('- Upload response status:', response.status);
 
         if (response.status !== 201) {
             throw new Error(`Upload failed with status: ${response.status}`);

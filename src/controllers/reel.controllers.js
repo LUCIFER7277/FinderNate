@@ -50,8 +50,6 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         const limitNum = Number(limit);
         const skip = (pageNum - 1) * limitNum;
 
-        console.log('🎬 Reels Debug - currentUserId:', currentUserId);
-        console.log('🎬 Reels Debug - blockedUsers count:', blockedUsers.length);
 
         // ✅ REELS DISCOVERY FEED LOGIC
         // For reels (discovery feed like Instagram/TikTok), we want to show reels from ALL users
@@ -71,7 +69,6 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
         );
 
-        console.log('🎬 Reels Debug - publicUserIds count:', publicUserIds.length);
 
         // Get private users that the viewer follows (to include their private reels)
         let allowedUserIds = [...publicUserIds];
@@ -92,13 +89,11 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                 typeof u._id === 'string' ? new mongoose.Types.ObjectId(u._id) : u._id
             );
 
-            console.log('🎬 Reels Debug - privateFollowedUserIds count:', privateFollowedUserIds.length);
 
             // Add private followed users to the allowed list
             allowedUserIds = [...allowedUserIds, ...privateFollowedUserIds];
         }
 
-        console.log('🎬 Reels Debug - Total allowedUserIds count:', allowedUserIds.length);
 
         // Build match criteria for reels discovery feed
         // Show reels from: ALL public users + private users that viewer follows

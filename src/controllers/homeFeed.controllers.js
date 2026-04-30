@@ -46,14 +46,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const limit = Math.min(requestedLimit, MAX_LIMIT);
         const skip = (page - 1) * limit;
 
-        console.log('🔍 Feed Debug - userId:', userId);
-        console.log('🔍 Feed Debug - blockedUsers count:', blockedUsers.length);
 
         // Check cache first — isLikedBy is never stored in cache, always computed fresh
         const FEED_CACHE_KEY = RedisKeys.userFeed(userId, page);
         const cachedRaw = await redisClient.get(FEED_CACHE_KEY);
         if (cachedRaw) {
-            console.log('📦 Returning cached feed');
             const cached = JSON.parse(cachedRaw);
             if (userId && cached?.data?.feed?.length) {
                 const cachedPostIds = cached.data.feed.map(p => p._id);
@@ -78,7 +75,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const viewableUserIds = viewableUserIdsRaw.map(id =>
             typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
         );
-        console.log('🔍 Feed Debug - viewableUserIds count:', viewableUserIds.length);
 
         // ✅ BUSINESS POST PRIORITY SYSTEM
         // Get business users with active payment plans (plan2, plan3, plan4 - NOT plan1 which is free)
@@ -92,14 +88,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const activePlanUserIdsStrings = activePlanUserIds.map(id => id.toString());
         const activePlanUserIdsSet = new Set(activePlanUserIdsStrings);
 
-        console.log('💼 Business Debug - Active paid plans count:', activePlanUserIds.length);
-        console.log('💼 Business Debug - Active plan user IDs:', activePlanUserIdsStrings);
 
         // Get all business user IDs
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
 
-        console.log('💼 Business Debug - Total business users:', businessUsers.length);
 
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
@@ -116,7 +109,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             })
         };
 
-        console.log('🔍 Feed Debug - Match query:', JSON.stringify(matchQuery, null, 2));
 
         const aggregationPipeline = [
             {
@@ -254,17 +246,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         const posts = await Post.aggregate(aggregationPipeline);
 
-        console.log('🔍 Feed Debug - Posts found:', posts.length);
 
         if (posts.length === 0) {
             // Debug: Check if there are ANY posts in the database
             const totalPosts = await Post.countDocuments({});
             const publicPosts = await Post.countDocuments({ 'settings.privacy': 'public' });
-            console.log('⚠️ No posts in feed. Debug info:');
-            console.log('   - Total posts in DB:', totalPosts);
-            console.log('   - Public posts in DB:', publicPosts);
-            console.log('   - Viewable users count:', viewableUserIds.length);
-            console.log('   - Blocked users count:', blockedUsers.length);
 
             const emptyResponse = new ApiResponse(200, {
                 feed: [],

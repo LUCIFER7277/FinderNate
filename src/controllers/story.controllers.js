@@ -330,7 +330,6 @@ export const deleteStory = asyncHandler(async (req, res) => {
     try {
         const { deleteFromBunny } = await import("../utlis/bunny.js");
         await deleteFromBunny(story.mediaUrl);
-        console.log('✅ Story media deleted from Bunny CDN:', story.mediaUrl);
     } catch (error) {
         console.error('⚠️ Failed to delete story media from Bunny CDN:', error.message);
         // Continue with story deletion even if media deletion fails

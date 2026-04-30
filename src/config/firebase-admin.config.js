@@ -19,11 +19,9 @@ let firebaseApp = null;
  */
 const initializeFirebase = () => {
   if (firebaseApp) {
-    console.log("ℹ️ Firebase Admin already initialized, returning existing app");
     return firebaseApp;
   }
 
-  console.log("🔥 Initializing Firebase Admin SDK...");
 
   try {
     // Method 1: Using environment variables (recommended for production)
@@ -32,10 +30,6 @@ const initializeFirebase = () => {
       process.env.FIREBASE_PRIVATE_KEY &&
       process.env.FIREBASE_CLIENT_EMAIL
     ) {
-      console.log("✅ Firebase environment variables found:");
-      console.log("   - FIREBASE_PROJECT_ID:", process.env.FIREBASE_PROJECT_ID);
-      console.log("   - FIREBASE_CLIENT_EMAIL:", process.env.FIREBASE_CLIENT_EMAIL);
-      console.log("   - FIREBASE_PRIVATE_KEY length:", process.env.FIREBASE_PRIVATE_KEY?.length);
 
       // Handle multiple levels of escaping (Coolify might double-escape)
       let privateKey = process.env.FIREBASE_PRIVATE_KEY;
@@ -44,22 +38,16 @@ const initializeFirebase = () => {
       const hasDoubleEscape = privateKey.includes("\\\\n");
       const hasSingleEscape = privateKey.includes("\\n");
 
-      console.log("🔍 Private key escape analysis:");
-      console.log("   - Has double-escaped newlines (\\\\n):", hasDoubleEscape);
-      console.log("   - Has single-escaped newlines (\\n):", hasSingleEscape);
 
       // Replace \\n with \n (for double-escaped newlines)
       if (hasDoubleEscape) {
         privateKey = privateKey.replace(/\\\\n/g, "\n");
-        console.log("   - Converted double-escaped newlines");
       }
       // Replace \n with actual newline (for single-escaped newlines)
       if (hasSingleEscape) {
         privateKey = privateKey.replace(/\\n/g, "\n");
-        console.log("   - Converted single-escaped newlines");
       }
 
-      console.log("🔐 Initializing Firebase with credentials...");
       firebaseApp = admin.initializeApp({
         credential: admin.credential.cert({
           projectId: process.env.FIREBASE_PROJECT_ID,
@@ -67,8 +55,6 @@ const initializeFirebase = () => {
           clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
         }),
       });
-      console.log("✅ Firebase Admin initialized successfully!");
-      console.log("✅ Project ID:", process.env.FIREBASE_PROJECT_ID);
     }
     // Method 2: Using service account key file (for development)
     else {
@@ -118,9 +104,6 @@ const getMessaging = () => {
  */
 const sendNotification = async (fcmToken, notification, data = {}) => {
   try {
-    console.log('🔥 sendNotification called');
-    console.log('📱 FCM Token length:', fcmToken?.length);
-    console.log('📦 Notification:', notification);
 
     // Check if Firebase Admin is initialized
     if (!app) {
@@ -133,7 +116,6 @@ const sendNotification = async (fcmToken, notification, data = {}) => {
     }
 
     const messaging = getMessaging();
-    console.log('✅ Firebase messaging instance obtained');
 
     const message = {
       token: fcmToken,
@@ -169,9 +151,7 @@ const sendNotification = async (fcmToken, notification, data = {}) => {
       },
     };
 
-    console.log('📤 Sending FCM message via Firebase Admin SDK...');
     const response = await messaging.send(message);
-    console.log("✅ FCM notification sent successfully! Response:", response);
     return { success: true, messageId: response };
   } catch (error) {
     console.error("❌ FCM notification failed!");
@@ -248,9 +228,6 @@ const sendMulticastNotification = async (
     };
 
     const response = await messaging.sendEachForMulticast(message);
-    console.log(
-      `✅ FCM multicast sent: ${response.successCount}/${fcmTokens.length} delivered`
-    );
 
     return {
       success: true,

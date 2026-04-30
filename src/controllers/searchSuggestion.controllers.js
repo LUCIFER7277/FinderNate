@@ -43,7 +43,6 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
     const finalShouldIncludePosts = true; // Always include user profiles
 
     if (finalShouldIncludePosts) {
-        console.log('✅ Including user profiles in search suggestions...');
         // Enhanced user search - Find users matching the search query across multiple fields
         const users = await User.find({
             $or: [

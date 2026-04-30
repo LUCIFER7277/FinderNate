@@ -21,7 +21,6 @@ import { redisClient } from '../config/redis.config.js';
 // Helper function to handle subscription expiry
 export const handleExpiredSubscriptions = async () => {
     try {
-        console.log('🔄 Starting subscription expiry check...');
 
         const now = new Date();
 
@@ -32,7 +31,6 @@ export const handleExpiredSubscriptions = async () => {
         });
 
         if (expiredSubscriptions.length === 0) {
-            console.log('✅ No expired subscriptions found');
             return {
                 success: true,
                 expiredCount: 0,
@@ -40,7 +38,6 @@ export const handleExpiredSubscriptions = async () => {
             };
         }
 
-        console.log(`⚠️ Found ${expiredSubscriptions.length} expired subscriptions`);
 
         let successCount = 0;
         let failureCount = 0;
@@ -62,7 +59,6 @@ export const handleExpiredSubscriptions = async () => {
                     business.subscriptionStatus = 'pending';
                     await business.save();
 
-                    console.log(`✅ Downgraded business profile for user ${userId} to plan1`);
                 }
 
                 // 3. Invalidate cache for user
@@ -79,7 +75,6 @@ export const handleExpiredSubscriptions = async () => {
                         await redisClient.del(...feedKeys);
                     }
 
-                    console.log(`✅ Cache invalidated for user ${userId}`);
                 } catch (cacheError) {
                     console.error(`⚠️ Cache invalidation failed for user ${userId}:`, cacheError.message);
                     // Don't throw - cache invalidation failure shouldn't block the expiry process
@@ -89,7 +84,6 @@ export const handleExpiredSubscriptions = async () => {
                 // You can implement email/push notification here
 
                 successCount++;
-                console.log(`✅ Successfully processed expired subscription for user ${userId}`);
 
             } catch (error) {
                 failureCount++;
@@ -105,7 +99,6 @@ export const handleExpiredSubscriptions = async () => {
             message: `Processed ${successCount} expired subscriptions successfully, ${failureCount} failures`
         };
 
-        console.log('✅ Subscription expiry check completed:', result);
         return result;
 
     } catch (error) {
@@ -123,7 +116,6 @@ export const handleExpiredSubscriptions = async () => {
  */
 export const sendExpiryReminders = async () => {
     try {
-        console.log('🔔 Checking for upcoming subscription expiries...');
 
         const now = new Date();
         const sevenDaysFromNow = new Date(now.getTime() + (7 * 24 * 60 * 60 * 1000));
@@ -140,25 +132,21 @@ export const sendExpiryReminders = async () => {
         }).populate('userId', 'username email fullName');
 
         if (upcomingExpiries.length === 0) {
-            console.log('✅ No upcoming expiries found');
             return;
         }
 
-        console.log(`📧 Found ${upcomingExpiries.length} upcoming expiries`);
 
         for (const subscription of upcomingExpiries) {
             const daysUntilExpiry = Math.ceil((subscription.endDate - now) / (1000 * 60 * 60 * 24));
 
             // Send reminder based on days remaining
             if (daysUntilExpiry === 7 || daysUntilExpiry === 3 || daysUntilExpiry === 1) {
-                console.log(`📧 Reminder: User ${subscription.userId.username} subscription expires in ${daysUntilExpiry} days`);
 
                 // TODO: Implement actual notification sending (email/push)
                 // For now, just log it
             }
         }
 
-        console.log('✅ Expiry reminders processed');
 
     } catch (error) {
         console.error('❌ Failed to send expiry reminders:', error);
@@ -172,31 +160,29 @@ export const sendExpiryReminders = async () => {
 export const startSubscriptionExpiryJob = () => {
     // Run every day at 2:00 AM (0 2 * * *)
     const expiryJob = cron.schedule('0 2 * * *', async () => {
-        console.log('⏰ Running scheduled subscription expiry check...');
+        console.log('⏰ [Cron] Subscription expiry job triggered');
         await handleExpiredSubscriptions();
     }, {
         scheduled: true,
-        timezone: "Asia/Kolkata" // Change to your timezone
+        timezone: "Asia/Kolkata"
     });
 
     // Run reminder check every day at 10:00 AM (0 10 * * *)
     const reminderJob = cron.schedule('0 10 * * *', async () => {
-        console.log('⏰ Running scheduled expiry reminder check...');
+        console.log('⏰ [Cron] Subscription reminder job triggered');
         await sendExpiryReminders();
     }, {
         scheduled: true,
         timezone: "Asia/Kolkata"
     });
 
-    console.log('✅ Subscription expiry cron jobs started');
-    console.log('   - Expiry check: Every day at 2:00 AM');
-    console.log('   - Reminder check: Every day at 10:00 AM');
+    console.log('✅ [Cron] Subscription expiry job scheduled (daily at 2:00 AM IST)');
+    console.log('✅ [Cron] Subscription reminder job scheduled (daily at 10:00 AM IST)');
 
     return { expiryJob, reminderJob };
 };
 
 // For testing purposes - run immediately
 export const runExpiryCheckNow = async () => {
-    console.log('🧪 Running manual subscription expiry check...');
     return await handleExpiredSubscriptions();
 };

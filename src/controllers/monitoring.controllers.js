@@ -83,7 +83,6 @@ export const getMetrics = asyncHandler(async (req, res) => {
  * POST /api/v1/admin/monitoring/test-expiry-job
  */
 export const testExpiryJob = asyncHandler(async (req, res) => {
-    console.log('🧪 Manual subscription expiry check triggered by admin');
 
     const result = await runExpiryCheckNow();
 

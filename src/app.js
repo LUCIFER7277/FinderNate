@@ -20,12 +20,10 @@ app.use(helmet({
 if (process.env.NODE_ENV === 'development') {
         // Dev format: Colored output with method, url, status, response time
         app.use(morgan('dev'));
-        console.log('📝 Morgan logging enabled in development mode');
 } else if (process.env.ENABLE_MORGAN === 'true') {
         // Production: Can be enabled via environment variable if needed for debugging
         // Combined format: Standard Apache combined log output
         app.use(morgan('combined'));
-        console.log('📝 Morgan logging enabled via ENABLE_MORGAN flag');
 }
 
 // Performance middleware - Enable gzip compression
@@ -123,7 +121,6 @@ app.use(cookieParser());
 // In development, we don't trust proxy headers for security reasons
 if (process.env.NODE_ENV === 'production') {
         app.set('trust proxy', 1);
-        console.log('🔒 Trust proxy enabled for production');
 }
 
 // Apply general rate limiting to all routes (but not to OPTIONS)

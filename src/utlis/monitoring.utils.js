@@ -26,7 +26,6 @@ const METRICS_LOG_FILE = path.join(LOG_DIR, 'metrics.log');
 // Ensure log directory exists
 if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
-    console.log('✅ Log directory created:', LOG_DIR);
 }
 
 /**
@@ -71,7 +70,6 @@ export class PaymentLogger {
         });
 
         writeLog(PAYMENT_LOG_FILE, entry);
-        console.log('💳 Payment initiated:', { userId, orderId, plan, amount });
     }
 
     /**
@@ -88,7 +86,6 @@ export class PaymentLogger {
         });
 
         writeLog(PAYMENT_LOG_FILE, entry);
-        console.log('✅ Payment successful:', { userId, paymentId, orderId });
     }
 
     /**
@@ -120,7 +117,6 @@ export class PaymentLogger {
         });
 
         writeLog(PAYMENT_LOG_FILE, entry);
-        console.log(`🔍 Payment verification: ${isValid ? 'valid' : 'invalid'}`, { userId, paymentId });
     }
 
     /**
@@ -136,7 +132,6 @@ export class PaymentLogger {
         });
 
         writeLog(PAYMENT_LOG_FILE, entry);
-        console.log('📥 Webhook event:', { eventType, paymentId, userId });
     }
 }
 
@@ -158,7 +153,6 @@ export class SubscriptionLogger {
         });
 
         writeLog(SUBSCRIPTION_LOG_FILE, entry);
-        console.log('🎉 Subscription created:', { userId, plan });
     }
 
     /**
@@ -173,7 +167,6 @@ export class SubscriptionLogger {
         });
 
         writeLog(SUBSCRIPTION_LOG_FILE, entry);
-        console.log('⬆️ Subscription upgraded:', { userId, oldPlan, newPlan });
     }
 
     /**
@@ -188,7 +181,6 @@ export class SubscriptionLogger {
         });
 
         writeLog(SUBSCRIPTION_LOG_FILE, entry);
-        console.log('⚠️ Subscription expired:', { userId, plan, endDate });
     }
 
     /**
@@ -203,7 +195,6 @@ export class SubscriptionLogger {
         });
 
         writeLog(SUBSCRIPTION_LOG_FILE, entry);
-        console.log('🚫 Subscription cancelled:', { userId, plan, reason });
     }
 }
 
@@ -353,7 +344,6 @@ export class PerformanceMonitor {
             const result = await asyncFunction();
             const duration = Date.now() - startTime;
 
-            console.log(`⏱️ ${operationName} completed in ${duration}ms`);
 
             const entry = formatLogEntry('PERFORMANCE', operationName, {
                 duration,
