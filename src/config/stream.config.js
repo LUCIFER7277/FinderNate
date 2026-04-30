@@ -22,8 +22,6 @@ class StreamService {
             this.client = new StreamClient(this.apiKey, this.apiSecret);
             this.initialized = true;
 
-            console.log('✅ Stream.io service initialized successfully');
-            console.log(`📡 Stream.io API Key: ${this.apiKey.substring(0, 10)}...`);
 
             return true;
         } catch (error) {
@@ -59,7 +57,6 @@ class StreamService {
             // Generate token using Stream SDK
             const token = this.client.createToken(userId, Math.floor(expiresAt.getTime() / 1000));
 
-            console.log(`🔑 Generated Stream.io token for user: ${userId}, expires at: ${expiresAt.toISOString()}`);
 
             return {
                 token,
@@ -98,7 +95,6 @@ class StreamService {
                 }
             );
 
-            console.log(`🔑 Generated Stream.io call token for user: ${userId}, call: ${callId}`);
 
             return {
                 token,
@@ -147,7 +143,6 @@ class StreamService {
 
             const response = await this.client.upsertUsers(formattedUsers);
 
-            console.log(`👥 Upserted ${users.length} user(s) in Stream.io:`, users.map(u => u.id).join(', '));
 
             return response;
         } catch (error) {
@@ -210,7 +205,6 @@ class StreamService {
                         enabled: false
                     }
                 };
-                console.log(`📹 Video call: audio + video enabled for call: ${callId}`);
             } else {
                 // Voice call: Audio only, explicitly disable video
                 callData.settings_override = {
@@ -241,14 +235,12 @@ class StreamService {
                         enabled: false
                     }
                 };
-                console.log(`📞 Voice call: audio-only enabled for call: ${callId}`);
             }
 
             const response = await call.getOrCreate({
                 data: callData
             });
 
-            console.log(`📞 Stream.io call created: ${callType}:${callId} (video: ${videoEnabled})`);
 
             return response;
         } catch (error) {
@@ -272,7 +264,6 @@ class StreamService {
             const call = this.client.video.call(callType, callId);
             const response = await call.end();
 
-            console.log(`📵 Stream.io call ended: ${callType}:${callId}`);
 
             return response;
         } catch (error) {

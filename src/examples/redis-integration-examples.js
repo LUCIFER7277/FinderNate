@@ -322,7 +322,6 @@ export const addCacheMetrics = (req, res, next) => {
         const cacheStatus = res.get('X-Cache') || 'UNKNOWN';
         
         // Log performance metrics
-        console.log(`Cache ${cacheStatus}: ${req.method} ${req.path} - ${duration}ms`);
         
         // Could also send to monitoring service
         // analytics.track('cache_performance', {

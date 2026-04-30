@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 
 const connectDB = async (retries = 3) => {
     try {
-        console.log('🔄 Attempting to connect to MongoDB...');
 
         if (!process.env.MONGODB_URI) {
             throw new Error('MONGODB_URI environment variable is not defined');
@@ -12,11 +11,10 @@ const connectDB = async (retries = 3) => {
         try {
             const response = await fetch('https://ipinfo.io/ip');
             const currentIP = await response.text();
-            console.log(`📡 Current IP: ${currentIP.trim()}`);
         } catch (ipError) {
-            console.log('📡 Could not determine current IP');
         }
 
+        console.log('🔄 Connecting to MongoDB...');
         const connectionInstance = await mongoose.connect(process.env.MONGODB_URI, {
             maxPoolSize: 50, // ✅ OPTIMIZED: Increased from 10 to 50 for better concurrency
             minPoolSize: 10, // ✅ ADDED: Maintain minimum connections for faster response
@@ -29,7 +27,7 @@ const connectDB = async (retries = 3) => {
             maxIdleTimeMS: 30000, // ✅ ADDED: Close idle connections after 30s
         });
 
-        console.log(`✅ MongoDB connected successfully! Host: ${connectionInstance.connection.host}`);
+        console.log(`✅ MongoDB connected: ${connectionInstance.connection.host}`);
 
         // Handle connection events
         mongoose.connection.on('error', (err) => {
@@ -37,7 +35,7 @@ const connectDB = async (retries = 3) => {
         });
 
         mongoose.connection.on('disconnected', () => {
-            console.log('📤 MongoDB disconnected');
+            console.warn('⚠️ MongoDB disconnected');
         });
 
         mongoose.connection.on('reconnected', () => {
@@ -60,7 +58,6 @@ const connectDB = async (retries = 3) => {
         }
 
         if (retries > 0) {
-            console.log(`🔄 Retrying connection... ${retries} attempts remaining`);
             await new Promise(resolve => setTimeout(resolve, 5000));
             return connectDB(retries - 1);
         }

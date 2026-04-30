@@ -11,8 +11,8 @@
 
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
-import Order from './src/models/order.models.js';
-import EscrowWallet from './src/models/escrowWallet.models.js';
+import Order from '../src/models/order.models.js';
+import EscrowWallet from '../src/models/escrowWallet.models.js';
 
 dotenv.config();
 

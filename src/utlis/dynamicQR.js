@@ -21,7 +21,6 @@ const generateStyledQR = async (username, styling = {}) => {
         } = styling;
 
         const profileUrl = `${baseUrl}/userprofile/${username}?utm_source=qr_styled`;
-        console.log('🔗 QR Code URL generated:', profileUrl);
         
         // Apply different styling based on frameStyle
         let qrColor = primaryColor;
@@ -67,7 +66,6 @@ const generateOwnStyledQR = async (styling = {}) => {
         } = styling;
 
         const profileUrl = `${baseUrl}/profile?utm_source=qr_styled`;
-        console.log('🔗 QR Code URL generated:', profileUrl);
 
         // Apply different styling based on frameStyle
         let qrColor = primaryColor;

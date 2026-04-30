@@ -25,7 +25,6 @@ export const generateUserToken = asyncHandler(async (req, res) => {
         throw new ApiError(403, 'You can only generate tokens for yourself');
     }
 
-    console.log('🔑 Token generation request:', { userId: targetUserId, expirationSeconds });
 
     // Check if Stream.io is configured
     if (!streamService.isConfigured()) {
@@ -34,7 +33,6 @@ export const generateUserToken = asyncHandler(async (req, res) => {
 
     try {
         // Auto-register user in Stream.io (idempotent - safe to call multiple times)
-        console.log('👤 Auto-registering user in Stream.io...');
         await streamService.upsertUsers([{
             id: currentUserId,
             name: req.user.fullName || req.user.username || 'User',
@@ -73,7 +71,6 @@ export const createStreamCall = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id.toString();
     const { callId, callType, members = [], videoEnabled = false } = req.body;
 
-    console.log('📞 Stream.io call creation request:', { callId, callType, currentUserId, members, videoEnabled });
 
     // Validate input
     if (!callId || !callType) {
@@ -93,7 +90,6 @@ export const createStreamCall = asyncHandler(async (req, res) => {
         // Ensure all users are registered in Stream.io
         const allMemberIds = [currentUserId, ...members].filter((id, index, self) => self.indexOf(id) === index);
 
-        console.log(`👥 Registering ${allMemberIds.length} users in Stream.io...`);
 
         // Optimize: Build users array using current user data and only fetch others if needed
         const usersToRegister = [];
@@ -131,7 +127,6 @@ export const createStreamCall = asyncHandler(async (req, res) => {
         }
 
         await streamService.upsertUsers(usersToRegister);
-        console.log(`✅ Registered ${usersToRegister.length} users in Stream.io`);
 
         // Create Stream.io call with appropriate settings
         // Use 'default' type for both voice and video calls
@@ -139,7 +134,6 @@ export const createStreamCall = asyncHandler(async (req, res) => {
         const streamCallType = 'default';
         const finalVideoEnabled = callType === 'video' ? videoEnabled : false;
 
-        console.log(`📞 Creating Stream.io call: ${streamCallType}:${callId} with videoEnabled: ${finalVideoEnabled}`);
         const callResponse = await streamService.createCall(
             streamCallType,
             callId,

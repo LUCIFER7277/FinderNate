@@ -77,8 +77,6 @@ export const createChat = asyncHandler(async (req, res) => {
     // ✅ FIXED: Sort participants as ObjectIds for consistent ordering
     validParticipants.sort((a, b) => a.toString().localeCompare(b.toString()));
 
-    console.log('💬 Create Chat Debug - Current User:', currentUserId);
-    console.log('💬 Create Chat Debug - Valid Participants:', validParticipants.map(p => p.toString()));
 
     // Prevent duplicate 1-on-1 chats
     if (chatType === 'direct') {
@@ -88,7 +86,6 @@ export const createChat = asyncHandler(async (req, res) => {
             participants: { $all: validParticipants, $size: 2 }
         });
 
-        console.log('💬 Create Chat Debug - Existing chat found:', !!existingChat);
 
         if (existingChat) {
             // ✅ FIX: Check if follow status has changed since chat was created
@@ -100,19 +97,16 @@ export const createChat = asyncHandler(async (req, res) => {
             if (!recipientFollowsSender && existingChat.status === 'active') {
                 existingChat.status = 'requested';
                 existingChat.createdBy = currentUserId; // Update creator to current requester
-                console.log('💬 Chat converted to requested - recipient unfollowed sender');
             }
             // If recipient now follows sender AND chat is currently requested,
             // convert it to active (auto-accept)
             else if (recipientFollowsSender && existingChat.status === 'requested') {
                 existingChat.status = 'active';
-                console.log('💬 Chat auto-accepted - recipient now follows sender');
             }
             // If chat was declined, allow re-requesting
             else if (existingChat.status === 'declined') {
                 existingChat.status = 'requested';
                 existingChat.createdBy = currentUserId; // Update to new requester
-                console.log('💬 Chat request re-sent after decline');
             }
 
             // Before returning, make sure we're not showing deleted messages
@@ -267,9 +261,6 @@ export const getUserChats = asyncHandler(async (req, res) => {
 
     // Only log in development for debugging
     if (process.env.NODE_ENV === 'development' && process.env.DEBUG_CHAT === 'true') {
-        console.log('💬 Chat Debug - User:', currentUserId);
-        console.log('💬 Chat Debug - Status filter:', statusFilter);
-        console.log('💬 Chat Debug - Chat filter:', JSON.stringify(chatFilter, null, 2));
     }
 
     const [chats, total] = await Promise.all([
@@ -282,7 +273,6 @@ export const getUserChats = asyncHandler(async (req, res) => {
     ]);
 
     if (process.env.NODE_ENV === 'development' && process.env.DEBUG_CHAT === 'true') {
-        console.log('💬 Chat Debug - Chats found:', chats.length);
     }
 
     // Additional security check: Double-verify each chat contains the current user
@@ -325,7 +315,6 @@ export const getUserChats = asyncHandler(async (req, res) => {
                 }
                 // Only log duplicates once to avoid spam
                 if (process.env.NODE_ENV === 'development' && !global._chatDuplicatesWarned) {
-                    console.log(`⚠️ Duplicate chat detected for participants ${participantKey}. Run cleanup script: node src/scripts/cleanupDuplicateChats.js`);
                     global._chatDuplicatesWarned = true;
                 }
             }
@@ -524,7 +513,6 @@ export const getUserChats = asyncHandler(async (req, res) => {
                     socket.chatRooms = socket.chatRooms || new Set();
                     socket.chatRooms.add(chatId);
                 });
-                console.log(`✅ Auto-joined user ${currentUserId} to ${populatedChats.length} chat rooms`);
             }
         }
     }
@@ -665,7 +653,6 @@ export const getChatMessages = asyncHandler(async (req, res) => {
                 socket.join(`chat:${chatId}`);
                 socket.chatRooms = socket.chatRooms || new Set();
                 socket.chatRooms.add(chatId);
-                console.log(`✅ Auto-joined user ${currentUserId} to chat:${chatId}`);
             }
         }
     }
@@ -808,18 +795,6 @@ export const addMessage = asyncHandler(async (req, res) => {
             : body.productReference
     ) : null;
 
-    // 🐛 Debug: Log received product reference
-    if (productReference) {
-        console.log('📦 Backend received productReference:', {
-            hasProductImage: !!productReference.productImage,
-            productImage: productReference.productImage,
-            productName: productReference.productName,
-            fullReference: productReference
-        });
-    }
-
-
-
     // For media messages, allow empty message if file is present
     if ((!message || message.trim().length === 0) && !mediaFile) {
         throw new ApiError(400, 'Message content or media file is required');
@@ -916,15 +891,6 @@ export const addMessage = asyncHandler(async (req, res) => {
     // Create new message using Message model
     const newMessage = await Message.create(messageData);
 
-    // 🐛 Debug: Verify product reference was saved
-    if (newMessage.productReference) {
-        console.log('✅ Message saved with productReference:', {
-            messageId: newMessage._id,
-            hasProductImage: !!newMessage.productReference.productImage,
-            productImage: newMessage.productReference.productImage
-        });
-    }
-
     // Update chat's last message info
     chat.lastMessageAt = new Date();
     chat.lastMessage = {
@@ -1010,7 +976,6 @@ export const addMessage = asyncHandler(async (req, res) => {
             }
 
             await Promise.all(cacheInvalidations);
-            console.log(`✅ Invalidated caches for ${participantIds.length} participants`);
         } catch (cacheError) {
             console.error('Error invalidating caches:', cacheError);
         }
@@ -1300,7 +1265,6 @@ export const deleteMessageForEveryone = asyncHandler(async (req, res) => {
             }
 
             await Promise.all(cacheInvalidations);
-            console.log(`✅ Invalidated caches for ${participantIds.length} participants after message deletion`);
         } catch (cacheError) {
             console.error('Error invalidating caches after message deletion:', cacheError);
         }
@@ -1377,7 +1341,6 @@ export const deleteMessageForMe = asyncHandler(async (req, res) => {
                 );
             }
             await Promise.all(cacheInvalidations);
-            console.log(`✅ Invalidated caches for user ${currentUserId} after deleting message for self`);
         } catch (cacheError) {
             console.error('Error invalidating caches after personal message deletion:', cacheError);
         }

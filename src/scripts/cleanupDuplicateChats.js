@@ -7,13 +7,11 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finder
 
 const connectDB = async () => {
     try {
-        console.log('🔄 Connecting to MongoDB...');
         await mongoose.connect(MONGODB_URI, {
             serverSelectionTimeoutMS: 10000,
             connectTimeoutMS: 10000,
             socketTimeoutMS: 10000,
         });
-        console.log('✅ MongoDB connected successfully');
     } catch (error) {
         console.error('❌ MongoDB connection error:', error.message);
         process.exit(1);
@@ -29,11 +27,9 @@ const cleanupDuplicateChats = async () => {
         const db = mongoose.connection.db;
         const chatsCollection = db.collection('chats');
 
-        console.log('\n🔍 Finding duplicate chats...\n');
 
         // Find all chats
         const allChats = await chatsCollection.find({}).toArray();
-        console.log(`📊 Total chats found: ${allChats.length}`);
 
         // Group chats by participants (for 1-on-1 chats only)
         const chatGroups = new Map();
@@ -54,7 +50,6 @@ const cleanupDuplicateChats = async () => {
             }
         }
 
-        console.log(`📊 Unique participant pairs: ${chatGroups.size}`);
 
         // Find and remove duplicates
         let duplicatesFound = 0;
@@ -71,12 +66,8 @@ const cleanupDuplicateChats = async () => {
                 const keepChat = chats[0];
                 const deleteChats = chats.slice(1);
 
-                console.log(`\n⚠️  Duplicate chats found for participants: ${participantKey}`);
-                console.log(`   📌 Keeping oldest chat: ${keepChat._id} (created: ${keepChat.createdAt})`);
-                console.log(`   🗑️  Deleting ${deleteChats.length} duplicate(s):`);
 
                 for (const chat of deleteChats) {
-                    console.log(`      - ${chat._id} (created: ${chat.createdAt})`);
                     chatIdsToDelete.push(chat._id);
                 }
 
@@ -85,48 +76,32 @@ const cleanupDuplicateChats = async () => {
         }
 
         if (chatIdsToDelete.length === 0) {
-            console.log('\n✅ No duplicate chats found! Database is clean.');
             return;
         }
 
-        console.log(`\n📊 Summary:`);
-        console.log(`   - Participant pairs with duplicates: ${duplicatesFound}`);
-        console.log(`   - Total duplicate chats to delete: ${chatsDeleted}`);
 
         // Ask for confirmation in production
         if (process.env.NODE_ENV === 'production') {
-            console.log('\n⚠️  WARNING: Running in production mode!');
-            console.log('Please review the list above carefully.');
-            console.log('To proceed, set CONFIRM_DELETE=true environment variable.\n');
 
             if (process.env.CONFIRM_DELETE !== 'true') {
-                console.log('❌ Deletion cancelled. No changes made.');
                 return;
             }
         }
 
         // Delete duplicate chats
-        console.log('\n🗑️  Deleting duplicate chats...');
         const deleteResult = await chatsCollection.deleteMany({
             _id: { $in: chatIdsToDelete }
         });
 
-        console.log(`✅ Deleted ${deleteResult.deletedCount} duplicate chats`);
 
         // Also clean up related data
-        console.log('\n🧹 Cleaning up related message data...');
 
         const messagesCollection = db.collection('messages');
         const messageDeleteResult = await messagesCollection.deleteMany({
             chatId: { $in: chatIdsToDelete.map(id => id.toString()) }
         });
 
-        console.log(`✅ Deleted ${messageDeleteResult.deletedCount} messages from duplicate chats`);
 
-        console.log('\n🎉 Cleanup completed successfully!');
-        console.log(`\n📊 Final Stats:`);
-        console.log(`   - Chats deleted: ${deleteResult.deletedCount}`);
-        console.log(`   - Messages deleted: ${messageDeleteResult.deletedCount}`);
 
     } catch (error) {
         console.error('\n❌ Error during cleanup:', error);
@@ -139,7 +114,6 @@ const cleanupDuplicateChats = async () => {
  */
 const createUniqueIndex = async () => {
     try {
-        console.log('\n🔧 Creating unique index to prevent future duplicates...');
 
         const db = mongoose.connection.db;
         const chatsCollection = db.collection('chats');
@@ -157,10 +131,8 @@ const createUniqueIndex = async () => {
             }
         );
 
-        console.log('✅ Unique index created successfully');
     } catch (error) {
         if (error.code === 11000) {
-            console.log('ℹ️  Unique index already exists');
         } else {
             console.error('❌ Error creating unique index:', error.message);
         }
@@ -172,16 +144,11 @@ const createUniqueIndex = async () => {
  */
 const main = async () => {
     try {
-        console.log('═══════════════════════════════════════════════════');
-        console.log('  🧹 DUPLICATE CHAT CLEANUP SCRIPT');
-        console.log('═══════════════════════════════════════════════════\n');
 
         await connectDB();
         await cleanupDuplicateChats();
         await createUniqueIndex();
 
-        console.log('\n✅ All cleanup tasks completed!');
-        console.log('═══════════════════════════════════════════════════\n');
 
         await mongoose.connection.close();
         process.exit(0);

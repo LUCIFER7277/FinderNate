@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
-import Business from './src/models/business.models.js';
-import BusinessRating from './src/models/businessRating.models.js';
-import { User } from './src/models/user.models.js';
+import Business from '../src/models/business.models.js';
+import BusinessRating from '../src/models/businessRating.models.js';
+import { User } from '../src/models/user.models.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/findernate';
 

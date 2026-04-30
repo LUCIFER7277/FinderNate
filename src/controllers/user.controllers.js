@@ -811,7 +811,6 @@ const searchUsers = asyncHandler(async (req, res) => {
                 });
             }
         } catch (error) {
-            console.log('Error tracking search keyword:', error);
         }
     }
 
@@ -913,10 +912,6 @@ const searchUsers = asyncHandler(async (req, res) => {
 
     // Add subscription badges to all users
     user = await addBadgesToUsers(user);
-    console.log('[BADGE DEBUG] After addBadgesToUsers:', user.map(u => ({
-        username: u.username,
-        subscriptionBadge: u.subscriptionBadge
-    })));
 
     // Format the response to include business information
     const formattedUsersMap = new Map();
@@ -966,11 +961,6 @@ const searchUsers = asyncHandler(async (req, res) => {
     }
 
     const formattedUsers = Array.from(formattedUsersMap.values());
-
-    console.log('[BADGE DEBUG] Formatted users before sending:', formattedUsers.map(u => ({
-        username: u.username,
-        subscriptionBadge: u.subscriptionBadge
-    })));
 
     return res
         .status(200)
@@ -2127,13 +2117,10 @@ const testFCMNotification = asyncHandler(async (req, res) => {
             timestamp: new Date().toISOString()
         };
 
-        console.log('🧪 Sending test FCM notification to:', user.username);
-        console.log('📱 FCM Token:', user.fcmToken.substring(0, 20) + '...');
 
         const result = await sendNotification(user.fcmToken, notification, data);
 
         if (result.success) {
-            console.log('✅ Test FCM sent successfully:', result.messageId);
             return res.status(200).json(
                 new ApiResponse(200, {
                     success: true,

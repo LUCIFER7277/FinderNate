@@ -214,7 +214,6 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
                     resolvedLocation.lastLocationUpdate = new Date();
                 }
             } catch (error) {
-                console.log('Could not resolve coordinates for business location:', error);
                 // Continue without coordinates if resolution fails
             }
         }
@@ -679,7 +678,6 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
                         resolvedLocation.lastLocationUpdate = new Date();
                     }
                 } catch (error) {
-                    console.log('Could not resolve coordinates for updated location:', error);
                     // Continue without updating coordinates if resolution fails
                 }
             }

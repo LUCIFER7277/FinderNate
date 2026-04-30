@@ -41,7 +41,6 @@ const generateLinkId = () =>
 // ─────────────────────────────────────────────────────────────────────────────
 export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
     const { postId, shippingAddress, buyerDetails } = req.body;
-    console.log(postId +" "+shippingAddress+" "+buyerDetails)
     const buyerId = req.user?._id;
 
     if (!postId) {

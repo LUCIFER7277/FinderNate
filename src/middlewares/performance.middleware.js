@@ -50,12 +50,10 @@ export const performanceMiddleware = (req, res, next) => {
 
         // Log slow requests (>1000ms)
         if (responseTime > 1000) {
-            console.log('🐌 SLOW REQUEST:', JSON.stringify(metrics, null, 2));
         }
 
         // Log error responses
         if (res.statusCode >= 400) {
-            console.log('❌ ERROR RESPONSE:', JSON.stringify(metrics, null, 2));
         }
 
         // Add performance headers

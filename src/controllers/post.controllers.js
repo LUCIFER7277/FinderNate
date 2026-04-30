@@ -1088,7 +1088,6 @@ const invalidatePostCaches = async (postId, userId) => {
         await redisClient.del(`fn:share:preview:${postId}`);
         await redisClient.del(`fn:share:preview:reel:${postId}`);
 
-        console.log(`✅ Cache invalidated for deleted content: ${postId}`);
     } catch (error) {
         console.error('Cache invalidation error:', error);
         // Don't throw - cache invalidation failure shouldn't block deletion

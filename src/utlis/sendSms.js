@@ -64,7 +64,6 @@ export const sendSms = async ({ phone, otp, request_type }) => {
         return response.data;
     } catch (err) {
         // Axios throws on 4xx/5xx — extract the actual Fast2SMS error body
-        console.log(error)
         if (err.response) {
             const body = err.response.data;
             const msg = Array.isArray(body?.message)

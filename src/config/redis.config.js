@@ -82,51 +82,50 @@ export const redisPublisher = new Redis(PUBLISHER_CONFIG);
 
 // Redis connection event handlers
 redisClient.on('connect', () => {
-    console.log(' Redis Client: Connected');
+    console.log('🔄 Redis Client connecting...');
 });
 
 redisClient.on('ready', () => {
-    console.log('=� Redis Client: Ready for operations');
+    console.log('✅ Redis Client ready');
 });
 
 redisClient.on('error', (err) => {
-    console.error('L Redis Client Error:', err);
+    console.error('❌ Redis Client Error:', err);
 });
 
 redisClient.on('close', () => {
-    console.log('� Redis Client: Connection closed');
+    console.warn('⚠️ Redis Client connection closed');
 });
 
 // PubSub Redis event handlers
 redisPubSub.on('connect', () => {
-    console.log(' Redis PubSub: Connected');
+    console.log('🔄 Redis PubSub connecting...');
 });
 
 redisPubSub.on('ready', () => {
-    console.log('🔄 Redis PubSub: Ready');
+    console.log('✅ Redis PubSub ready');
 });
 
 redisPubSub.on('error', (err) => {
-    console.error('L Redis PubSub Error:', err);
+    console.error('❌ Redis PubSub Error:', err);
 });
 
 // Publisher Redis event handlers
 redisPublisher.on('connect', () => {
-    console.log(' Redis Publisher: Connected');
+    console.log('🔄 Redis Publisher connecting...');
 });
 
 redisPublisher.on('ready', () => {
-    console.log('🔄 Redis Publisher: Ready');
+    console.log('✅ Redis Publisher ready');
 });
 
 redisPublisher.on('error', (err) => {
-    console.error('L Redis Publisher Error:', err);
+    console.error('❌ Redis Publisher Error:', err);
 });
 
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    console.log('=� Closing Redis connections...');
     await redisClient.quit();
     await redisPubSub.quit();
     await redisPublisher.quit();

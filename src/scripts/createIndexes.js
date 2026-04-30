@@ -7,8 +7,6 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/finder
 
 const connectDB = async () => {
     try {
-        console.log('🔄 Connecting to MongoDB...');
-        console.log('📍 URI:', MONGODB_URI.replace(/:([^@]+)@/, ':****@'));
         
         await mongoose.connect(MONGODB_URI, {
             serverSelectionTimeoutMS: 10000,
@@ -16,8 +14,6 @@ const connectDB = async () => {
             socketTimeoutMS: 10000,
         });
         
-        console.log('✅ MongoDB connected successfully');
-        console.log('🗄️  Database:', mongoose.connection.db.databaseName);
         
     } catch (error) {
         console.error('❌ MongoDB connection error:', error.message);
@@ -29,14 +25,11 @@ const connectDB = async () => {
 const safeCreateIndex = async (collection, indexSpec, options = {}) => {
     try {
         await collection.createIndex(indexSpec, options);
-        console.log(`  ✅ Created: ${options.name || JSON.stringify(indexSpec)}`);
         return { created: true, skipped: false };
     } catch (error) {
         if (error.code === 85 || error.codeName === 'IndexOptionsConflict') {
-            console.log(`  ⚠️  Skipped: ${options.name || JSON.stringify(indexSpec)} (already exists)`);
             return { created: false, skipped: true };
         } else {
-            console.log(`  ❌ Failed: ${options.name || JSON.stringify(indexSpec)} - ${error.message}`);
             throw error;
         }
     }
@@ -45,7 +38,6 @@ const safeCreateIndex = async (collection, indexSpec, options = {}) => {
 const createIndexes = async () => {
     try {
         const db = mongoose.connection.db;
-        console.log('🚀 Starting index optimization...\n');
         
         let totalCreated = 0;
         let totalSkipped = 0;
@@ -53,7 +45,6 @@ const createIndexes = async () => {
         // =============================================================================
         // USER COLLECTION INDEXES
         // =============================================================================
-        console.log('👥 User Collection Indexes:');
         const userCollection = db.collection('users');
         
         const userIndexes = [
@@ -73,7 +64,6 @@ const createIndexes = async () => {
         // =============================================================================
         // POST COLLECTION INDEXES
         // =============================================================================
-        console.log('\n📮 Post Collection Indexes:');
         const postCollection = db.collection('posts');
         
         const postIndexes = [
@@ -103,7 +93,6 @@ const createIndexes = async () => {
         // =============================================================================
         // CHAT & MESSAGE INDEXES
         // =============================================================================
-        console.log('\n💬 Chat Collection Indexes:');
         const chatCollection = db.collection('chats');
         
         const chatIndexes = [
@@ -117,7 +106,6 @@ const createIndexes = async () => {
             totalSkipped += result.skipped ? 1 : 0;
         }
 
-        console.log('\n💌 Message Collection Indexes:');
         const messageCollection = db.collection('messages');
         
         const messageIndexes = [
@@ -135,7 +123,6 @@ const createIndexes = async () => {
         // =============================================================================
         // ENGAGEMENT INDEXES
         // =============================================================================
-        console.log('\n❤️  Like Collection Indexes:');
         const likeCollection = db.collection('likes');
         
         const likeIndexes = [
@@ -149,7 +136,6 @@ const createIndexes = async () => {
             totalSkipped += result.skipped ? 1 : 0;
         }
 
-        console.log('\n💬 Comment Collection Indexes:');
         const commentCollection = db.collection('comments');
         
         const commentIndexes = [
@@ -167,7 +153,6 @@ const createIndexes = async () => {
         // =============================================================================
         // NOTIFICATION INDEXES
         // =============================================================================
-        console.log('\n🔔 Notification Collection Indexes:');
         const notificationCollection = db.collection('notifications');
         
         const notificationIndexes = [
@@ -185,7 +170,6 @@ const createIndexes = async () => {
         // =============================================================================
         // BUSINESS INDEXES
         // =============================================================================
-        console.log('\n🏢 Business Collection Indexes:');
         const businessCollection = db.collection('businesses');
         
         const businessIndexes = [
@@ -203,7 +187,6 @@ const createIndexes = async () => {
         // =============================================================================
         // STORY INDEXES (with TTL)
         // =============================================================================
-        console.log('\n📖 Story Collection Indexes:');
         const storyCollection = db.collection('stories');
 
         const storyIndexes = [
@@ -221,7 +204,6 @@ const createIndexes = async () => {
         // =============================================================================
         // BLOCK COLLECTION INDEXES
         // =============================================================================
-        console.log('\n🚫 Block Collection Indexes:');
         const blockCollection = db.collection('blocks');
 
         const blockIndexes = [
@@ -239,7 +221,6 @@ const createIndexes = async () => {
         // =============================================================================
         // FOLLOWER COLLECTION INDEXES
         // =============================================================================
-        console.log('\n👥 Follower Collection Indexes:');
         const followerCollection = db.collection('followers');
 
         const followerIndexes = [
@@ -258,14 +239,6 @@ const createIndexes = async () => {
         // =============================================================================
         // SUMMARY
         // =============================================================================
-        console.log('\n' + '='.repeat(60));
-        console.log('🎉 Index Optimization Complete!');
-        console.log('='.repeat(60));
-        console.log(`📊 Results:`);
-        console.log(`   ✅ Created: ${totalCreated} new indexes`);
-        console.log(`   ⚠️  Skipped: ${totalSkipped} existing indexes`);
-        console.log(`   📈 Total: ${totalCreated + totalSkipped} indexes processed`);
-        console.log('\n🚀 Your database is now optimized for production!');
 
     } catch (error) {
         console.error('❌ Error creating indexes:', error);
@@ -276,7 +249,6 @@ const createIndexes = async () => {
 const listExistingIndexes = async () => {
     try {
         await connectDB();
-        console.log('\n📋 Current Database Indexes:\n');
         
         const collections = await mongoose.connection.db.listCollections().toArray();
         const importantCollections = ['users', 'posts', 'chats', 'messages', 'likes', 'comments', 'notifications', 'businesses', 'stories', 'blocks', 'followers'];
@@ -284,11 +256,8 @@ const listExistingIndexes = async () => {
         for (const collection of collections) {
             if (importantCollections.includes(collection.name)) {
                 const indexes = await mongoose.connection.db.collection(collection.name).indexes();
-                console.log(`${collection.name}:`);
                 indexes.forEach(index => {
-                    console.log(`  - ${index.name}`);
                 });
-                console.log('');
             }
         }
         
@@ -304,7 +273,6 @@ const main = async () => {
         await connectDB();
         await createIndexes();
         await mongoose.connection.close();
-        console.log('✅ Database connection closed');
         process.exit(0);
     } catch (error) {
         console.error('❌ Script failed:', error);

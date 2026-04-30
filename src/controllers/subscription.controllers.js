@@ -464,7 +464,6 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         business.plan = planMapping[plan];
         business.subscriptionStatus = 'active';
         await business.save();
-        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
     }
 
     // Invalidate feed caches
@@ -478,7 +477,6 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         const { redisClient } = await import('../config/redis.config.js');
         const feedKeys = await redisClient.keys('fn:user:*:feed:*');
         if (feedKeys.length > 0) await redisClient.del(...feedKeys);
-        console.log(`✅ Cache invalidated for user ${userId} after subscription upgrade`);
     } catch (cacheError) {
         console.error('Cache invalidation error:', cacheError);
     }
@@ -537,7 +535,6 @@ export const subscriptionWebhook = asyncHandler(async (req, res) => {
 
     // Subscription activation is handled by verifySubscriptionPayment on the success page.
     // Webhook just logs for audit.
-    console.log(`✅ Subscription Cashfree webhook received: orderId=${cfOrderId}, cfPaymentId=${cfPaymentId}`);
     PaymentLogger.logPaymentSuccess('webhook', cfPaymentId || '', cfOrderId, 'subscription', payload?.data?.order?.order_amount || 0);
 
     return res.status(200).json({ success: true });
@@ -553,11 +550,6 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
     const { plan } = req.body;
 
     // Debug logging
-    console.log('=== TEST UPGRADE DEBUG ===');
-    console.log('Request body:', req.body);
-    console.log('Plan received:', plan);
-    console.log('Plan type:', typeof plan);
-    console.log('========================');
 
     // Valid plan options for testing
     const validPlans = ['free', 'small_business', 'corporate'];
@@ -624,7 +616,6 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
         business.plan = planMapping[plan];
         business.subscriptionStatus = plan === 'free' ? 'pending' : 'active';
         await business.save();
-        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
     }
 
     // ✅ CRITICAL: Invalidate all feed caches when subscription changes
@@ -646,7 +637,6 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
             await redisClient.del(...feedKeys);
         }
 
-        console.log(`✅ Cache invalidated for user ${userId} after subscription change`);
     } catch (cacheError) {
         console.error('Cache invalidation error:', cacheError);
         // Don't throw - cache invalidation failure shouldn't block subscription update
