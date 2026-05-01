@@ -52,8 +52,8 @@ import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
 // ─── Rate-limited OTP upsert ────────────────────────────────────────────────
 const OTP_EXPIRY_MS       = 5  * 60 * 1000; // 5 minutes
 const RESEND_COOLDOWN_MS  = 60 * 1000;       // 60 seconds between resend requests
-const OTP_RATE_WINDOW_MS  = 10 * 60 * 1000; // 10-minute window for max-send cap
-const OTP_MAX_SENDS       = 5;
+const OTP_RATE_WINDOW_MS  = 24 * 60 * 1000; // 24-hours window for max-send cap
+const OTP_MAX_SENDS       = 3;
 
 const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry }) => {
     const existing = await AuthOtp.findOne({ identifier, type, purpose });
