@@ -176,6 +176,40 @@ export const RedisKeys = {
     tokenBlacklist: (jti) => `fn:auth:blacklist:${jti}`,
     authRateLimit: (ip) => `fn:auth:rate:${ip}`,
     
+    // Follow counts (real-time counters, updated on every follow/unfollow)
+    userFollowersCount: (userId) => `fn:user:${userId}:followers:count`,
+    userFollowingCount: (userId) => `fn:user:${userId}:following:count`,
+
+    // Post engagement counters
+    postLikesCount: (postId) => `fn:post:${postId}:likes:count`,
+    postCommentsCount: (postId) => `fn:post:${postId}:comments:count`,
+
+    // Per-user like status (set on like, deleted/set-to-0 on unlike)
+    userLikedPost: (userId, postId) => `fn:like:${userId}:${postId}`,
+
+    // Universal default search page (no query — browse mode)
+    defaultResults: () => 'fn:default:results',
+    defaultNewPosts: () => 'fn:default:new_posts', // Redis LIST of recently published postIds
+
+    // Like dirty set — tracks unsync'd like/unlike ops; flushed to DB by 4-hourly cron
+    likesDirty: () => 'fn:likes:dirty',
+
+    // Per-user follow status: '1' = following, '0' = not following
+    userFollowStatus: (followerId, targetUserId) => `fn:follow:${followerId}:${targetUserId}`,
+
+    // Follow dirty set — tracks unsync'd follow/unfollow ops; flushed to DB by 4-hourly cron
+    followsDirty: () => 'fn:follows:dirty',
+
+    // Temp SETs of newly-added follower/following IDs not yet written to DB (flushed every 2h)
+    followersTemp: (userId) => `fn:user:${userId}:followers:temp`,
+    followingTemp: (userId) => `fn:user:${userId}:following:temp`,
+
+    // SET tracking which userIds have active temp keys (so the 2h cron knows who to flush)
+    followTempActiveUsers: () => 'fn:follows:temp:active',
+
+    // Cached liker userId array per post (JSON string, max 50); updated on like/unlike
+    postLikedBy: (postId) => `fn:post:${postId}:likedby`,
+
     // Real-time features
     chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,
     onlineUsers: () => 'fn:live:online_users',
@@ -206,6 +240,19 @@ export const RedisTTL = {
     TOKEN_BLACKLIST: 24 * 60 * 60,   // 24 hours
     RATE_LIMIT: 15 * 60,             // 15 minutes
     
+    // Follow counters (long-lived, updated in-place on follow/unfollow)
+    FOLLOW_COUNT: 7 * 24 * 60 * 60, // 7 days
+
+    // Post engagement counters + per-user like status
+    POST_ENGAGEMENT: 7 * 24 * 60 * 60, // 7 days
+    POST_LIKE_STATUS: 7 * 24 * 60 * 60, // 7 days
+
+    // Per-user follow status
+    FOLLOW_STATUS: 7 * 24 * 60 * 60, // 7 days
+
+    // Universal default search snapshot (safety TTL; explicit invalidation preferred)
+    DEFAULT_RESULTS: 24 * 60 * 60, // 24 hours
+
     // Temporary data
     TEMP_UPLOAD: 10 * 60,            // 10 minutes
     PASSWORD_RESET: 15 * 60,         // 15 minutes

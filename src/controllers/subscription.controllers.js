@@ -466,10 +466,11 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         await business.save();
     }
 
-    // Invalidate feed caches
+    // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+        const { FeedCacheManager, UserCacheManager } = await import('../utlis/cache.utils.js');
         await Promise.allSettled([
+            UserCacheManager.invalidateUserProfile(userId.toString()),
             FeedCacheManager.invalidateUserFeed(userId),
             FeedCacheManager.invalidateExploreFeed(),
             FeedCacheManager.invalidateTrendingFeed()
@@ -618,19 +619,17 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
         await business.save();
     }
 
-    // ✅ CRITICAL: Invalidate all feed caches when subscription changes
-    // This ensures business posts appear/disappear immediately based on payment status
+    // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+        const { FeedCacheManager, UserCacheManager } = await import('../utlis/cache.utils.js');
 
-        // Invalidate all feed types since business post visibility affects them all
         await Promise.allSettled([
+            UserCacheManager.invalidateUserProfile(userId.toString()),
             FeedCacheManager.invalidateUserFeed(userId),
             FeedCacheManager.invalidateExploreFeed(),
             FeedCacheManager.invalidateTrendingFeed()
         ]);
 
-        // Also invalidate Redis cache patterns for home feeds
         const { redisClient } = await import('../config/redis.config.js');
         const feedKeys = await redisClient.keys('fn:user:*:feed:*');
         if (feedKeys.length > 0) {

@@ -439,7 +439,37 @@ const logOutUser = asyncHandler(async (req, res) => {
 
 const getUserProfile = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
+    const userIdStr = userId.toString();
 
+    const { RedisKeys, RedisTTL } = await import('../config/redis.config.js');
+    const { CacheManager } = await import('../utlis/cache.utils.js');
+    const { getFollowersCount, getFollowingCount } = await import('../utlis/followCount.utils.js');
+
+    const profileCacheKey = RedisKeys.userProfile(userIdStr);
+
+    // Try to serve from Redis profile cache
+    const cachedProfile = await CacheManager.get(profileCacheKey);
+
+    // Always fetch live follow counts (Redis count keys with DB fallback)
+    const [followersCount, followingCount, postsCount] = await Promise.all([
+        getFollowersCount(userIdStr),
+        getFollowingCount(userIdStr),
+        Post.countDocuments({ userId }),
+    ]);
+
+    if (cachedProfile) {
+        // Stitch the live counts into the cached profile and return
+        return res.status(200).json(
+            new ApiResponse(200, {
+                ...cachedProfile,
+                followersCount,
+                followingCount,
+                postsCount,
+            }, "User profile retrieved successfully")
+        );
+    }
+
+    // Cache miss — build from DB
     const user = await User.findById(userId).select(
         "username fullName email phoneNumber address gender dateOfBirth bio profileImageUrl location link followers following posts isBusinessProfile businessProfileId isBlueTickVerified isEmailVerified isPhoneVerified isPhoneNumberHidden isAddressHidden privacy isFullPrivate createdAt"
     );
@@ -448,17 +478,11 @@ const getUserProfile = asyncHandler(async (req, res) => {
         throw new ApiError(404, "User not found");
     }
 
-    // Count from actual collections instead of using outdated User model arrays
-    const followersCount = await Follower.countDocuments({ userId });
-    const followingCount = await Follower.countDocuments({ followerId: userId });
-    const postsCount = await Post.countDocuments({ userId });
-
     // Get business profile information if user is a business profile
     let businessInfo = null;
-    let isContentVisible = true; // Non-business accounts always have visible content
+    let isContentVisible = true;
     if (user.isBusinessProfile) {
         businessInfo = await Business.findOne({ userId }).select('postSettings isVerified subscriptionStatus plan');
-        // Check if business content is visible (active payment plan)
         if (businessInfo) {
             isContentVisible = businessInfo.subscriptionStatus === 'active' && businessInfo.plan !== 'plan1';
         }
@@ -467,7 +491,8 @@ const getUserProfile = asyncHandler(async (req, res) => {
     // Get subscription badge
     const subscriptionBadge = await user.getSubscriptionBadge();
 
-    const userProfile = {
+    // Profile snapshot — excludes dynamic counts which are always stitched from Redis
+    const profileSnapshot = {
         _id: user._id,
         username: user.username,
         email: user.email,
@@ -485,7 +510,6 @@ const getUserProfile = asyncHandler(async (req, res) => {
         isAddressHidden: user.isAddressHidden,
         privacy: user.privacy,
         isFullPrivate: user.isFullPrivate,
-        // Add business-specific fields
         productEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowProductPosts ?? true) : null,
         serviceEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowServicePosts ?? true) : null,
         isVerified: user.isBusinessProfile ? (businessInfo?.isVerified ?? false) : null,
@@ -493,29 +517,24 @@ const getUserProfile = asyncHandler(async (req, res) => {
         contentVisibilityMessage: user.isBusinessProfile && !isContentVisible
             ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
             : null,
-        // Add subscription badge
-        subscriptionBadge: subscriptionBadge,
+        subscriptionBadge,
         createdAt: user.createdAt,
         bio: user.bio,
         link: user.link,
         location: user.location,
         profileImageUrl: user.profileImageUrl,
-        followersCount,
-        followingCount,
-        postsCount
     };
 
-    // Cache the response if caching is available
-    if (res.locals.cacheKey && res.locals.cacheTTL) {
-        await setCache(res.locals.cacheKey, {
-            success: true,
-            data: userProfile,
-            message: "User profile retrieved successfully"
-        }, res.locals.cacheTTL);
-    }
+    // Cache the profile snapshot (without dynamic counts) for 1 hour
+    await CacheManager.set(profileCacheKey, profileSnapshot, RedisTTL.USER_PROFILE);
 
     return res.status(200).json(
-        new ApiResponse(200, userProfile, "User profile retrieved successfully")
+        new ApiResponse(200, {
+            ...profileSnapshot,
+            followersCount,
+            followingCount,
+            postsCount,
+        }, "User profile retrieved successfully")
     );
 });
 
@@ -1315,11 +1334,14 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         status: 'pending'
     });
 
-    // Calculate counts
-    const followersCount = await Follower.countDocuments({ userId: targetUser._id });
-    const followingCount = await Follower.countDocuments({ followerId: targetUser._id });
-    // Count posts directly from Post collection
-    const postsCount = await Post.countDocuments({ userId: targetUser._id });
+    // Calculate counts — Redis-first with DB fallback
+    const { getFollowersCount, getFollowingCount } = await import('../utlis/followCount.utils.js');
+    const targetIdStr = targetUser._id.toString();
+    const [followersCount, followingCount, postsCount] = await Promise.all([
+        getFollowersCount(targetIdStr),
+        getFollowingCount(targetIdStr),
+        Post.countDocuments({ userId: targetUser._id }),
+    ]);
 
     // Get business ID and visibility status if user has a business profile
     let businessId = null;

@@ -61,9 +61,11 @@ export const handleExpiredSubscriptions = async () => {
 
                 }
 
-                // 3. Invalidate cache for user
+                // 3. Invalidate feed and profile caches (subscription badge changed on expiry)
                 try {
+                    const { UserCacheManager } = await import('../utlis/cache.utils.js');
                     await Promise.allSettled([
+                        UserCacheManager.invalidateUserProfile(userId.toString()),
                         FeedCacheManager.invalidateUserFeed(userId),
                         FeedCacheManager.invalidateExploreFeed(),
                         FeedCacheManager.invalidateTrendingFeed()
