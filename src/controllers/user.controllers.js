@@ -39,6 +39,7 @@ import Report from "../models/report.models.js";
 import Following from "../models/following.models.js";
 import FollowRequest from "../models/followRequest.models.js";
 import ContactRequest from "../models/contactRequest.models.js";
+import { getFollowStatus } from "../utlis/followEngagement.utils.js";
 import {
     generateRealtimeUsernameSuggestions,
     isUsernameAvailable,
@@ -1322,11 +1323,8 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     }
 
     // Check if current user follows the target user
-    const isFollowing = await Follower.findOne({
-        userId: targetUser._id,
-        followerId: req.user._id
-    });
-
+    const isFollowing = await getFollowStatus(req.user._id, targetUser._id);
+    
     // Check if there's a pending follow request
     const pendingRequest = await FollowRequest.findOne({
         requesterId: req.user._id,
