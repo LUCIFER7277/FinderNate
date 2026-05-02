@@ -443,7 +443,7 @@ const getUserProfile = asyncHandler(async (req, res) => {
 
     const { RedisKeys, RedisTTL } = await import('../config/redis.config.js');
     const { CacheManager } = await import('../utlis/cache.utils.js');
-    const { getFollowersCount, getFollowingCount } = await import('../utlis/followCount.utils.js');
+    const { getFollowersCount, getFollowingCount } = await import('../utlis/followEngagement.utils.js');
 
     const profileCacheKey = RedisKeys.userProfile(userIdStr);
 
@@ -1335,7 +1335,7 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     });
 
     // Calculate counts — Redis-first with DB fallback
-    const { getFollowersCount, getFollowingCount } = await import('../utlis/followCount.utils.js');
+    const { getFollowersCount, getFollowingCount } = await import('../utlis/followEngagement.utils.js');
     const targetIdStr = targetUser._id.toString();
     const [followersCount, followingCount, postsCount] = await Promise.all([
         getFollowersCount(targetIdStr),

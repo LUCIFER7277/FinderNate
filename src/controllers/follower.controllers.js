@@ -5,22 +5,15 @@ import { asyncHandler } from "../utlis/asyncHandler.js";
 import { ApiResponse } from "../utlis/ApiResponse.js";
 import { ApiError } from "../utlis/ApiError.js";
 import { createFollowNotification } from "./notification.controllers.js";
-import { redisClient, RedisKeys } from "../config/redis.config.js";
+import { redisClient, RedisKeys, FOLLOW_LIST_MAX } from "../config/redis.config.js";
 import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
-import {
-    incrFollowersCount,
-    decrFollowersCount,
-    incrFollowingCount,
-    decrFollowingCount,
-    getFollowersCount,
-    getFollowingCount,
-} from "../utlis/followCount.utils.js";
-
-const MAX_FOLLOW_LIST = 15;
+import { invalidateViewableUsersCache } from "../middlewares/privacy.middleware.js";
 import {
     getFollowStatus,
     onUserFollowed,
     onUserUnfollowed,
+    getFollowersCount,
+    getFollowingCount,
 } from "../utlis/followEngagement.utils.js";
 
 // Follow a user (with privacy support)
@@ -58,33 +51,31 @@ export const followUser = asyncHandler(async (req, res) => {
             await FollowRequest.findByIdAndDelete(existingRequest._id);
         }
 
-        // Try Redis-first (deferred DB write via 4-hourly cron)
-        const redisOk = await onUserFollowed(requesterId, userId);
+        // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
+        const result = await onUserFollowed(requesterId, userId);
 
-        if (!redisOk) {
-            // Redis is down — fall back to direct DB write
+        let newFollowersCount, newFollowingCount;
+
+        if (!result.ok) {
+            // Redis is down — write directly to DB and read fresh counts from DB.
             await Follower.create({ userId, followerId: requesterId });
             await User.findByIdAndUpdate(userId, { $addToSet: { followers: requesterId } });
             await User.findByIdAndUpdate(requesterId, { $addToSet: { following: userId } });
+            try {
+                [newFollowersCount, newFollowingCount] = await Promise.all([
+                    Follower.countDocuments({ userId }),
+                    Follower.countDocuments({ followerId: requesterId }),
+                ]);
+            } catch { /* counts remain undefined → null in response */ }
+        } else {
+            newFollowersCount = result.followersCount;
+            newFollowingCount = result.followingCount;
         }
 
         // Notification + cache invalidation fire-and-forget
         createFollowNotification({ recipientId: userId, sourceUserId: requesterId }).catch(() => {});
-        const { invalidateViewableUsersCache } = await import('../middlewares/privacy.middleware.js');
         invalidateViewableUsersCache(requesterId).catch(() => {});
         invalidateViewableUsersCache(userId).catch(() => {});
-        redisClient.del(`following:${requesterId}`).catch(() => {});
-
-        // Both count updates must succeed together — roll back if either fails
-        let newFollowersCount, newFollowingCount;
-        try {
-            newFollowersCount = await incrFollowersCount(userId.toString());
-            newFollowingCount = await incrFollowingCount(requesterId.toString());
-        } catch (err) {
-            // Compensate whichever succeeded
-            if (newFollowersCount !== undefined) decrFollowersCount(userId.toString()).catch(() => {});
-            throw new ApiError(500, 'Something went wrong while updating follow counts. Please try again.');
-        }
 
         return res.status(200).json(new ApiResponse(200, {
             followedUser: {
@@ -137,34 +128,32 @@ export const unfollowUser = asyncHandler(async (req, res) => {
     const isFollowing = await getFollowStatus(requesterId, userId);
 
     if (isFollowing) {
-        // Try Redis-first (marks dirty for cron; also deletes Follower doc immediately)
-        const redisOk = await onUserUnfollowed(requesterId, userId);
-
-        if (!redisOk) {
-            // Redis is down — fall back to direct DB write
-            await Follower.findOneAndDelete({ userId, followerId: requesterId });
-            await User.findByIdAndUpdate(userId, { $pull: { followers: requesterId } });
-            await User.findByIdAndUpdate(requesterId, { $pull: { following: userId } });
-        }
+        // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
+        const result = await onUserUnfollowed(requesterId, userId);
 
         const unfollowedUser = await User.findById(userId).select('username fullName profileImageUrl');
 
+        let newFollowersCount, newFollowingCount;
+
+        if (!result.ok) {
+            // Redis is down — write directly to DB and read fresh counts from DB.
+            await Follower.findOneAndDelete({ userId, followerId: requesterId });
+            await User.findByIdAndUpdate(userId, { $pull: { followers: requesterId } });
+            await User.findByIdAndUpdate(requesterId, { $pull: { following: userId } });
+            try {
+                [newFollowersCount, newFollowingCount] = await Promise.all([
+                    Follower.countDocuments({ userId }),
+                    Follower.countDocuments({ followerId: requesterId }),
+                ]);
+            } catch { /* counts remain undefined → null in response */ }
+        } else {
+            newFollowersCount = result.followersCount;
+            newFollowingCount = result.followingCount;
+        }
+
         // Cache invalidation fire-and-forget
-        const { invalidateViewableUsersCache } = await import('../middlewares/privacy.middleware.js');
         invalidateViewableUsersCache(requesterId).catch(() => {});
         invalidateViewableUsersCache(userId).catch(() => {});
-        redisClient.del(`following:${requesterId}`).catch(() => {});
-
-        // Both count updates must succeed together — roll back if either fails
-        let newFollowersCount, newFollowingCount;
-        try {
-            newFollowersCount = await decrFollowersCount(userId.toString());
-            newFollowingCount = await decrFollowingCount(requesterId.toString());
-        } catch (err) {
-            // Compensate whichever succeeded
-            if (newFollowersCount !== undefined) incrFollowersCount(userId.toString()).catch(() => {});
-            throw new ApiError(500, 'Something went wrong while updating follow counts. Please try again.');
-        }
 
         return res.status(200).json(new ApiResponse(200, {
             unfollowedUser: {
@@ -221,7 +210,7 @@ export const getFollowers = asyncHandler(async (req, res) => {
     try {
         const [tempIds, listIds] = await Promise.all([
             redisClient.smembers(RedisKeys.followersTemp(userId)),
-            redisClient.lrange(RedisKeys.userFollowers(userId), 0, MAX_FOLLOW_LIST - 1),
+            redisClient.lrange(RedisKeys.userFollowers(userId), 0, FOLLOW_LIST_MAX - 1),
         ]);
         // Temp IDs first (most recent, not yet in DB), then list IDs, deduped
         const seen = new Set();
@@ -311,7 +300,7 @@ export const getFollowing = asyncHandler(async (req, res) => {
     try {
         const [tempIds, listIds] = await Promise.all([
             redisClient.smembers(RedisKeys.followingTemp(userId)),
-            redisClient.lrange(RedisKeys.userFollowing(userId), 0, MAX_FOLLOW_LIST - 1),
+            redisClient.lrange(RedisKeys.userFollowing(userId), 0, FOLLOW_LIST_MAX - 1),
         ]);
         const seen = new Set();
         for (const id of [...tempIds, ...listIds]) {
@@ -399,25 +388,15 @@ export const approveFollowRequest = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Follow request not found");
     }
 
-    // Try Redis-first (deferred DB write via 4-hourly cron)
-    // requesterId is now following recipientId
-    const redisOk = await onUserFollowed(requesterId, recipientId);
+    // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
+    // requesterId is now following recipientId.
+    const result = await onUserFollowed(requesterId, recipientId);
 
-    if (!redisOk) {
-        // Redis is down — fall back to direct DB write
+    if (!result.ok) {
+        // Redis is down — fall back to direct DB write.
         await Follower.create({ userId: recipientId, followerId: requesterId });
         await User.findByIdAndUpdate(recipientId, { $addToSet: { followers: requesterId } });
         await User.findByIdAndUpdate(requesterId, { $addToSet: { following: recipientId } });
-    }
-
-    // Both count updates must succeed together — roll back if either fails
-    let approvedFollowersCount;
-    try {
-        approvedFollowersCount = await incrFollowersCount(recipientId.toString());
-        await incrFollowingCount(requesterId.toString());
-    } catch (err) {
-        if (approvedFollowersCount !== undefined) decrFollowersCount(recipientId.toString()).catch(() => {});
-        // Non-fatal for approval — counts will self-heal on next profile load
     }
 
     // Create notification for approval
