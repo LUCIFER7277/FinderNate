@@ -1389,7 +1389,7 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
 
     const responseData = {
         _id: targetUser._id,
-        isFollowedBy: !!isFollowing,
+        isFollowedBy: isFollowing,
         isPending: !!pendingRequest,
         userId: userWithCounts
     };
