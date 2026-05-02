@@ -18,10 +18,10 @@
  */
 
 import 'dotenv/config';
-import connectDB from '../db/index.js';
-import { redisClient, RedisKeys, RedisTTL } from '../config/redis.config.js';
-import Follower from '../models/follower.models.js';
-import { User } from '../models/user.models.js';
+import connectDB from '../src/db/index.js';
+import { redisClient, RedisKeys, RedisTTL } from '../src/config/redis.config.js';
+import Follower from '../src/models/follower.models.js';
+import { User } from '../src/models/user.models.js';
 
 const USER_BATCH_SIZE = 200;
 const LIST_TTL = 12 * 24 * 60 * 60;   // 12 days

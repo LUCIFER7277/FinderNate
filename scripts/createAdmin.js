@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { Admin } from '../models/admin.models.js';
+import { Admin } from '../src/models/admin.models.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
