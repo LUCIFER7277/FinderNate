@@ -143,6 +143,9 @@ export const redisHealthCheck = async () => {
     }
 };
 
+// Max entries kept in the followers/following Redis LIST per user
+export const FOLLOW_LIST_MAX = 15;
+
 // Key generation utilities
 export const RedisKeys = {
     // User data keys
@@ -194,8 +197,9 @@ export const RedisKeys = {
     // Like dirty set — tracks unsync'd like/unlike ops; flushed to DB by 4-hourly cron
     likesDirty: () => 'fn:likes:dirty',
 
-    // Per-user follow status: '1' = following, '0' = not following
-    userFollowStatus: (followerId, targetUserId) => `fn:follow:${followerId}:${targetUserId}`,
+    // Per-user following SET: members are all targetUserIds that userId is following
+    // SISMEMBER for O(1) lookup; one key per user instead of one key per relation
+    userFollowingStatus: (userId) => `fn:user:${userId}:following:status`,
 
     // Follow dirty set — tracks unsync'd follow/unfollow ops; flushed to DB by 4-hourly cron
     followsDirty: () => 'fn:follows:dirty',

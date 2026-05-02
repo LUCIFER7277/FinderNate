@@ -9,8 +9,8 @@ const SYNCING_KEY = 'fn:follows:syncing';
 const BATCH_SIZE = 100;
 
 export function startFollowSyncJob() {
-    // Every 4 hours: flush dirty follow/unfollow ops to DB
-    cron.schedule('0 */4 * * *', async () => {
+    // Every 3 minutes: flush dirty follow/unfollow ops to DB
+    cron.schedule('*/3 * * * *', async () => {
         console.log('[FollowSync] Starting follow sync...');
         try {
             await syncFollowsToDB();
@@ -19,9 +19,8 @@ export function startFollowSyncJob() {
         }
     });
 
-    // Every 4 hours at :30 — runs after syncFollowsToDB finishes writing to DB,
-    // then immediately rebuilds Redis lists so they reflect the latest DB state.
-    cron.schedule('30 */4 * * *', async () => {
+    // Every 5 minutes: flush temp SETs + rebuild Redis lists from DB
+    cron.schedule('*/5 * * * *', async () => {
         console.log('[FollowSync] Starting temp flush + Redis list refresh...');
         try {
             await flushFollowTempToDB();       // 1. write temp SETs to DB
@@ -59,19 +58,30 @@ async function syncFollowsToDB() {
         unique.forEach(pair => seen.add(pair));
         if (!unique.length) continue;
 
-        const keys = unique.map(pair => {
-            const [fid, tid] = pair.split(':');
-            return RedisKeys.userFollowStatus(fid, tid);
-        });
-        const statuses = await redisClient.mget(...keys);
+        // Check which follower following-status SETs still exist.
+        // SET TTL expiry means DB is already authoritative for those users — skip their pairs.
+        const uniqueFollowers = [...new Set(unique.map(p => p.split(':')[0]))];
+        const existsPipeline = redisClient.pipeline();
+        uniqueFollowers.forEach(fid => existsPipeline.exists(RedisKeys.userFollowingStatus(fid)));
+        const existsResults = await existsPipeline.exec();
+        const setExists = Object.fromEntries(
+            uniqueFollowers.map((fid, i) => [fid, existsResults[i][1] === 1])
+        );
 
-        unique.forEach((pair, i) => {
-            const [followerId, targetUserId] = pair.split(':');
-            const status = statuses[i];
-            if (status === null) return; // TTL expired before sync — DB is already authoritative, skip
-            if (status === '1') toFollow.push({ followerId, targetUserId });
-            else toUnfollow.push({ followerId, targetUserId });
-        });
+        const validPairs = unique.filter(pair => setExists[pair.split(':')[0]]);
+        if (validPairs.length) {
+            const sismemberPipeline = redisClient.pipeline();
+            validPairs.forEach(pair => {
+                const [fid, tid] = pair.split(':');
+                sismemberPipeline.sismember(RedisKeys.userFollowingStatus(fid), tid);
+            });
+            const sismemberResults = await sismemberPipeline.exec();
+            validPairs.forEach((pair, i) => {
+                const [followerId, targetUserId] = pair.split(':');
+                if (sismemberResults[i][1] === 1) toFollow.push({ followerId, targetUserId });
+                else toUnfollow.push({ followerId, targetUserId });
+            });
+        }
     } while (cursor !== '0');
 
     // Upsert Follower documents for new follows
