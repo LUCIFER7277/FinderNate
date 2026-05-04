@@ -7,7 +7,7 @@ import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
 import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
-import Like from "../models/like.models.js";
+import { batchIsLikedByUser, batchGetLikesCount, batchGetCommentsCount, batchGetLikedByUserIds } from "../utlis/postEngagement.utils.js";
 import mongoose from "mongoose";
 
 
@@ -155,16 +155,48 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                 break;
         }
 
-        // Check cache first
+        // Check cache first — isLikedBy is never stored in cache, always recomputed
         const cacheKey = `${pageNum}_${limitNum}_${currentUserId || 'anonymous'}_${postType || 'all'}_${contentType || 'all'}_${sortBy}_${location || ''}_${tag || ''}_${suggested}`;
         if (cache.reels.data &&
             cache.reels.timestamp &&
             cache.reels.cacheKey === cacheKey &&
             (Date.now() - cache.reels.timestamp < cache.reels.expiry)) {
 
-            return res.status(200).json(
-                new ApiResponse(200, cache.reels.data, "Reels fetched from cache")
-            );
+            const cachedData = cache.reels.data;
+            if (currentUserId && cachedData.reels?.length) {
+                const reelIds = cachedData.reels.map(r => r._id);
+                const [likedSet, likeCountMap, commentCountMap, likedByIdsMap] = await Promise.all([
+                    batchIsLikedByUser(currentUserId, reelIds),
+                    batchGetLikesCount(cachedData.reels),
+                    batchGetCommentsCount(cachedData.reels),
+                    batchGetLikedByUserIds(reelIds),
+                ]);
+                const userIdStr = currentUserId.toString();
+                for (const [idStr, userIds] of likedByIdsMap) {
+                    if (likedSet.has(idStr) && !userIds.includes(userIdStr)) userIds.push(userIdStr);
+                }
+                const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
+                const likerProfiles = allLikerIds.length
+                    ? await User.find({ _id: { $in: allLikerIds } }, 'username fullName profileImageUrl').lean()
+                    : [];
+                const pMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
+                const me = await User.findById(currentUserId).select('following followers').lean();
+                const following = me?.following || [], followers = me?.followers || [];
+                const updatedReels = cachedData.reels.map(r => {
+                    const rid = r._id.toString();
+                    const likedByUsers = (likedByIdsMap.get(rid) || []).map(uid => pMap.get(uid)).filter(Boolean);
+                    const preview = getLikedByPreview(likedByUsers, currentUserId, following, followers);
+                    return {
+                        ...r,
+                        engagement: { ...(r.engagement || {}), likes: likeCountMap.get(rid) ?? r.engagement?.likes ?? 0, comments: commentCountMap.get(rid) ?? r.engagement?.comments ?? 0 },
+                        isLikedBy: likedSet.has(rid),
+                        likedBy: likedByUsers,
+                        likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+                    };
+                });
+                return res.status(200).json(new ApiResponse(200, { ...cachedData, reels: updatedReels }, "Reels fetched from cache"));
+            }
+            return res.status(200).json(new ApiResponse(200, cachedData, "Reels fetched from cache"));
         }
 
         // Build aggregation pipeline for comprehensive data
@@ -260,32 +292,10 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             }
         ];
 
-        // Add user-specific fields if currentUserId is available
+        // Add user-specific isFollowed via aggregation (isLikedBy handled via Redis below)
         if (currentUserId) {
-            // ✅ FIXED: Convert currentUserId to ObjectId for aggregation lookups
             const currentUserObjectId = new mongoose.Types.ObjectId(currentUserId);
 
-            pipeline.push({
-                $lookup: {
-                    from: "likes",
-                    let: { postId: "$_id", userId: currentUserObjectId },
-                    pipeline: [
-                        {
-                            $match: {
-                                $expr: {
-                                    $and: [
-                                        { $eq: ["$postId", "$$postId"] },
-                                        { $eq: ["$userId", "$$userId"] }
-                                    ]
-                                }
-                            }
-                        }
-                    ],
-                    as: "userLike"
-                }
-            });
-
-            // Add lookup for following relationship
             pipeline.push({
                 $lookup: {
                     from: "followings",
@@ -308,18 +318,11 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             pipeline.push({
                 $addFields: {
-                    isLikedBy: { $gt: [{ $size: "$userLike" }, 0] },
                     isFollowed: { $gt: [{ $size: "$userFollow" }, 0] }
                 }
             });
 
-            // Clean up temporary lookup fields
-            pipeline.push({
-                $project: {
-                    userLike: 0,
-                    userFollow: 0
-                }
-            });
+            pipeline.push({ $project: { userFollow: 0 } });
         }
 
         // Remove analytics field from all responses
@@ -396,64 +399,56 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             // Add subscription badges to reel authors
             reels = await addBadgesToNestedUsers(reels);
 
-            // ✅ Get all likes for reels with user details for "Liked by" preview
+            // Stitch engagement from Redis: isLikedBy, like counts, comment counts, likedBy list
             const reelIds = reels.map(reel => reel._id);
-            const allLikes = await Like.find({
-                postId: { $in: reelIds }
-            })
-            .populate('userId', 'username fullName profileImageUrl')
-            .select('postId userId')
-            .lean();
+            const [likedSet, likeCountMap, commentCountMap, likedByIdsMap] = await Promise.all([
+                currentUserId ? batchIsLikedByUser(currentUserId, reelIds) : Promise.resolve(new Set()),
+                batchGetLikesCount(reels),
+                batchGetCommentsCount(reels),
+                batchGetLikedByUserIds(reelIds),
+            ]);
 
-            // Group likes by reelId
-            const likesByReel = new Map();
-            allLikes.forEach(like => {
-                if (like.userId) { // Filter out likes from deleted users
-                    const reelId = like.postId.toString();
-                    if (!likesByReel.has(reelId)) {
-                        likesByReel.set(reelId, []);
-                    }
-                    likesByReel.get(reelId).push({
-                        _id: like.userId._id,
-                        username: like.userId.username,
-                        fullName: like.userId.fullName,
-                        profileImageUrl: like.userId.profileImageUrl
-                    });
-                }
-            });
-
-            // Get user's followers and following for "Liked by" preview
-            let userFollowing = [];
-            let userFollowers = [];
             if (currentUserId) {
-                const user = await User.findById(currentUserId)
-                    .select('following followers')
-                    .lean();
-                userFollowing = user?.following || [];
-                userFollowers = user?.followers || [];
+                const userIdStr = currentUserId.toString();
+                for (const [idStr, userIds] of likedByIdsMap) {
+                    if (likedSet.has(idStr) && !userIds.includes(userIdStr)) userIds.push(userIdStr);
+                }
             }
 
-            // Add "Liked by" preview to each reel
+            // Batch-fetch user profiles for all liker IDs
+            const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
+            const likerProfiles = allLikerIds.length
+                ? await User.find({ _id: { $in: allLikerIds } }, 'username fullName profileImageUrl').lean()
+                : [];
+            const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
+
+            // Get follower/following for likedByPreview
+            let userFollowing = [], userFollowers = [];
+            if (currentUserId) {
+                const me = await User.findById(currentUserId).select('following followers').lean();
+                userFollowing = me?.following || [];
+                userFollowers = me?.followers || [];
+            }
+
+            // Stitch all engagement into each reel
             reels = reels.map(reel => {
                 const reelIdStr = reel._id.toString();
-                const likedByUsers = likesByReel.get(reelIdStr) || [];
-
-                // Generate "Liked by" preview
-                const likedByPreview = getLikedByPreview(
-                    likedByUsers,
-                    currentUserId,
-                    userFollowing,
-                    userFollowers
-                );
-
+                const likedByUsers = (likedByIdsMap.get(reelIdStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
+                const likedByPreview = getLikedByPreview(likedByUsers, currentUserId, userFollowing, userFollowers);
                 return {
                     ...reel,
-                    likedBy: likedByUsers, // Include likedBy array for frontend fallback
+                    engagement: {
+                        ...(reel.engagement || {}),
+                        likes: likeCountMap.get(reelIdStr) ?? reel.engagement?.likes ?? 0,
+                        comments: commentCountMap.get(reelIdStr) ?? reel.engagement?.comments ?? 0,
+                    },
+                    isLikedBy: likedSet.has(reelIdStr),
+                    likedBy: likedByUsers,
                     likedByPreview: likedByPreview.likedByText ? {
                         text: likedByPreview.likedByText,
                         previewUser: likedByPreview.previewUser,
                         othersCount: likedByPreview.othersCount
-                    } : null
+                    } : null,
                 };
             });
         }
