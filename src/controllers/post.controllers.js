@@ -382,7 +382,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     if (!postOwner || postOwner.isDeleted || postOwner.accountStatus !== 'active') {
         throw new ApiError(404, "Post not found");
     }
-
+    const isFollowing=await getFollowStatus(currentUser?._id, post.userId?._id || post.userId); 
     // Get viewer's following/followers for privacy check
     let viewerFollowing = [];
     let viewerFollowers = [];
@@ -484,7 +484,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Add subscription badge to post author
     const [postWithBadge] = await addBadgesToNestedUsers([post]);
 
-    return res.status(200).json(new ApiResponse(200, postWithBadge, "Post fetched successfully"));
+    return res.status(200).json(new ApiResponse(200, { ...postWithBadge, isFollowing }, "Post fetched successfully"));
 });
 
 // Edit post
