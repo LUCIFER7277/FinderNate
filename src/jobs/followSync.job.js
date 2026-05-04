@@ -10,14 +10,14 @@ const BATCH_SIZE = 100;
 
 export function startFollowSyncJob() {
     // Every 4 hours: flush dirty follow/unfollow ops to DB
-    cron.schedule('0 */4 * * *', async () => {
-        console.log('[FollowSync] Starting follow sync...');
-        try {
-            await syncFollowsToDB();
-        } catch (err) {
-            console.error('[FollowSync] Job failed:', err);
-        }
-    });
+    // cron.schedule('0 */4 * * *', async () => {
+    //     console.log('[FollowSync] Starting follow sync...');
+    //     try {
+    //         await syncFollowsToDB();
+    //     } catch (err) {
+    //         console.error('[FollowSync] Job failed:', err);
+    //     }
+    // });
 
     // Every 4 hours at :30 — runs after syncFollowsToDB finishes writing to DB,
     // then immediately rebuilds Redis lists so they reflect the latest DB state.
