@@ -18,17 +18,19 @@ import {
 
 // Follow a user (with privacy support)
 export const followUser = asyncHandler(async (req, res) => {
-    const requesterId = req.user._id;
-    const { userId } = req.body; // userId to follow
+    try{
 
-    if (requesterId.toString() === userId) {
-        throw new ApiError(400, "You cannot follow yourself");
+        const requesterId = req.user._id;
+        const { userId } = req.body; // userId to follow
+        
+        if (requesterId.toString() === userId) {
+            throw new ApiError(400, "You cannot follow yourself");
     }
-
+    
     // Check follow status: Redis first ('1'/'0'), DB fallback on miss or Redis down
     const alreadyFollowing = await getFollowStatus(requesterId, userId);
     if (alreadyFollowing) throw new ApiError(400, "Already following");
-
+    
     // Check if there's ANY existing follow request (pending, rejected, or approved)
     const existingRequest = await FollowRequest.findOne({
         requesterId,
@@ -39,23 +41,23 @@ export const followUser = asyncHandler(async (req, res) => {
     if (existingRequest && existingRequest.status === 'pending') {
         throw new ApiError(400, "Follow request already sent");
     }
-
+    
     // Get the user to follow
     const targetUser = await User.findById(userId).select('username fullName profileImageUrl privacy');
     if (!targetUser) throw new ApiError(404, "User not found");
-
+    
     // If target user has public account, follow immediately
     if (targetUser.privacy === 'public') {
         // Delete any old follow request records (rejected or approved)
         if (existingRequest) {
             await FollowRequest.findByIdAndDelete(existingRequest._id);
         }
-
+        
         // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
         const result = await onUserFollowed(requesterId, userId);
-
+        
         let newFollowersCount, newFollowingCount;
-
+        
         if (!result.ok) {
             // Redis is down — write directly to DB and read fresh counts from DB.
             await Follower.create({ userId, followerId: requesterId });
@@ -71,12 +73,12 @@ export const followUser = asyncHandler(async (req, res) => {
             newFollowersCount = result.followersCount;
             newFollowingCount = result.followingCount;
         }
-
+        
         // Notification + cache invalidation fire-and-forget
-        createFollowNotification({ recipientId: userId, sourceUserId: requesterId }).catch(() => {});
-        invalidateViewableUsersCache(requesterId).catch(() => {});
-        invalidateViewableUsersCache(userId).catch(() => {});
-
+        createFollowNotification({ recipientId: userId, sourceUserId: requesterId })?.catch(() => {});
+        invalidateViewableUsersCache(requesterId)?.catch(() => {});
+        invalidateViewableUsersCache(userId)?.catch(() => {});
+        
         return res.status(200).json(new ApiResponse(200, {
             followedUser: {
                 _id: userId,
@@ -102,10 +104,10 @@ export const followUser = asyncHandler(async (req, res) => {
         // Create new follow request
         await FollowRequest.create({ requesterId, recipientId: userId });
     }
-
+    
     // Create notification for follow request
     await createFollowNotification({ recipientId: userId, sourceUserId: requesterId, isRequest: true });
-
+    
     res.status(200).json(new ApiResponse(200, {
         targetUser: {
             _id: userId,
@@ -117,24 +119,31 @@ export const followUser = asyncHandler(async (req, res) => {
         isPending: true,
         timestamp: new Date()
     }, "Follow request sent"));
+}
+catch(error){
+    console.log(error)
+    return res.status(error.statusCode || 500).json(new ApiResponse(error.statusCode || 500, null, error.message || "An error occurred"));
+}
 });
 
 // Unfollow a user or cancel follow request
 export const unfollowUser = asyncHandler(async (req, res) => {
-    const requesterId = req.user._id;
-    const { userId } = req.body; // userId to unfollow
+    try{
 
-    // Check follow status: Redis first, DB fallback on miss or Redis down
-    const isFollowing = await getFollowStatus(requesterId, userId);
-
-    if (isFollowing) {
+        const requesterId = req.user._id;
+        const { userId } = req.body; // userId to unfollow
+        
+        // Check follow status: Redis first, DB fallback on miss or Redis down
+        const isFollowing = await getFollowStatus(requesterId, userId);
+        
+        if (isFollowing) {
         // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
         const result = await onUserUnfollowed(requesterId, userId);
-
+        
         const unfollowedUser = await User.findById(userId).select('username fullName profileImageUrl');
 
         let newFollowersCount, newFollowingCount;
-
+        
         if (!result.ok) {
             // Redis is down — write directly to DB and read fresh counts from DB.
             await Follower.findOneAndDelete({ userId, followerId: requesterId });
@@ -150,11 +159,11 @@ export const unfollowUser = asyncHandler(async (req, res) => {
             newFollowersCount = result.followersCount;
             newFollowingCount = result.followingCount;
         }
-
+        
         // Cache invalidation fire-and-forget
         invalidateViewableUsersCache(requesterId).catch(() => {});
         invalidateViewableUsersCache(userId).catch(() => {});
-
+        
         return res.status(200).json(new ApiResponse(200, {
             unfollowedUser: {
                 _id: userId,
@@ -169,7 +178,7 @@ export const unfollowUser = asyncHandler(async (req, res) => {
             timestamp: new Date()
         }, "Unfollowed successfully"));
     }
-
+    
     // Check if there's a pending follow request to cancel
     const followRequest = await FollowRequest.findOneAndDelete({
         requesterId,
@@ -179,7 +188,7 @@ export const unfollowUser = asyncHandler(async (req, res) => {
 
     if (followRequest) {
         const targetUser = await User.findById(userId).select('username fullName profileImageUrl');
-
+        
         return res.status(200).json(new ApiResponse(200, {
             targetUser: {
                 _id: userId,
@@ -194,6 +203,11 @@ export const unfollowUser = asyncHandler(async (req, res) => {
     }
 
     throw new ApiError(400, "Not following this user and no pending request found");
+}
+catch(error){
+    console.log(error)
+    return res.status(error.statusCode || 500).json(new ApiResponse(error.statusCode || 500, null, error.message || "An error occurred"));
+}
 });
 
 // Get followers of a user (Redis-first, paginated)
