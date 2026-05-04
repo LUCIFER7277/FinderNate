@@ -21,7 +21,7 @@ import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.uti
 import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
 import { hasActivePaymentPlan } from "../utlis/businessPlan.utils.js";
 import Business from "../models/business.models.js";
-
+import { getFollowStatus } from '../utlis/followEngagement.utils.js';
 const extractMediaFiles = (files) => {
     const allFiles = [];
     ["image", "video", "reel", "story"].forEach((field) => {
@@ -375,7 +375,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     if (!postOwner || postOwner.isDeleted || postOwner.accountStatus !== 'active') {
         throw new ApiError(404, "Post not found");
     }
-
+    const isFollowing=await getFollowStatus(currentUser?._id, post.userId?._id || post.userId); 
     // Get viewer's following/followers for privacy check
     let viewerFollowing = [];
     let viewerFollowers = [];
@@ -436,7 +436,6 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Add likedBy array and isLikedBy flag to the post
     post.likedBy = likedByUsers;
     post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
-
     // Add "Liked by" preview
     if (currentUser) {
         const user = await User.findById(currentUser._id).select('following followers').lean();
@@ -460,7 +459,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Add subscription badge to post author
     const [postWithBadge] = await addBadgesToNestedUsers([post]);
 
-    return res.status(200).json(new ApiResponse(200, postWithBadge, "Post fetched successfully"));
+    return res.status(200).json(new ApiResponse(200, { ...postWithBadge, isFollowing }, "Post fetched successfully"));
 });
 
 // Edit post
