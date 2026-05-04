@@ -121,7 +121,7 @@ export const followUser = asyncHandler(async (req, res) => {
     }, "Follow request sent"));
 }
 catch(error){
-    console.log(error)
+    // console.log(error)
     return res.status(error.statusCode || 500).json(new ApiResponse(error.statusCode || 500, null, error.message || "An error occurred"));
 }
 });
@@ -205,7 +205,7 @@ export const unfollowUser = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Not following this user and no pending request found");
 }
 catch(error){
-    console.log(error)
+    // console.log(error)
     return res.status(error.statusCode || 500).json(new ApiResponse(error.statusCode || 500, null, error.message || "An error occurred"));
 }
 });
