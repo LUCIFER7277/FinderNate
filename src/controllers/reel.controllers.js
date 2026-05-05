@@ -9,6 +9,7 @@ import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
 import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
 import Like from "../models/like.models.js";
 import mongoose from "mongoose";
+import { getFollowStatus } from "../utlis/followEngagement.utils.js";
 
 
 // Simple in-memory cache
@@ -184,8 +185,8 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             // Add computed fields and enhance with Bunny.net details
             {
                 $addFields: {
-                    isLikedBy: false, // Will be updated based on user context
-                    isFollowed: false, // Will be updated based on user context
+                    isLikedBy: false,
+                    isFollowing: false,
 
                     // Enhanced media with Bunny.net details
                     media: {
@@ -285,31 +286,9 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                 }
             });
 
-            // Add lookup for following relationship
-            pipeline.push({
-                $lookup: {
-                    from: "followings",
-                    let: { postUserId: "$userId", currentUserId: currentUserObjectId },
-                    pipeline: [
-                        {
-                            $match: {
-                                $expr: {
-                                    $and: [
-                                        { $eq: ["$userId", "$$currentUserId"] },
-                                        { $eq: ["$followingId", "$$postUserId"] }
-                                    ]
-                                }
-                            }
-                        }
-                    ],
-                    as: "userFollow"
-                }
-            });
-
             pipeline.push({
                 $addFields: {
                     isLikedBy: { $gt: [{ $size: "$userLike" }, 0] },
-                    isFollowed: { $gt: [{ $size: "$userFollow" }, 0] }
                 }
             });
 
@@ -317,7 +296,6 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             pipeline.push({
                 $project: {
                     userLike: 0,
-                    userFollow: 0
                 }
             });
         }
@@ -456,6 +434,16 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                     } : null
                 };
             });
+
+            // Enrich isFollowing from Redis using existing getFollowStatus
+            if (currentUserId) {
+                await Promise.all(reels.map(async (reel) => {
+                    const authorId = reel.userId?._id || reel.userId;
+                    if (authorId) {
+                        reel.isFollowing = await getFollowStatus(currentUserId, authorId);
+                    }
+                }));
+            }
         }
 
         // Get total count for pagination
