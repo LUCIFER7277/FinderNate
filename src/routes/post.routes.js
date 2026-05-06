@@ -19,7 +19,7 @@ import {
     togglePostPrivacy,
 } from "../controllers/post.controllers.js";
 import { getHomeFeed } from "../controllers/homeFeed.controllers.js";
-import { likePost, unlikePost, likeComment, unlikeComment } from "../controllers/like.controllers.js";
+import { likePost, unlikePost, likeComment, unlikeComment, getLikedByUsers } from "../controllers/like.controllers.js";
 import { createComment, getCommentsByPost, getCommentById, updateComment, deleteComment } from "../controllers/comment.controllers.js";
 import { getNotifications, markNotificationAsRead, markAllNotificationsAsRead, deleteNotification } from "../controllers/notification.controllers.js";
 import { getProfileTabContent } from "../controllers/switch.controllers.js";
@@ -102,6 +102,9 @@ router.route("/:postId/privacy").put(verifyJWT, togglePostPrivacy);
 
 // Online store — public, no auth required (must be before /:postId catch-all)
 router.route("/online-store/products").get(getOnlineStoreProducts);
+
+// Liked-by users list (must be before /:postId catch-all)
+router.route("/liked-by").get(optionalVerifyJWT, getLikedByUsers);
 
 // Common API - handles get and delete for posts, stories, and reels
 router.route("/:postId").get(verifyJWT, getPostById).delete(verifyJWT, deleteContent);

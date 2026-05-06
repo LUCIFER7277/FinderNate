@@ -5,7 +5,9 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
 import { createFollowNotification } from "./notification.controllers.js";
-import { redisClient, RedisKeys, FOLLOW_LIST_MAX } from "../config/redis.config.js";
+import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from "../config/redis.config.js";
+
+const LIST_TTL = RedisTTL.FOLLOW_LIST;
 import { addBadgesToUsers } from "../utils/userBadge.utils.js";
 import { invalidateViewableUsersCache } from "../middlewares/privacy.middleware.js";
 import {
@@ -53,25 +55,20 @@ export const followUser = asyncHandler(async (req, res) => {
             await FollowRequest.findByIdAndDelete(existingRequest._id);
         }
         
-        // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
+        // Write-through: DB + Redis in onUserFollowed
         const result = await onUserFollowed(requesterId, userId);
-        
-        let newFollowersCount, newFollowingCount;
-        
+
+        let newFollowersCount = result.followersCount ?? null;
+        let newFollowingCount = result.followingCount ?? null;
+
         if (!result.ok) {
-            // Redis is down — write directly to DB and read fresh counts from DB.
-            await Follower.create({ userId, followerId: requesterId });
-            await User.findByIdAndUpdate(userId, { $addToSet: { followers: requesterId } });
-            await User.findByIdAndUpdate(requesterId, { $addToSet: { following: userId } });
+            // DB write inside onUserFollowed already failed — read fresh counts
             try {
                 [newFollowersCount, newFollowingCount] = await Promise.all([
                     Follower.countDocuments({ userId }),
                     Follower.countDocuments({ followerId: requesterId }),
                 ]);
-            } catch { /* counts remain undefined → null in response */ }
-        } else {
-            newFollowersCount = result.followersCount;
-            newFollowingCount = result.followingCount;
+            } catch { /* counts remain null in response */ }
         }
         
         // Notification + cache invalidation fire-and-forget
@@ -137,27 +134,22 @@ export const unfollowUser = asyncHandler(async (req, res) => {
         const isFollowing = await getFollowStatus(requesterId, userId);
         
         if (isFollowing) {
-        // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
+        // Write-through: DB + Redis in onUserUnfollowed
         const result = await onUserUnfollowed(requesterId, userId);
-        
+
         const unfollowedUser = await User.findById(userId).select('username fullName profileImageUrl');
 
-        let newFollowersCount, newFollowingCount;
-        
+        let newFollowersCount = result.followersCount ?? null;
+        let newFollowingCount = result.followingCount ?? null;
+
         if (!result.ok) {
-            // Redis is down — write directly to DB and read fresh counts from DB.
-            await Follower.findOneAndDelete({ userId, followerId: requesterId });
-            await User.findByIdAndUpdate(userId, { $pull: { followers: requesterId } });
-            await User.findByIdAndUpdate(requesterId, { $pull: { following: userId } });
+            // DB delete inside onUserUnfollowed already failed — read fresh counts
             try {
                 [newFollowersCount, newFollowingCount] = await Promise.all([
                     Follower.countDocuments({ userId }),
                     Follower.countDocuments({ followerId: requesterId }),
                 ]);
-            } catch { /* counts remain undefined → null in response */ }
-        } else {
-            newFollowersCount = result.followersCount;
-            newFollowingCount = result.followingCount;
+            } catch { /* counts remain null */ }
         }
         
         // Cache invalidation fire-and-forget
@@ -216,20 +208,34 @@ export const getFollowers = asyncHandler(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
 
-    // ── Total count from Redis (falls back to DB automatically) ──────────────
+    // ── Total count ───────────────────────────────────────────────────────────
     const totalCount = await getFollowersCount(userId);
 
-    // ── Build the unified cached ID list: temp SET union LIST, newest-first ──
+    // ── Cached IDs from Sorted Set (ZREVRANGE = newest-first) ────────────────
+    const followersZSetKey = RedisKeys.userFollowers(userId);
     let cachedIds = [];
     try {
-        const [tempIds, listIds] = await Promise.all([
-            redisClient.smembers(RedisKeys.followersTemp(userId)),
-            redisClient.lrange(RedisKeys.userFollowers(userId), 0, FOLLOW_LIST_MAX - 1),
-        ]);
-        // Temp IDs first (most recent, not yet in DB), then list IDs, deduped
-        const seen = new Set();
-        for (const id of [...tempIds, ...listIds]) {
-            if (!seen.has(id)) { seen.add(id); cachedIds.push(id); }
+        const exists = await redisClient.exists(followersZSetKey);
+        if (exists) {
+            cachedIds = await redisClient.zrevrange(followersZSetKey, 0, FOLLOW_LIST_MAX - 1);
+        } else {
+            // Sorted Set expired — reseed from DB
+            const dbTop = await Follower.find({ userId })
+                .sort({ createdAt: -1 })
+                .limit(FOLLOW_LIST_MAX)
+                .select('followerId createdAt')
+                .lean();
+            if (dbTop.length) {
+                const pipeline = redisClient.pipeline();
+                dbTop.forEach(f => pipeline.zadd(
+                    followersZSetKey,
+                    new Date(f.createdAt).getTime(),
+                    f.followerId.toString()
+                ));
+                pipeline.expire(followersZSetKey, LIST_TTL);
+                await pipeline.exec();
+                cachedIds = dbTop.map(f => f.followerId.toString());
+            }
         }
     } catch {
         cachedIds = [];
@@ -238,23 +244,18 @@ export const getFollowers = asyncHandler(async (req, res) => {
     let followerUsers = [];
 
     if (page === 1) {
-        // Page 1: serve up to `limit` from cached IDs first, then fill from DB
         const cachedSlice = cachedIds.slice(0, limit);
-        const fromCacheCount = cachedSlice.length;
-        const remainderNeeded = limit - fromCacheCount;
+        const remainderNeeded = limit - cachedSlice.length;
 
-        // Fetch cached users from User collection (preserves newest-first order)
         let cachedUsers = [];
-        if (cachedSlice.length > 0) {
+        if (cachedSlice.length) {
             const userDocs = await User.find({ _id: { $in: cachedSlice } })
                 .select('username profileImageUrl fullName isVerified bio isBusinessProfile')
                 .lean();
-            // Re-sort to match cachedSlice order
             const userMap = new Map(userDocs.map(u => [u._id.toString(), u]));
             cachedUsers = cachedSlice.map(id => userMap.get(id)).filter(Boolean);
         }
 
-        // Fill remainder from DB, excluding all cached IDs
         let dbUsers = [];
         if (remainderNeeded > 0) {
             const dbFollowers = await Follower.find({
@@ -270,10 +271,8 @@ export const getFollowers = asyncHandler(async (req, res) => {
 
         followerUsers = [...cachedUsers, ...dbUsers];
     } else {
-        // Page 2+: all from DB, skip records already shown on page 1, exclude cached IDs
         const page1Shown = Math.min(cachedIds.length, limit);
-        const dbAlreadyShownOnPage1 = limit - page1Shown; // how many DB records page 1 consumed
-        const dbSkip = dbAlreadyShownOnPage1 + (page - 2) * limit;
+        const dbSkip = (limit - page1Shown) + (page - 2) * limit;
 
         const dbFollowers = await Follower.find({
             userId,
@@ -306,19 +305,34 @@ export const getFollowing = asyncHandler(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
 
-    // ── Total count from Redis (falls back to DB automatically) ──────────────
+    // ── Total count ───────────────────────────────────────────────────────────
     const totalCount = await getFollowingCount(userId);
 
-    // ── Build the unified cached ID list: temp SET union LIST, newest-first ──
+    // ── Cached IDs from Sorted Set ────────────────────────────────────────────
+    const followingZSetKey = RedisKeys.userFollowing(userId);
     let cachedIds = [];
     try {
-        const [tempIds, listIds] = await Promise.all([
-            redisClient.smembers(RedisKeys.followingTemp(userId)),
-            redisClient.lrange(RedisKeys.userFollowing(userId), 0, FOLLOW_LIST_MAX - 1),
-        ]);
-        const seen = new Set();
-        for (const id of [...tempIds, ...listIds]) {
-            if (!seen.has(id)) { seen.add(id); cachedIds.push(id); }
+        const exists = await redisClient.exists(followingZSetKey);
+        if (exists) {
+            cachedIds = await redisClient.zrevrange(followingZSetKey, 0, FOLLOW_LIST_MAX - 1);
+        } else {
+            // Sorted Set expired — reseed from DB
+            const dbTop = await Follower.find({ followerId: userId })
+                .sort({ createdAt: -1 })
+                .limit(FOLLOW_LIST_MAX)
+                .select('userId createdAt')
+                .lean();
+            if (dbTop.length) {
+                const pipeline = redisClient.pipeline();
+                dbTop.forEach(f => pipeline.zadd(
+                    followingZSetKey,
+                    new Date(f.createdAt).getTime(),
+                    f.userId.toString()
+                ));
+                pipeline.expire(followingZSetKey, LIST_TTL);
+                await pipeline.exec();
+                cachedIds = dbTop.map(f => f.userId.toString());
+            }
         }
     } catch {
         cachedIds = [];
@@ -328,12 +342,10 @@ export const getFollowing = asyncHandler(async (req, res) => {
 
     if (page === 1) {
         const cachedSlice = cachedIds.slice(0, limit);
-        const fromCacheCount = cachedSlice.length;
-        const remainderNeeded = limit - fromCacheCount;
+        const remainderNeeded = limit - cachedSlice.length;
 
-        // Fetch cached users from User collection
         let cachedUsers = [];
-        if (cachedSlice.length > 0) {
+        if (cachedSlice.length) {
             const userDocs = await User.find({ _id: { $in: cachedSlice } })
                 .select('username profileImageUrl fullName isVerified bio isBusinessProfile')
                 .lean();
@@ -341,7 +353,6 @@ export const getFollowing = asyncHandler(async (req, res) => {
             cachedUsers = cachedSlice.map(id => userMap.get(id)).filter(Boolean);
         }
 
-        // Fill remainder from DB — for following, the Follower record has followerId=userId
         let dbUsers = [];
         if (remainderNeeded > 0) {
             const dbFollowing = await Follower.find({
@@ -358,8 +369,7 @@ export const getFollowing = asyncHandler(async (req, res) => {
         followingUsers = [...cachedUsers, ...dbUsers];
     } else {
         const page1Shown = Math.min(cachedIds.length, limit);
-        const dbAlreadyShownOnPage1 = limit - page1Shown;
-        const dbSkip = dbAlreadyShownOnPage1 + (page - 2) * limit;
+        const dbSkip = (limit - page1Shown) + (page - 2) * limit;
 
         const dbFollowing = await Follower.find({
             followerId: userId,
@@ -402,16 +412,8 @@ export const approveFollowRequest = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Follow request not found");
     }
 
-    // All Redis ops (lists, sets, counts) happen atomically in one pipeline.
-    // requesterId is now following recipientId.
-    const result = await onUserFollowed(requesterId, recipientId);
-
-    if (!result.ok) {
-        // Redis is down — fall back to direct DB write.
-        await Follower.create({ userId: recipientId, followerId: requesterId });
-        await User.findByIdAndUpdate(recipientId, { $addToSet: { followers: requesterId } });
-        await User.findByIdAndUpdate(requesterId, { $addToSet: { following: recipientId } });
-    }
+    // Write-through: DB + Redis in onUserFollowed
+    await onUserFollowed(requesterId, recipientId);
 
     // Create notification for approval
     await createFollowNotification({ recipientId: requesterId, sourceUserId: recipientId, isApproval: true });

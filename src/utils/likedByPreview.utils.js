@@ -34,7 +34,7 @@ const getLikedByPreview = (likedByUsers, currentUserId, userFollowing = [], user
 
   // First, try to find a follower/following who liked the post
   const connectionWhoLiked = likedByUsers.find(user =>
-    connectionIds.has(user._id.toString())
+    user._id != null && connectionIds.has(user._id.toString())
   );
 
   if (connectionWhoLiked) {

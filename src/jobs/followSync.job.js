@@ -2,25 +2,10 @@ import cron from 'node-cron';
 import mongoose from 'mongoose';
 import { redisClient, RedisKeys } from '../config/redis.config.js';
 import Follower from '../models/follower.models.js';
-import { User } from '../models/user.models.js';
-
-const DIRTY_KEY = RedisKeys.followsDirty();
-const SYNCING_KEY = 'fn:follows:syncing';
-const BATCH_SIZE = 100;
 
 export function startFollowSyncJob() {
-    // Every 4 hours: flush dirty follow/unfollow ops to DB
-    // cron.schedule('0 */4 * * *', async () => {
-    //     console.log('[FollowSync] Starting follow sync...');
-    //     try {
-    //         await syncFollowsToDB();
-    //     } catch (err) {
-    //         console.error('[FollowSync] Job failed:', err);
-    //     }
-    // });
-
-    // Every 4 hours at :30 — runs after syncFollowsToDB finishes writing to DB,
-    // then immediately rebuilds Redis lists so they reflect the latest DB state.
+    // Every 4 hours at :30 — flush followers:temp/following:temp SETs to DB,
+    // then rebuild Redis follower/following LISTs from the updated DB state.
     cron.schedule('30 */4 * * *', async () => {
         console.log('[FollowSync] Starting temp flush + Redis list refresh...');
         try {
@@ -30,114 +15,6 @@ export function startFollowSyncJob() {
             console.error('[FollowSync] Flush+refresh failed:', err);
         }
     });
-}
-
-async function syncFollowsToDB() {
-    // Atomically hand off the dirty set so new follow/unfollow ops land in a fresh key
-    try {
-        await redisClient.rename(DIRTY_KEY, SYNCING_KEY);
-    } catch (err) {
-        if (err.message.includes('no such key') || err.message.includes('ERR no such key')) {
-            console.log('[FollowSync] Nothing to sync');
-            return;
-        }
-        throw err;
-    }
-
-    const toFollow = [];   // { followerId, targetUserId }
-    const toUnfollow = []; // { followerId, targetUserId }
-    // Deduplicate across SSCAN cursor positions
-    const seen = new Set();
-    let cursor = '0';
-
-    do {
-        const [nextCursor, members] = await redisClient.sscan(SYNCING_KEY, cursor, 'COUNT', BATCH_SIZE);
-        cursor = nextCursor;
-        if (!members.length) continue;
-
-        const unique = members.filter(pair => !seen.has(pair));
-        unique.forEach(pair => seen.add(pair));
-        if (!unique.length) continue;
-
-        const keys = unique.map(pair => {
-            const [fid, tid] = pair.split(':');
-            return RedisKeys.userFollowStatus(fid, tid);
-        });
-        const statuses = await redisClient.mget(...keys);
-
-        unique.forEach((pair, i) => {
-            const [followerId, targetUserId] = pair.split(':');
-            const status = statuses[i];
-            if (status === null) return; // TTL expired before sync — DB is already authoritative, skip
-            if (status === '1') toFollow.push({ followerId, targetUserId });
-            else toUnfollow.push({ followerId, targetUserId });
-        });
-    } while (cursor !== '0');
-
-    // Upsert Follower documents for new follows
-    if (toFollow.length) {
-        const followerOps = toFollow.map(({ followerId, targetUserId }) => ({
-            updateOne: {
-                filter: {
-                    userId: new mongoose.Types.ObjectId(targetUserId),
-                    followerId: new mongoose.Types.ObjectId(followerId),
-                },
-                update: {
-                    $setOnInsert: {
-                        userId: new mongoose.Types.ObjectId(targetUserId),
-                        followerId: new mongoose.Types.ObjectId(followerId),
-                    },
-                },
-                upsert: true,
-            },
-        }));
-        await Follower.bulkWrite(followerOps, { ordered: false });
-
-        // Update User.followers[] and User.following[] arrays for follows
-        const userOps = [];
-        for (const { followerId, targetUserId } of toFollow) {
-            userOps.push({
-                updateOne: {
-                    filter: { _id: new mongoose.Types.ObjectId(targetUserId) },
-                    update: { $addToSet: { followers: new mongoose.Types.ObjectId(followerId) } },
-                },
-            });
-            userOps.push({
-                updateOne: {
-                    filter: { _id: new mongoose.Types.ObjectId(followerId) },
-                    update: { $addToSet: { following: new mongoose.Types.ObjectId(targetUserId) } },
-                },
-            });
-        }
-        if (userOps.length) await User.bulkWrite(userOps, { ordered: false });
-    }
-
-    // Follower documents are deleted synchronously on unfollow (in onUserUnfollowed).
-    // Only User.followers[]/following[] arrays need to be cleaned up here.
-    if (toUnfollow.length) {
-        const userOps = [];
-        for (const { followerId, targetUserId } of toUnfollow) {
-            userOps.push({
-                updateOne: {
-                    filter: { _id: new mongoose.Types.ObjectId(targetUserId) },
-                    update: { $pull: { followers: new mongoose.Types.ObjectId(followerId) } },
-                },
-            });
-            userOps.push({
-                updateOne: {
-                    filter: { _id: new mongoose.Types.ObjectId(followerId) },
-                    update: { $pull: { following: new mongoose.Types.ObjectId(targetUserId) } },
-                },
-            });
-        }
-        if (userOps.length) await User.bulkWrite(userOps, { ordered: false });
-    }
-
-    await redisClient.del(SYNCING_KEY);
-
-    console.log(
-        `[FollowSync] Done — followed ${toFollow.length}, unfollowed ${toUnfollow.length}`
-    );
 }
 
 /**
