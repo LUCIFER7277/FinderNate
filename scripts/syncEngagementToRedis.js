@@ -1,4 +1,4 @@
-\/**
+/**
  * Sync script: writes per-post like counts and comment counts from DB → Redis.
  *
  * Run manually:  node src/scripts/syncEngagementToRedis.js
