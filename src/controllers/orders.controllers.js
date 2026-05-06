@@ -1,14 +1,14 @@
 import mongoose from "mongoose";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
 import Notification from "../models/notification.models.js";
 import Message from "../models/message.models.js";
 import Chat from "../models/chat.models.js";
 import socketManager from "../config/socket.js";
-import notificationCache from "../utlis/notificationCache.utils.js";
+import notificationCache from "../utils/notificationCache.utils.js";
 
 const safeEmitToChat = (chatId, event, data) => {
     if (socketManager.isReady()) {

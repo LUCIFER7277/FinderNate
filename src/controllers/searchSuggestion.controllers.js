@@ -3,9 +3,9 @@ import { User } from '../models/user.models.js';
 import Post from '../models/userPost.models.js';
 import Reel from '../models/reels.models.js';
 import Business from '../models/business.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 
 /**
  * Enhanced search suggestions that always include user profiles with their posts, reels, and business information

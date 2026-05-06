@@ -1,19 +1,19 @@
 import Chat from '../models/chat.models.js';
 import Message from '../models/message.models.js';
 import Follower from '../models/follower.models.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { uploadBufferToBunny } from '../utlis/bunny.js';
+import { ApiError } from '../utils/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { uploadBufferToBunny } from '../utils/bunny.js';
 import mongoose from 'mongoose';
 import socketManager from '../config/socket.js';
 import { sendPushNotification } from './pushNotification.controllers.js';
 import { User } from '../models/user.models.js';
-import { ChatPubSub, NotificationPubSub, LiveFeaturesPubSub } from '../utlis/pubsub.utils.js';
-import notificationCache from '../utlis/notificationCache.utils.js';
+import { ChatPubSub, NotificationPubSub, LiveFeaturesPubSub } from '../utils/pubsub.utils.js';
+import notificationCache from '../utils/notificationCache.utils.js';
 import { redisClient } from '../config/redis.config.js';
 import { getPrivacyFilteredStatus } from '../middlewares/messaging-privacy.middleware.js';
-import { calculateMessageStatus } from '../utlis/messageStatus.utils.js';
+import { calculateMessageStatus } from '../utils/messageStatus.utils.js';
 
 // Helper function to safely emit socket events
 const safeEmitToChat = (chatId, event, data) => {

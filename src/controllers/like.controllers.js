@@ -1,12 +1,12 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Like from "../models/like.models.js";
 import Post from "../models/userPost.models.js";
 import Comment from "../models/comment.models.js";
 import { createLikeNotification, createUnlikeNotification } from "./notification.controllers.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
-import { onPostLiked, onPostUnliked } from "../utlis/postEngagement.utils.js";
+import { onPostLiked, onPostUnliked } from "../utils/postEngagement.utils.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 

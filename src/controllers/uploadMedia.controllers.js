@@ -1,8 +1,8 @@
 // Cloudinary import removed - now using Bunny.net
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { uploadBufferToBunny } from "../utlis/bunny.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { uploadBufferToBunny } from "../utils/bunny.js";
 import { User } from "../models/user.models.js";
 
 // Upload single media file (image or video)
@@ -177,7 +177,7 @@ const deleteMedia = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { deleteFromBunny } = await import("../utlis/bunny.js");
+        const { deleteFromBunny } = await import("../utils/bunny.js");
         const result = await deleteFromBunny(url);
 
         if (result.success) {
@@ -216,7 +216,7 @@ const deleteMultipleMedia = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { deleteMultipleFromBunny } = await import("../utlis/bunny.js");
+        const { deleteMultipleFromBunny } = await import("../utils/bunny.js");
         const deletionResult = await deleteMultipleFromBunny(urls);
 
         const results = deletionResult.results.map(result => ({
@@ -261,7 +261,7 @@ const getMediaInfo = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { isBunnyUrl } = await import("../utlis/bunny.js");
+        const { isBunnyUrl } = await import("../utils/bunny.js");
 
         if (!isBunnyUrl(url)) {
             throw new ApiError(400, "Invalid Bunny.net URL");

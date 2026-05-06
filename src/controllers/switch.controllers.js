@@ -1,10 +1,10 @@
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import TaggedUser from "../models/taggedUser.models.js";
 import Like from "../models/like.models.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 
 const allowedTabs = ["photos", "reels", "videos", "tagged", "stories"];
 const postProjection = {

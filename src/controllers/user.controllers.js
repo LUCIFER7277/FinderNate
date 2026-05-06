@@ -1,14 +1,14 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.models.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
-import { sendEmail } from "../utlis/sendEmail.js"
+import { sendEmail } from "../utils/sendEmail.js"
 import { TempUser } from "../models/tempUser.models.js";
 import { AuthOtp } from "../models/authOtp.models.js";
-import { sendSms } from "../utlis/sendSms.js";
+import { sendSms } from "../utils/sendSms.js";
 import bcrypt from "bcrypt";
-import { uploadBufferToBunny } from "../utlis/bunny.js";
+import { uploadBufferToBunny } from "../utils/bunny.js";
 import { setCache } from "../middlewares/cache.middleware.js";
 import Follower from "../models/follower.models.js";
 import Post from "../models/userPost.models.js";
@@ -39,14 +39,14 @@ import Report from "../models/report.models.js";
 import Following from "../models/following.models.js";
 import FollowRequest from "../models/followRequest.models.js";
 import ContactRequest from "../models/contactRequest.models.js";
-import { getFollowStatus } from "../utlis/followEngagement.utils.js";
+import { getFollowStatus } from "../utils/followEngagement.utils.js";
 import {
     generateRealtimeUsernameSuggestions,
     isUsernameAvailable,
     validateUsername
-} from "../utlis/usernameSuggestions.js";
+} from "../utils/usernameSuggestions.js";
 import { invalidateBlockedUsersCache } from "../middlewares/blocking.middleware.js";
-import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { addBadgesToUsers } from "../utils/userBadge.utils.js";
 
 
 
@@ -443,8 +443,8 @@ const getUserProfile = asyncHandler(async (req, res) => {
     const userIdStr = userId.toString();
 
     const { RedisKeys, RedisTTL } = await import('../config/redis.config.js');
-    const { CacheManager } = await import('../utlis/cache.utils.js');
-    const { getFollowersCount, getFollowingCount } = await import('../utlis/followEngagement.utils.js');
+    const { CacheManager } = await import('../utils/cache.utils.js');
+    const { getFollowersCount, getFollowingCount } = await import('../utils/followEngagement.utils.js');
 
     const profileCacheKey = RedisKeys.userProfile(userIdStr);
 
@@ -604,7 +604,7 @@ const updateUserProfile = asyncHandler(async (req, res) => {
     await invalidateAuthCache(req.user._id);
 
     // Also invalidate user profile cache
-    const { UserCacheManager } = await import('../utlis/cache.utils.js');
+    const { UserCacheManager } = await import('../utils/cache.utils.js');
     await UserCacheManager.invalidateUserProfile(req.user._id);
 
     return res
@@ -668,7 +668,7 @@ const deleteAccount = asyncHandler(async (req, res) => {
         for (const media of userMedia) {
             try {
                 // Delete media from Bunny.net using full URL
-                const { deleteFromBunny } = await import("../utlis/bunny.js");
+                const { deleteFromBunny } = await import("../utils/bunny.js");
                 await deleteFromBunny(media.url);
                 mediaCleanup.deleted++;
             } catch (err) {
@@ -1333,7 +1333,7 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     });
 
     // Calculate counts — Redis-first with DB fallback
-    const { getFollowersCount, getFollowingCount } = await import('../utlis/followEngagement.utils.js');
+    const { getFollowersCount, getFollowingCount } = await import('../utils/followEngagement.utils.js');
     const targetIdStr = targetUser._id.toString();
     const [followersCount, followingCount, postsCount] = await Promise.all([
         getFollowersCount(targetIdStr),
@@ -1847,7 +1847,7 @@ const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
         await invalidateAuthCache(userId);
 
         // Also invalidate user profile cache and feeds
-        const { UserCacheManager, FeedCacheManager } = await import('../utlis/cache.utils.js');
+        const { UserCacheManager, FeedCacheManager } = await import('../utils/cache.utils.js');
         await UserCacheManager.invalidateUserProfile(userId);
         await FeedCacheManager.invalidateUserFeed(userId);
 

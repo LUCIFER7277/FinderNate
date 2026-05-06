@@ -1,6 +1,6 @@
-import { ApiError } from '../utlis/ApiError.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { ApiError } from '../utils/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import streamService from '../config/stream.config.js';
 
 /**

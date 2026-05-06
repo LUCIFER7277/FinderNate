@@ -2,10 +2,10 @@ import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
 import Post from "../models/userPost.models.js";
 import BusinessRating from "../models/businessRating.models.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { getCoordinates } from "../utlis/getCoordinates.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { getCoordinates } from "../utils/getCoordinates.js";
 import mongoose from "mongoose";
 
 // Predefined business categories
@@ -1268,7 +1268,7 @@ export const uploadVerificationDocument = asyncHandler(async (req, res) => {
     }
 
     // Import upload service
-    const { uploadBufferToBunny } = await import('../utlis/bunny.js');
+    const { uploadBufferToBunny } = await import('../utils/bunny.js');
 
     // Determine folder and filename
     const folder = 'documents';
@@ -1407,7 +1407,7 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
     let paymentQRCodeUrl = business.bankDetails?.paymentQRCode; // Keep existing QR code by default
     if (req.file) {
         // Import upload service
-        const { uploadBufferToBunny } = await import('../utlis/bunny.js');
+        const { uploadBufferToBunny } = await import('../utils/bunny.js');
 
         // Validate file type (only images)
         const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];

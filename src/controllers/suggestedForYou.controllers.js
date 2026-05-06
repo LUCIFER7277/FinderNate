@@ -1,12 +1,12 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.models.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Like from "../models/like.models.js";
 import Comment from "../models/comment.models.js";
 import Follower from "../models/follower.models.js";
 import mongoose from "mongoose";
-import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { addBadgesToUsers } from "../utils/userBadge.utils.js";
 
 // Constants for scoring
 const LIKE_SCORE = 3;

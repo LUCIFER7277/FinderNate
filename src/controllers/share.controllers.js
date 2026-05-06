@@ -1,19 +1,19 @@
 import mongoose from "mongoose";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
 import Comment from "../models/comment.models.js";
 import PostInteraction from "../models/postInteraction.models.js";
 import Follower from "../models/follower.models.js";
-import { canViewPost } from "../utlis/postPrivacy.js";
+import { canViewPost } from "../utils/postPrivacy.js";
 import {
   canSharePost,
   generatePreviewHTML,
   sanitizePostForGuest,
   generateErrorHTML,
-} from "../utlis/shareUtils.js";
+} from "../utils/shareUtils.js";
 import { redisClient } from "../config/redis.config.js";
 
 /**
