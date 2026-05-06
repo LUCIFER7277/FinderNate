@@ -16,23 +16,19 @@ const PREVIEW_LIMIT = 20;
 // Lua scripts for atomic like / unlike
 // ---------------------------------------------------------------------------
 
-// KEYS: [countKey, userLikedKey, likedByKey, dirtyKey]
-// ARGV: [postId, userId, userDataJSON, engTTL, likeTTL, dirtyEntry]
+// KEYS: [countKey, userLikedSetKey, likedByKey]
+// ARGV: [postId, userId, userDataJSON, engTTL, likeTTL]
 const LIKE_LUA = `
 local countKey   = KEYS[1]
-local userHash   = KEYS[2]
+local userSetKey = KEYS[2]
 local likedByKey = KEYS[3]
-local dirtyKey   = KEYS[4]
 local postId     = ARGV[1]
 local userId     = ARGV[2]
 local userData   = ARGV[3]
 local engTTL     = tonumber(ARGV[4])
 local likeTTL    = tonumber(ARGV[5])
-local dirty      = ARGV[6]
-redis.call('hset', userHash, postId, '1')
-redis.call('expire', userHash, likeTTL)
-redis.call('sadd', dirtyKey, dirty)
-redis.call('expire', dirtyKey, 90000)
+redis.call('sadd', userSetKey, postId)
+redis.call('expire', userSetKey, likeTTL)
 if redis.call('exists', countKey) == 1 then
   redis.call('incr', countKey)
   redis.call('expire', countKey, engTTL)
@@ -42,22 +38,18 @@ redis.call('expire', likedByKey, engTTL)
 return 1
 `;
 
-// KEYS: [countKey, userLikedKey, likedByKey, dirtyKey]
-// ARGV: [postId, userId, engTTL, likeTTL, dirtyEntry]
+// KEYS: [countKey, userLikedSetKey, likedByKey]
+// ARGV: [postId, userId, engTTL, likeTTL]
 const UNLIKE_LUA = `
 local countKey   = KEYS[1]
-local userHash   = KEYS[2]
+local userSetKey = KEYS[2]
 local likedByKey = KEYS[3]
-local dirtyKey   = KEYS[4]
 local postId     = ARGV[1]
 local userId     = ARGV[2]
 local engTTL     = tonumber(ARGV[3])
 local likeTTL    = tonumber(ARGV[4])
-local dirty      = ARGV[5]
-redis.call('hset', userHash, postId, '0')
-redis.call('expire', userHash, likeTTL)
-redis.call('sadd', dirtyKey, dirty)
-redis.call('expire', dirtyKey, 90000)
+redis.call('srem', userSetKey, postId)
+redis.call('expire', userSetKey, likeTTL)
 if redis.call('exists', countKey) == 1 then
   local c = redis.call('decr', countKey)
   if c < 0 then redis.call('set', countKey, '0') end
@@ -68,14 +60,15 @@ return 1
 `;
 
 // ---------------------------------------------------------------------------
-// batchIsLikedByUser — Hash-based (fn:user:{userId}:liked)
+// batchIsLikedByUser — Set-based (fn:user:{userId}:liked)
 // ---------------------------------------------------------------------------
 
 /**
  * Batch-check whether the current user has liked each post.
  *
- * Uses per-user Hash `fn:user:{userId}:liked` (field=postId, value='1'/'0').
- * On cache miss falls back to DB and seeds the Hash.
+ * Uses per-user Set `fn:user:{userId}:liked` (members = liked postIds).
+ * Key exists → pipeline SISMEMBER (authoritative, no DB needed).
+ * Key missing → full DB seed then check.
  *
  * Returns a Set of postId strings the user has liked.
  */
@@ -84,36 +77,34 @@ export async function batchIsLikedByUser(userId, postIds) {
 
     const userIdStr = userId.toString();
     const idStrs = [...new Set(postIds.map(id => id.toString()))];
-    const userHashKey = RedisKeys.userLikedHash(userIdStr);
+    const userSetKey = RedisKeys.userLikedSet(userIdStr);
 
     try {
-        const values = await redisClient.hmget(userHashKey, ...idStrs);
+        const exists = await redisClient.exists(userSetKey);
 
-        const liked = new Set();
-        const unknownIds = [];
-
-        values.forEach((val, i) => {
-            if (val === '1') liked.add(idStrs[i]);
-            else if (val === null) unknownIds.push(idStrs[i]);
-            // val === '0' → confirmed not liked
-        });
-
-        if (unknownIds.length > 0) {
-            const dbLikes = await Like.find({ userId, postId: { $in: unknownIds } }).select('postId').lean();
-            const dbLikedSet = new Set(dbLikes.map(l => l.postId.toString()));
-
-            const pipeline = redisClient.pipeline();
-            const hsetArgs = [userHashKey];
-            for (const id of unknownIds) {
-                const isLiked = dbLikedSet.has(id);
-                hsetArgs.push(id, isLiked ? '1' : '0');
-                if (isLiked) liked.add(id);
+        if (!exists) {
+            // Seed full liked Set from DB so subsequent checks are authoritative
+            const dbLikes = await Like.find({ userId }).select('postId').lean();
+            const likedIds = dbLikes.map(l => l.postId.toString());
+            if (likedIds.length) {
+                await redisClient.pipeline()
+                    .sadd(userSetKey, ...likedIds)
+                    .expire(userSetKey, LIKE_STATUS_TTL)
+                    .exec();
             }
-            pipeline.hset(...hsetArgs);
-            pipeline.expire(userHashKey, LIKE_STATUS_TTL);
-            await pipeline.exec();
+            const likedAll = new Set(likedIds);
+            return new Set(idStrs.filter(id => likedAll.has(id)));
         }
 
+        // Set exists — pipeline SISMEMBER for each postId
+        const pipeline = redisClient.pipeline();
+        for (const id of idStrs) pipeline.sismember(userSetKey, id);
+        const results = await pipeline.exec();
+
+        const liked = new Set();
+        results.forEach(([err, isMember], i) => {
+            if (!err && isMember === 1) liked.add(idStrs[i]);
+        });
         return liked;
     } catch (err) {
         console.error('[PostEngagement] batchIsLikedByUser error:', err.message);
@@ -375,7 +366,8 @@ export async function batchGetLikedByUsers(postIds) {
             } else {
                 const users = Object.values(hashData)
                     .map(v => { try { return JSON.parse(v); } catch { return null; } })
-                    .filter(Boolean);
+                    .filter(u => u && typeof u === 'object' && (u._id || u.userId))
+                    .map(u => ({ ...u, _id: u._id ?? u.userId }));
                 users.sort((a, b) => (b.likedAt || 0) - (a.likedAt || 0));
                 map.set(idStrs[i], users.slice(0, PREVIEW_LIMIT));
             }
@@ -512,17 +504,15 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
     try {
         await redisClient.eval(
             LIKE_LUA,
-            4,
+            3,
             RedisKeys.postLikesCount(postIdStr),
-            RedisKeys.userLikedHash(userIdStr),
+            RedisKeys.userLikedSet(userIdStr),
             RedisKeys.postLikedBy(postIdStr),
-            RedisKeys.likesDirty(),
             postIdStr,
             userIdStr,
             userData,
             String(ENGAGEMENT_TTL),
             String(LIKE_STATUS_TTL),
-            `${userIdStr}:${postIdStr}`,
         );
         return true;
     } catch (err) {
@@ -545,16 +535,14 @@ export async function onPostUnliked(userId, postId) {
     try {
         await redisClient.eval(
             UNLIKE_LUA,
-            4,
+            3,
             RedisKeys.postLikesCount(postIdStr),
-            RedisKeys.userLikedHash(userIdStr),
+            RedisKeys.userLikedSet(userIdStr),
             RedisKeys.postLikedBy(postIdStr),
-            RedisKeys.likesDirty(),
             postIdStr,
             userIdStr,
             String(ENGAGEMENT_TTL),
             String(LIKE_STATUS_TTL),
-            `${userIdStr}:${postIdStr}`,
         );
 
         // Unlikes are always written to DB immediately so the DB fallback is accurate.
@@ -585,15 +573,11 @@ export async function onPostUnliked(userId, postId) {
  */
 export async function updateUserInLikedByHashes(userId, { username, fullName, profileImageUrl }) {
     const userIdStr = userId.toString();
-    const userHashKey = RedisKeys.userLikedHash(userIdStr);
+    const userSetKey = RedisKeys.userLikedSet(userIdStr);
 
     try {
-        const likedHash = await redisClient.hgetall(userHashKey);
-        if (!likedHash) return;
-
-        const likedPostIds = Object.entries(likedHash)
-            .filter(([, val]) => val === '1')
-            .map(([postId]) => postId);
+        const likedPostIds = await redisClient.smembers(userSetKey);
+        if (!likedPostIds.length) return;
 
         if (!likedPostIds.length) return;
 

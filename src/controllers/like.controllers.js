@@ -7,6 +7,7 @@ import Comment from "../models/comment.models.js";
 import { createLikeNotification, createUnlikeNotification } from "./notification.controllers.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import { onPostLiked, onPostUnliked } from "../utils/postEngagement.utils.js";
+import { likeQueue } from "../queues/likeQueue.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 
@@ -32,16 +33,18 @@ async function ensureLikesCount(postId, delta) {
 
 /**
  * Check whether a user has liked a specific post.
- * Redis-first (3-tier): '1'→liked, '0'→not liked, null→DB fallback.
+ * Set-based: EXISTS + SISMEMBER on fn:user:{userId}:liked.
+ * Key exists → SISMEMBER is authoritative. Key missing → DB fallback.
  */
 async function getLikeStatus(userId, postId) {
     try {
-        const val = await redisClient.hget(
-            RedisKeys.userLikedHash(userId.toString()),
-            postId.toString()
-        );
-        if (val !== null) return val === '1';
-        return !!(await Like.exists({ userId, postId }));
+        const setKey = RedisKeys.userLikedSet(userId.toString());
+        const [[, exists], [, isMember]] = await redisClient.pipeline()
+            .exists(setKey)
+            .sismember(setKey, postId.toString())
+            .exec();
+        if (!exists) return !!(await Like.exists({ userId, postId }));
+        return isMember === 1;
     } catch {
         return !!(await Like.exists({ userId, postId }));
     }
@@ -163,6 +166,13 @@ export const likePost = asyncHandler(async (req, res) => {
         profileImageUrl: req.user.profileImageUrl,
     });
 
+    // Enqueue DB sync job (BullMQ handles retry + batch write)
+    likeQueue.add('like-event', {
+        userId: userId.toString(),
+        postId: postId.toString(),
+        action: 'like',
+    }).catch(() => {});
+
     // Fire-and-forget notification (does not block response)
     Post.findById(postId).select('userId').lean().then(post => {
         if (post && post.userId.toString() !== userId.toString()) {
@@ -193,6 +203,13 @@ export const unlikePost = asyncHandler(async (req, res) => {
     if (!isLiked) throw new ApiError(404, "You have not liked this post");
 
     const redisOk = await onPostUnliked(userId, postId);
+
+    // Enqueue DB sync job
+    likeQueue.add('like-event', {
+        userId: userId.toString(),
+        postId: postId.toString(),
+        action: 'unlike',
+    }).catch(() => {});
 
     // Fire-and-forget notification
     Post.findById(postId).select('userId').lean().then(post => {

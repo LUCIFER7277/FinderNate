@@ -413,8 +413,8 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             let userFollowers = [];
             if (currentUserId) {
                 const userIdStr = currentUserId.toString();
-                for (const [idStr, userIds] of likedByIdsMap) {
-                    if (likedSet.has(idStr) && !userIds.includes(userIdStr)) userIds.push(userIdStr);
+                for (const [idStr, userIds] of likesByReel) {
+                    if (likedReelSet.has(idStr) && !userIds.includes(userIdStr)) userIds.push(userIdStr);
                 }
             }
 

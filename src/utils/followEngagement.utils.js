@@ -2,13 +2,11 @@ import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from '../config/red
 import Follower from '../models/follower.models.js';
 
 const FOLLOW_STATUS_TTL = RedisTTL.FOLLOW_STATUS;
-const COUNT_TTL = RedisTTL.FOLLOW_COUNT;
+const COUNT_TTL         = RedisTTL.FOLLOW_COUNT;
+const LIST_TTL          = RedisTTL.FOLLOW_LIST;
 
-const LIST_TTL = 12 * 24 * 60 * 60;   // 12 days
-const TEMP_TTL = 3 * 60 * 60;          // 3h safety TTL on temp SET
-const TEMP_ACTIVE_TTL = 25 * 60 * 60;  // 25h
-
-
+// Atomically increment/decrement both count keys inside a single Lua call
+// so no other command can run between the two operations.
 const INCR_PAIR_SCRIPT = `
 local fc  = redis.call('INCR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], ARGV[1])
@@ -25,9 +23,8 @@ redis.call('EXPIRE', KEYS[2], ARGV[1])
 return {fc, fgc}
 `;
 
-/**
- * Get followers count — Redis first, DB fallback with automatic seeding.
- */
+// ── Count helpers ──────────────────────────────────────────────────────────
+
 export async function getFollowersCount(userId) {
     const key = RedisKeys.userFollowersCount(userId);
     try {
@@ -42,9 +39,6 @@ export async function getFollowersCount(userId) {
     }
 }
 
-/**
- * Get following count — Redis first, DB fallback with automatic seeding.
- */
 export async function getFollowingCount(userId) {
     const key = RedisKeys.userFollowingCount(userId);
     try {
@@ -59,63 +53,66 @@ export async function getFollowingCount(userId) {
     }
 }
 
+// ── Follow status ──────────────────────────────────────────────────────────
+
 /**
  * Check if followerId is following targetUserId.
- * Redis-first: '1'→following, '0'→not following, null→DB fallback.
- * If Redis is down, reads directly from DB.
+ * Key exists → SISMEMBER is authoritative (write-through keeps it current).
+ * Key missing → seed full following SET from DB, then check.
  */
 export async function getFollowStatus(followerId, targetUserId) {
     const followerIdStr = followerId.toString();
-    const targetIdStr = targetUserId.toString();
-    const setKey = RedisKeys.userFollowingStatus(followerIdStr);
+    const targetIdStr   = targetUserId.toString();
+    const setKey        = RedisKeys.userFollowingStatus(followerIdStr);
     try {
-        // Pipeline EXISTS + SISMEMBER so we can distinguish "not cached" (EXISTS=0)
-        // from "cached as not-following" (EXISTS=1, SISMEMBER=0).
         const [[, exists], [, isMember]] = await redisClient.pipeline()
             .exists(setKey)
             .sismember(setKey, targetIdStr)
             .exec();
-        if (!exists) return !!(await Follower.findOne({ userId: targetUserId, followerId }));
+
+        if (!exists) {
+            const allFollowing = await Follower.find({ followerId }).select('userId').lean();
+            const ids = allFollowing.map(f => f.userId.toString());
+            if (ids.length) {
+                await redisClient.pipeline()
+                    .sadd(setKey, ...ids)
+                    .expire(setKey, FOLLOW_STATUS_TTL)
+                    .exec();
+            }
+            return ids.includes(targetIdStr);
+        }
+
         return isMember === 1;
     } catch {
         return !!(await Follower.findOne({ userId: targetUserId, followerId }));
     }
 }
 
+// ── onUserFollowed — write-through ─────────────────────────────────────────
+
 /**
- * Call when A follows B.
+ * Call when A follows B (public account or approved request).
  *
- * All Redis writes happen in a single pipeline so they are committed together:
- *   - follow-status SET → add targetId
- *   - B's followers LIST  (lpush + ltrim, newest-first, max 15)
- *   - A's following LIST  (lpush + ltrim, newest-first, max 15)
- *   - B's followers:temp SET   (pending flush to DB via cron)
- *   - A's following:temp SET   (pending flush to DB via cron)
- *   - active-users tracking SET for the cron
- *   - INCR B's followers count
- *   - INCR A's following count
+ * Write-through: DB write is synchronous and immediate.
+ * Redis updates: following status SET, followers/following Sorted Sets (score=now),
+ * and atomic INCR of both count keys.
  *
- * Any missing count keys are seeded from DB before the pipeline so INCR
- * always starts from the correct base value.
+ * Sorted Sets keep the newest FOLLOW_LIST_MAX entries (ZREMRANGEBYRANK trims oldest).
  *
  * Returns { ok: true, followersCount, followingCount } on success,
- *         { ok: false } if Redis is down.
+ *         { ok: false } if either DB or Redis fails.
  */
 export async function onUserFollowed(followerId, targetUserId) {
-    const followerIdStr = followerId.toString();
-    const targetIdStr = targetUserId.toString();
+    const followerIdStr     = followerId.toString();
+    const targetIdStr       = targetUserId.toString();
     const followingStatusKey = RedisKeys.userFollowingStatus(followerIdStr);
-    const followersListKey = RedisKeys.userFollowers(targetIdStr);
-    const followingListKey = RedisKeys.userFollowing(followerIdStr);
-    const followersTempKey = RedisKeys.followersTemp(targetIdStr);
-    const followingTempKey = RedisKeys.followingTemp(followerIdStr);
-    const tempActiveKey = RedisKeys.followTempActiveUsers();
-    const followersCountKey = RedisKeys.userFollowersCount(targetIdStr);
-    const followingCountKey = RedisKeys.userFollowingCount(followerIdStr);
+    const followersZSetKey   = RedisKeys.userFollowers(targetIdStr);
+    const followingZSetKey   = RedisKeys.userFollowing(followerIdStr);
+    const followersCountKey  = RedisKeys.userFollowersCount(targetIdStr);
+    const followingCountKey  = RedisKeys.userFollowingCount(followerIdStr);
 
     try {
-        // Pre-seed any missing count keys so INCR gives the correct new value.
-        // The follow is not yet in DB (deferred), so DB count is the base to increment from.
+        // Pre-seed count keys from DB before the write so INCR starts from correct base.
         const [followersVal, followingVal] = await redisClient.mget(followersCountKey, followingCountKey);
         if (followersVal === null || followingVal === null) {
             const seeds = [];
@@ -134,38 +131,31 @@ export async function onUserFollowed(followerId, targetUserId) {
             await Promise.all(seeds);
         }
 
+        // Write-through: DB first, idempotent upsert
+        await Follower.updateOne(
+            { userId: targetUserId, followerId },
+            { $setOnInsert: { userId: targetUserId, followerId } },
+            { upsert: true }
+        );
+
+        // Redis: status SET + Sorted Sets (trim to FOLLOW_LIST_MAX newest)
+        const now = Date.now();
         const pipeline = redisClient.pipeline();
 
-        // Add targetId to follower's following status SET
         pipeline.sadd(followingStatusKey, targetIdStr);
         pipeline.expire(followingStatusKey, FOLLOW_STATUS_TTL);
 
-        // B's followers LIST — push A to front, trim to 15
-        pipeline.lpush(followersListKey, followerIdStr);        // index 3
-        pipeline.ltrim(followersListKey, 0, FOLLOW_LIST_MAX - 1);
-        pipeline.expire(followersListKey, LIST_TTL);
+        pipeline.zadd(followersZSetKey, now, followerIdStr);
+        pipeline.zremrangebyrank(followersZSetKey, 0, -(FOLLOW_LIST_MAX + 1));
+        pipeline.expire(followersZSetKey, LIST_TTL);
 
-        // A's following LIST — push B to front, trim to 15
-        pipeline.lpush(followingListKey, targetIdStr);          // index 6
-        pipeline.ltrim(followingListKey, 0, FOLLOW_LIST_MAX - 1);
-        pipeline.expire(followingListKey, LIST_TTL);
-
-        // B's followers:temp SET
-        pipeline.sadd(followersTempKey, followerIdStr);
-        pipeline.expire(followersTempKey, TEMP_TTL);
-
-        // A's following:temp SET
-        pipeline.sadd(followingTempKey, targetIdStr);
-        pipeline.expire(followingTempKey, TEMP_TTL);
-
-        // Active-users tracking for the cron
-        pipeline.sadd(tempActiveKey, targetIdStr, followerIdStr);
-        pipeline.expire(tempActiveKey, TEMP_ACTIVE_TTL);
+        pipeline.zadd(followingZSetKey, now, targetIdStr);
+        pipeline.zremrangebyrank(followingZSetKey, 0, -(FOLLOW_LIST_MAX + 1));
+        pipeline.expire(followingZSetKey, LIST_TTL);
 
         await pipeline.exec();
 
-        // Atomically increment both counts via Lua — Redis guarantees no command
-        // from any other client can run between the two INCRs inside the script.
+        // Atomic INCR of both count keys via Lua
         const [followersCount, followingCount] = await redisClient.eval(
             INCR_PAIR_SCRIPT, 2,
             followersCountKey, followingCountKey,
@@ -179,86 +169,64 @@ export async function onUserFollowed(followerId, targetUserId) {
     }
 }
 
+// ── onUserUnfollowed — write-through ───────────────────────────────────────
+
 /**
  * Call when A unfollows B.
  *
- * All Redis writes happen in a single pipeline:
- *   - remove targetId from follower's following status SET
- *   - remove A from B's followers LIST
- *   - remove B from A's following LIST
- *   - remove A from B's followers:temp SET
- *   - remove B from A's following:temp SET
- *   - DECR B's followers count
- *   - DECR A's following count
- *
- * Count keys are seeded from DB BEFORE the Follower doc is deleted so the
- * base value is correct and DECR gives the right post-unfollow count.
+ * Write-through: DB delete is synchronous and immediate.
+ * Redis cleanup: SREM from status SET, ZREM from Sorted Sets, atomic DECR counts.
  *
  * Returns { ok: true, followersCount, followingCount } on success,
- *         { ok: false } if Redis is down.
+ *         { ok: false } if either fails.
  */
 export async function onUserUnfollowed(followerId, targetUserId) {
-    const followerIdStr = followerId.toString();
-    const targetIdStr = targetUserId.toString();
+    const followerIdStr     = followerId.toString();
+    const targetIdStr       = targetUserId.toString();
     const followingStatusKey = RedisKeys.userFollowingStatus(followerIdStr);
-    const followersListKey = RedisKeys.userFollowers(targetIdStr);
-    const followingListKey = RedisKeys.userFollowing(followerIdStr);
-    const followersTempKey = RedisKeys.followersTemp(targetIdStr);
-    const followingTempKey = RedisKeys.followingTemp(followerIdStr);
-    const followersCountKey = RedisKeys.userFollowersCount(targetIdStr);
-    const followingCountKey = RedisKeys.userFollowingCount(followerIdStr);
+    const followersZSetKey   = RedisKeys.userFollowers(targetIdStr);
+    const followingZSetKey   = RedisKeys.userFollowing(followerIdStr);
+    const followersCountKey  = RedisKeys.userFollowersCount(targetIdStr);
+    const followingCountKey  = RedisKeys.userFollowingCount(followerIdStr);
 
     try {
-        // Pre-seed any missing count keys BEFORE deleting the Follower doc.
-        // Edge case: if this follow is still deferred (targetId still in following SET, not in DB yet),
-        // DB count doesn't include it. Seed as dbCount+1 so DECR gives dbCount (correct net zero).
+        // Pre-seed count keys before DB delete so DECR starts from correct base.
         const [followersVal, followingVal] = await redisClient.mget(followersCountKey, followingCountKey);
         if (followersVal === null || followingVal === null) {
-            const isDeferred = await redisClient.sismember(followingStatusKey, targetIdStr)
-                .catch(() => 0) === 1;
-
             const seeds = [];
             if (followersVal === null) {
                 seeds.push(
                     Follower.countDocuments({ userId: targetUserId })
-                        .then(n => redisClient.set(followersCountKey, isDeferred ? n + 1 : n, 'EX', COUNT_TTL))
+                        .then(n => redisClient.set(followersCountKey, n, 'EX', COUNT_TTL))
                 );
             }
             if (followingVal === null) {
                 seeds.push(
                     Follower.countDocuments({ followerId })
-                        .then(n => redisClient.set(followingCountKey, isDeferred ? n + 1 : n, 'EX', COUNT_TTL))
+                        .then(n => redisClient.set(followingCountKey, n, 'EX', COUNT_TTL))
                 );
             }
             await Promise.all(seeds);
         }
 
-        const pipeline = redisClient.pipeline();
+        // Write-through: DB delete first
+        await Follower.findOneAndDelete({ userId: targetUserId, followerId });
 
-        // Remove targetId from follower's following status SET
+        // Redis cleanup
+        const pipeline = redisClient.pipeline();
         pipeline.srem(followingStatusKey, targetIdStr);
         pipeline.expire(followingStatusKey, FOLLOW_STATUS_TTL);
-
-        // Remove A from B's followers LIST
-        pipeline.lrem(followersListKey, 0, followerIdStr);
-
-        // Remove B from A's following LIST
-        pipeline.lrem(followingListKey, 0, targetIdStr);
-
-        // Remove from temp SETs
-        pipeline.srem(followersTempKey, followerIdStr);
-        pipeline.srem(followingTempKey, targetIdStr);
-
+        pipeline.zrem(followersZSetKey, followerIdStr);
+        pipeline.zrem(followingZSetKey, targetIdStr);
         await pipeline.exec();
 
-        // Atomically decrement both counts via Lua
+        // Atomic DECR
         let [followersCount, followingCount] = await redisClient.eval(
             DECR_PAIR_SCRIPT, 2,
             followersCountKey, followingCountKey,
             String(COUNT_TTL)
         );
 
-        // Clamp negatives: shouldn't happen after pre-seed, but guard just in case
         if (followersCount < 0) {
             followersCount = 0;
             redisClient.set(followersCountKey, 0, 'EX', COUNT_TTL).catch(() => {});
@@ -267,9 +235,6 @@ export async function onUserUnfollowed(followerId, targetUserId) {
             followingCount = 0;
             redisClient.set(followingCountKey, 0, 'EX', COUNT_TTL).catch(() => {});
         }
-
-        // Delete Follower doc immediately so DB fallback never reads a stale "following" state
-        await Follower.findOneAndDelete({ userId: targetUserId, followerId }).catch(() => {});
 
         return { ok: true, followersCount, followingCount };
     } catch (err) {
