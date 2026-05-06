@@ -201,9 +201,6 @@ export const RedisKeys = {
     // SISMEMBER for O(1) lookup; one key per user instead of one key per relation
     userFollowingStatus: (userId) => `fn:user:${userId}:following:status`,
 
-    // Follow dirty set — tracks unsync'd follow/unfollow ops; flushed to DB by 4-hourly cron
-    followsDirty: () => 'fn:follows:dirty',
-
     // Temp SETs of newly-added follower/following IDs not yet written to DB (flushed every 2h)
     followersTemp: (userId) => `fn:user:${userId}:followers:temp`,
     followingTemp: (userId) => `fn:user:${userId}:following:temp`,
@@ -211,8 +208,12 @@ export const RedisKeys = {
     // SET tracking which userIds have active temp keys (so the 2h cron knows who to flush)
     followTempActiveUsers: () => 'fn:follows:temp:active',
 
-    // Cached liker userId array per post (JSON string, max 50); updated on like/unlike
+    // Per-post likedBy Hash: field=userId, value=JSON{_id,userId,username,fullName,profileImageUrl,likedAt}
     postLikedBy: (postId) => `fn:post:${postId}:likedby`,
+
+    // Per-user liked posts Hash: field=postId, value='1'(liked)/'0'(not-liked)
+    // Replaces the old individual fn:like:{userId}:{postId} string keys
+    userLikedHash: (userId) => `fn:user:${userId}:liked`,
 
     // Real-time features
     chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,

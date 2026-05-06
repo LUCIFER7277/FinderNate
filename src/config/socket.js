@@ -463,7 +463,7 @@ class SocketManager {
             // 🚀 NEW: Handle request for initial unread counts (alternative to HTTP polling)
             socket.on('request_unread_counts', async () => {
                 try {
-                    const notificationCache = (await import('../utlis/notificationCache.utils.js')).default;
+                    const notificationCache = (await import('../utils/notificationCache.utils.js')).default;
                     const counts = await notificationCache.getUnreadCounts(socket.userId);
 
                     socket.emit('unread_counts_updated', {

@@ -36,7 +36,10 @@ async function ensureLikesCount(postId, delta) {
  */
 async function getLikeStatus(userId, postId) {
     try {
-        const val = await redisClient.get(RedisKeys.userLikedPost(userId.toString(), postId.toString()));
+        const val = await redisClient.hget(
+            RedisKeys.userLikedHash(userId.toString()),
+            postId.toString()
+        );
         if (val !== null) return val === '1';
         return !!(await Like.exists({ userId, postId }));
     } catch {
@@ -50,44 +53,38 @@ const USER_FIELDS = 'username profileImageUrl fullName isVerified';
 /**
  * Fetch the likedBy user list with pagination.
  *
- * Page 1: tries the Redis likedBy cache (fn:post:{postId}:likedby) first — same cache
- * that onPostLiked/onPostUnliked maintain — then falls back to DB on cache miss.
- * Page 2+: always reads from DB (cache is capped at MAX_LIKEDBY=50 entries).
+ * Page 1: reads the likedBy Redis Hash (fn:post:{postId}:likedby).
+ *   field = userId, value = JSON{_id, userId, username, fullName, profileImageUrl, likedAt}.
+ *   Entries sorted newest-first (likedAt desc), up to `limit`.
+ *   Falls back to DB on cache miss.
+ * Page 2+: always reads from DB.
  *
- * Lag compensation keeps the UI in sync with the user's own action:
- *   - includeUser:   current user just liked, Redis is up → use req.user directly, no DB fetch.
- *   - includeUserId: current user just liked, Redis is down → fetch profile from DB.
- *   - excludeUserId: current user just unliked → always remove them, regardless of Redis state.
- *
- * For like: the current user is stripped from userIds first (prevents duplication
- * if DB already has their record from a previous sync), then re-inserted at position 0.
+ * Lag compensation:
+ *   - includeUser:   viewer just liked; Lua already HSET them into the Hash.
+ *     We unshift at position 0 to guarantee they appear first.
+ *   - excludeUserId: viewer just unliked; Lua already HDELd them from the Hash.
  */
 async function getLikedByList(postId, { includeUser = null, includeUserId = null, excludeUserId = null, page = 1, limit = 20 } = {}) {
     const postIdStr = postId.toString();
     const includeId = includeUser?._id?.toString() ?? (includeUserId ? includeUserId.toString() : null);
 
-    // Page 1: try Redis cache first (cache is oldest-first, so reverse for newest-first display)
+    // Page 1: read from the Redis Hash
     if (page === 1) {
         try {
-            const cached = await redisClient.get(RedisKeys.postLikedBy(postIdStr));
-            if (cached !== null) {
-                let userIds = JSON.parse(cached);
+            const hashData = await redisClient.hgetall(RedisKeys.postLikedBy(postIdStr));
+            if (hashData !== null) {
+                let users = Object.values(hashData)
+                    .map(v => { try { return JSON.parse(v); } catch { return null; } })
+                    .filter(Boolean);
 
-                if (excludeUserId) userIds = userIds.filter(id => id !== excludeUserId.toString());
-                if (includeId) userIds = userIds.filter(id => id !== includeId);
+                const excludeStr = excludeUserId?.toString();
+                if (excludeStr) users = users.filter(u => (u._id || u.userId) !== excludeStr);
+                if (includeId) users = users.filter(u => (u._id || u.userId) !== includeId);
 
-                // Cache is oldest-first; reverse for newest-first, then page
-                const reversed = userIds.slice().reverse();
-                const hasMore = reversed.length > limit;
-                const pageIds = reversed.slice(0, limit);
-
-                const fetched = pageIds.length
-                    ? await User.find({ _id: { $in: pageIds } }, USER_FIELDS).lean()
-                    : [];
-
-                // Preserve newest-first order (User.find doesn't guarantee it)
-                const profileMap = new Map(fetched.map(u => [u._id.toString(), u]));
-                const users = pageIds.map(id => profileMap.get(id)).filter(Boolean);
+                // Sort newest-first by likedAt
+                users.sort((a, b) => (b.likedAt || 0) - (a.likedAt || 0));
+                const hasMore = users.length > limit;
+                let pageUsers = users.slice(0, limit);
 
                 if (includeId) {
                     let me;
@@ -102,17 +99,17 @@ async function getLikedByList(postId, { includeUser = null, includeUserId = null
                     } else {
                         me = await User.findById(includeUserId, USER_FIELDS).lean();
                     }
-                    if (me) users.unshift(me);
+                    if (me) pageUsers.unshift(me);
                 }
 
-                return { users, hasMore };
+                return { users: pageUsers, hasMore };
             }
         } catch (_) {
             // Fall through to DB on any Redis/parse error
         }
     }
 
-    // DB path: cache miss, page > 1, or Redis error
+    // DB path: cache miss or page > 1
     const skip = (page - 1) * limit;
     const likes = await Like.find({ postId })
         .select('userId')
@@ -160,7 +157,11 @@ export const likePost = asyncHandler(async (req, res) => {
     const alreadyLiked = await getLikeStatus(userId, postId);
     if (alreadyLiked) throw new ApiError(409, "You have already liked this post");
 
-    const redisOk = await onPostLiked(userId, postId);
+    const redisOk = await onPostLiked(userId, postId, {
+        username: req.user.username,
+        fullName: req.user.fullName,
+        profileImageUrl: req.user.profileImageUrl,
+    });
 
     // Fire-and-forget notification (does not block response)
     Post.findById(postId).select('userId').lean().then(post => {

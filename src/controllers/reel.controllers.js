@@ -4,10 +4,11 @@ import { User } from "../models/user.models.js";
 import Follower from "../models/follower.models.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
-import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
-import { batchIsLikedByUser, batchGetLikesCount, batchGetCommentsCount, batchGetLikedByUserIds } from "../utlis/postEngagement.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
+import Like from "../models/like.models.js";
+import { batchIsLikedByUser, batchGetLikedByUsers } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 import { getFollowStatus } from "../utils/followEngagement.utils.js";
 
@@ -400,15 +401,16 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             // Add subscription badges to reel authors
             reels = await addBadgesToNestedUsers(reels);
 
-            // Stitch engagement from Redis: isLikedBy, like counts, comment counts, likedBy list
+            // Get likedBy from Redis Hash (max 20 per reel) + isLikedBy status
             const reelIds = reels.map(reel => reel._id);
-            const [likedSet, likeCountMap, commentCountMap, likedByIdsMap] = await Promise.all([
+            const [likedReelSet, likesByReel] = await Promise.all([
                 currentUserId ? batchIsLikedByUser(currentUserId, reelIds) : Promise.resolve(new Set()),
-                batchGetLikesCount(reels),
-                batchGetCommentsCount(reels),
-                batchGetLikedByUserIds(reelIds),
+                batchGetLikedByUsers(reelIds),
             ]);
 
+            // Get viewer's social graph for preview text
+            let userFollowing = [];
+            let userFollowers = [];
             if (currentUserId) {
                 const userIdStr = currentUserId.toString();
                 for (const [idStr, userIds] of likedByIdsMap) {
@@ -416,34 +418,20 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                 }
             }
 
-            // Batch-fetch user profiles for all liker IDs
-            const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
-            const likerProfiles = allLikerIds.length
-                ? await User.find({ _id: { $in: allLikerIds } }, 'username fullName profileImageUrl').lean()
-                : [];
-            const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
-
-            // Get follower/following for likedByPreview
-            let userFollowing = [], userFollowers = [];
-            if (currentUserId) {
-                const me = await User.findById(currentUserId).select('following followers').lean();
-                userFollowing = me?.following || [];
-                userFollowers = me?.followers || [];
-            }
-
-            // Stitch all engagement into each reel
             reels = reels.map(reel => {
                 const reelIdStr = reel._id.toString();
-                const likedByUsers = (likedByIdsMap.get(reelIdStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
-                const likedByPreview = getLikedByPreview(likedByUsers, currentUserId, userFollowing, userFollowers);
+                const likedByUsers = likesByReel.get(reelIdStr) || [];
+
+                const likedByPreview = getLikedByPreview(
+                    likedByUsers,
+                    currentUserId,
+                    userFollowing,
+                    userFollowers
+                );
+
                 return {
                     ...reel,
-                    engagement: {
-                        ...(reel.engagement || {}),
-                        likes: likeCountMap.get(reelIdStr) ?? reel.engagement?.likes ?? 0,
-                        comments: commentCountMap.get(reelIdStr) ?? reel.engagement?.comments ?? 0,
-                    },
-                    isLikedBy: likedSet.has(reelIdStr),
+                    isLikedBy: likedReelSet.has(reelIdStr),
                     likedBy: likedByUsers,
                     likedByPreview: likedByPreview.likedByText ? {
                         text: likedByPreview.likedByText,

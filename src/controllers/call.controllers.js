@@ -3,7 +3,7 @@ import Chat from '../models/chat.models.js';
 import Message from '../models/message.models.js';
 import { User } from '../models/user.models.js';
 import { ApiError } from '../utils/ApiError.js';
-import { ApiResponse } from '../utilss/ApiResponse.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import socketManager from '../config/socket.js';
 import mongoose from 'mongoose';

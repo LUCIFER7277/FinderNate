@@ -607,6 +607,17 @@ const updateUserProfile = asyncHandler(async (req, res) => {
     const { UserCacheManager } = await import('../utils/cache.utils.js');
     await UserCacheManager.invalidateUserProfile(req.user._id);
 
+    // Propagate updated profile fields (username / profileImageUrl / fullName) to every
+    // likedBy Hash the user appears in — fire-and-forget, non-blocking
+    if (updates.username || updates.profileImageUrl || updates.fullName) {
+        const { updateUserInLikedByHashes } = await import('../utils/postEngagement.utils.js');
+        updateUserInLikedByHashes(req.user._id, {
+            username: updatedUser.username,
+            fullName: updatedUser.fullName,
+            profileImageUrl: updatedUser.profileImageUrl,
+        }).catch(() => {});
+    }
+
     return res
         .status(200)
         .json(

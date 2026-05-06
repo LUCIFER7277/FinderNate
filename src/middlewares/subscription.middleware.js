@@ -1,5 +1,5 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.models.js";
 import Subscription from "../models/subscription.models.js";
 

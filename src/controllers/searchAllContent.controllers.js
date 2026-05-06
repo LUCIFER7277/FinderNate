@@ -8,6 +8,8 @@ import { ApiError } from '../utils/ApiError.js';
 import { getCoordinates } from '../utils/getCoordinates.js';
 import { filterBusinessPostsByPaymentPlan } from '../utils/businessPlan.utils.js';
 import { addBadgesToNestedUsers, addBadgesToUsers } from '../utils/userBadge.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
+import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {
@@ -507,8 +509,40 @@ export const searchAllContent = async (req, res) => {
             };
         }));
 
+        // Stitch isLikedBy + likedBy (max 20 from Redis Hash) into search results
+        const currentUserId = req.user?._id?.toString() ?? null;
+        const contentIds = paginatedContent.map(item => item._id);
+        const [likedSet, likedByMap] = await Promise.all([
+            currentUserId ? batchIsLikedByUser(req.user._id, contentIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(contentIds),
+        ]);
+
+        let userFollowing = [];
+        let userFollowers = [];
+        if (currentUserId) {
+            const viewer = await User.findById(currentUserId).select('following followers').lean();
+            userFollowing = viewer?.following || [];
+            userFollowers = viewer?.followers || [];
+        }
+
+        const stitchedContent = paginatedContent.map(item => {
+            const idStr = item._id.toString();
+            const likedByUsers = likedByMap.get(idStr) || [];
+            const preview = getLikedByPreview(likedByUsers, currentUserId, userFollowing, userFollowers);
+            return {
+                ...item,
+                isLikedBy: likedSet.has(idStr),
+                likedBy: likedByUsers,
+                likedByPreview: preview.likedByText ? {
+                    text: preview.likedByText,
+                    previewUser: preview.previewUser,
+                    othersCount: preview.othersCount,
+                } : null,
+            };
+        });
+
         // Add badges to posts/reels in search results
-        const contentWithBadges = await addBadgesToNestedUsers(paginatedContent);
+        const contentWithBadges = await addBadgesToNestedUsers(stitchedContent);
 
         // Add badges to user search results
         {/* console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({

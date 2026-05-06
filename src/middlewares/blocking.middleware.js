@@ -1,5 +1,5 @@
 import Block from "../models/block.models.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { redisClient } from "../config/redis.config.js";
 
 /**
