@@ -187,33 +187,15 @@ export const RedisKeys = {
     postLikesCount: (postId) => `fn:post:${postId}:likes:count`,
     postCommentsCount: (postId) => `fn:post:${postId}:comments:count`,
 
-    // Per-user like status (set on like, deleted/set-to-0 on unlike)
-    userLikedPost: (userId, postId) => `fn:like:${userId}:${postId}`,
-
     // Universal default search page (no query — browse mode)
     defaultResults: () => 'fn:default:results',
     defaultNewPosts: () => 'fn:default:new_posts', // Redis LIST of recently published postIds
 
-    // Like dirty set — tracks unsync'd like/unlike ops; flushed to DB by 4-hourly cron
-    likesDirty: () => 'fn:likes:dirty',
-
-    // Per-user following SET: members are all targetUserIds that userId is following
-    // SISMEMBER for O(1) lookup; one key per user instead of one key per relation
     userFollowingStatus: (userId) => `fn:user:${userId}:following:status`,
 
-    // Temp SETs of newly-added follower/following IDs not yet written to DB (flushed every 2h)
-    followersTemp: (userId) => `fn:user:${userId}:followers:temp`,
-    followingTemp: (userId) => `fn:user:${userId}:following:temp`,
-
-    // SET tracking which userIds have active temp keys (so the 2h cron knows who to flush)
-    followTempActiveUsers: () => 'fn:follows:temp:active',
-
-    // Per-post likedBy Hash: field=userId, value=JSON{_id,userId,username,fullName,profileImageUrl,likedAt}
     postLikedBy: (postId) => `fn:post:${postId}:likedby`,
 
-    // Per-user liked posts Hash: field=postId, value='1'(liked)/'0'(not-liked)
-    // Replaces the old individual fn:like:{userId}:{postId} string keys
-    userLikedHash: (userId) => `fn:user:${userId}:liked`,
+    userLikedSet: (userId) => `fn:user:${userId}:liked`,
 
     // Real-time features
     chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,
@@ -221,7 +203,6 @@ export const RedisKeys = {
     tempUpload: (userId) => `fn:temp:upload:${userId}`,
 };
 
-// TTL constants (in seconds)
 export const RedisTTL = {
     // Real-time data (short TTL)
     USER_FEED: 5 * 60,              // 5 minutes
@@ -246,13 +227,16 @@ export const RedisTTL = {
     RATE_LIMIT: 15 * 60,             // 15 minutes
     
     // Follow counters (long-lived, updated in-place on follow/unfollow)
-    FOLLOW_COUNT: 7 * 24 * 60 * 60, // 7 days
+    FOLLOW_COUNT: 7 * 24 * 60 * 60,  // 7 days
 
-    // Post engagement counters + per-user like status
-    POST_ENGAGEMENT: 7 * 24 * 60 * 60, // 7 days
+    // Followers/following LISTs (top-15 newest IDs, rebuilt by cron or on expiry)
+    FOLLOW_LIST: 12 * 24 * 60 * 60,  // 12 days
+
+    // Post engagement counters + per-user like status Set
+    POST_ENGAGEMENT: 7 * 24 * 60 * 60,  // 7 days
     POST_LIKE_STATUS: 7 * 24 * 60 * 60, // 7 days
 
-    // Per-user follow status
+    // Per-user follow status Set
     FOLLOW_STATUS: 7 * 24 * 60 * 60, // 7 days
 
     // Universal default search snapshot (safety TTL; explicit invalidation preferred)

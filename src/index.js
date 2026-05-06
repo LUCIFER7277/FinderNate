@@ -5,8 +5,7 @@ import http from 'http';
 import socketManager from './config/socket.js';
 import './config/firebase-admin.config.js'; // Initialize Firebase Admin on startup
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
-import { startLikeSyncJob } from './jobs/likeSync.job.js';
-import { startFollowSyncJob } from './jobs/followSync.job.js';
+import { startLikeWorker } from './queues/likeQueue.js';
 // import { seedLikesToRedis } from './scripts/seedLikesToRedis.js';
 import { redisClient } from './config/redis.config.js';
 
@@ -57,10 +56,9 @@ connectDB()
 
         server.listen(PORT, '0.0.0.0', () => {
 
-            // Start cron jobs
+            // Start cron jobs and queue workers
             startSubscriptionExpiryJob();
-            startLikeSyncJob();
-            startFollowSyncJob();
+            startLikeWorker();
         });
 
         server.on('error', (error) => {
