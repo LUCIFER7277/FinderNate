@@ -14,11 +14,13 @@ import Follower from "../models/follower.models.js";
 import Like from "../models/like.models.js";
 import { CacheManager, FeedCacheManager } from "../utlis/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
+import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utlis/defaultSearch.utils.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utlis/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
 import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
+import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUserIds } from "../utlis/postEngagement.utils.js";
 import { hasActivePaymentPlan } from "../utlis/businessPlan.utils.js";
 import Business from "../models/business.models.js";
 import { getFollowStatus } from '../utlis/followEngagement.utils.js';
@@ -144,6 +146,7 @@ export const createNormalPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
+    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
@@ -190,6 +193,7 @@ export const createTweetPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
+    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Tweet post created successfully"));
 });
 
@@ -234,6 +238,7 @@ export const createProductPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
+    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Product post created successfully"));
 });
 
@@ -276,6 +281,7 @@ export const createServicePost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
+    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Service post created successfully"));
 });
 
@@ -320,6 +326,7 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
+    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Business post created successfully"));
 });
 
@@ -424,6 +431,16 @@ export const getPostById = asyncHandler(async (req, res) => {
     const likes = await Like.find({ postId: postId }).lean();
     const likedByUserIds = likes.map(like => like.userId.toString());
 
+    // Inject current user if their like is deferred in Redis (not yet synced to DB).
+    // batchIsLikedByUser is Redis-first with automatic DB fallback on Redis failure.
+    if (currentUser) {
+        const curIdStr = currentUser._id.toString();
+        if (!likedByUserIds.includes(curIdStr)) {
+            const likedSet = await batchIsLikedByUser(currentUser._id, [postId]);
+            if (likedSet.has(postId.toString())) likedByUserIds.unshift(curIdStr);
+        }
+    }
+
     // Fetch user details for all users who liked the post
     let likedByUsers = [];
     if (likedByUserIds.length > 0) {
@@ -436,6 +453,14 @@ export const getPostById = asyncHandler(async (req, res) => {
     // Add likedBy array and isLikedBy flag to the post
     post.likedBy = likedByUsers;
     post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
+
+    // Override stale DB count with Redis-accurate count (DB is only updated by 4h cron)
+    const likeCountMap = await batchGetLikesCount([post]);
+    post.engagement = {
+        ...(post.engagement || {}),
+        likes: likeCountMap.get(postId.toString()) ?? post.engagement?.likes ?? 0,
+    };
+
     // Add "Liked by" preview
     if (currentUser) {
         const user = await User.findById(currentUser._id).select('following followers').lean();
@@ -757,6 +782,9 @@ export const editPost = asyncHandler(async (req, res) => {
         await FeedCacheManager.invalidateTrendingFeed();
     }
 
+    // Invalidate universal default snapshot (content changed)
+    invalidateDefaultSnapshot(postId).catch(() => {});
+
     return res.status(200).json(new ApiResponse(200, updatedPost, "Post updated successfully"));
 });
 
@@ -833,6 +861,7 @@ export const updatePost = asyncHandler(async (req, res) => {
     const post = await Post.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
     if (!post) throw new ApiError(404, "Post not found");
 
+    invalidateDefaultSnapshot(id).catch(() => {});
     return res.status(200).json(new ApiResponse(200, post, "Post updated successfully"));
 });
 
@@ -894,6 +923,9 @@ export const deletePost = asyncHandler(async (req, res) => {
         userId,
         { $pull: { posts: id } }
     );
+
+    // Invalidate universal default snapshot + remove from new-posts buffer
+    invalidateDefaultSnapshot(id).catch(() => {});
 
     // Delete related data (likes, comments, saved posts)
     await Promise.allSettled([
@@ -1306,15 +1338,35 @@ export const getNearbyPosts = asyncHandler(async (req, res) => {
 
 // Get trending posts (basic version using likes + comments)
 export const getTrendingPosts = asyncHandler(async (req, res) => {
-    const posts = await Post.find()
-        .sort({
-            "engagement.likes": -1,
-            "engagement.comments": -1,
-            createdAt: -1
-        })
-        .limit(20);
+    const currentUser = req.user ?? null;
 
-    return res.status(200).json(new ApiResponse(200, posts, "Trending posts fetched successfully"));
+    const posts = await Post.find()
+        .sort({ "engagement.likes": -1, "engagement.comments": -1, createdAt: -1 })
+        .limit(20)
+        .lean();
+
+    if (!posts.length) {
+        return res.status(200).json(new ApiResponse(200, posts, "Trending posts fetched successfully"));
+    }
+
+    const [likedSet, likeCountMap] = await Promise.all([
+        currentUser ? batchIsLikedByUser(currentUser._id, posts.map(p => p._id)) : Promise.resolve(new Set()),
+        batchGetLikesCount(posts),
+    ]);
+
+    const stitched = posts.map(post => {
+        const idStr = post._id.toString();
+        return {
+            ...post,
+            isLikedBy: currentUser ? likedSet.has(idStr) : false,
+            engagement: {
+                ...(post.engagement || {}),
+                likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
+            },
+        };
+    });
+
+    return res.status(200).json(new ApiResponse(200, stitched, "Trending posts fetched successfully"));
 });
 
 // Save post as draft
@@ -1394,35 +1446,33 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         return postObj;
     });
 
-    // Enhancement: Add isLikedBy and likedBy fields (like getUserProfilePosts)
+    // Stitch isLikedBy (Redis-first) and live like count for each post
     const currentUserId = req.user?._id?.toString();
-    const postIds = postsWithThumbnails.map(post => post._id.toString());
-    const likes = await Like.find({ postId: { $in: postIds } }).lean();
-    // Map postId to array of userIds who liked it
-    const likesByPost = {};
-    likes.forEach(like => {
-        const pid = like.postId.toString();
-        if (!likesByPost[pid]) likesByPost[pid] = [];
-        likesByPost[pid].push(like.userId.toString());
-    });
-    // Fetch user details for all liked users
-    const allLikedUserIds = Array.from(new Set(likes.flatMap(like => like.userId.toString())));
-    let likedUsersMap = {};
-    if (allLikedUserIds.length > 0) {
-        const likedUsers = await Post.db.model('User').find(
-            { _id: { $in: allLikedUserIds } },
-            'username profileImageUrl fullName isVerified'
-        ).lean();
-        likedUsersMap = likedUsers.reduce((acc, user) => {
-            acc[user._id.toString()] = user;
-            return acc;
-        }, {});
+    const [likedSet, likeCountMap, likedByIdsMap] = await Promise.all([
+        currentUserId ? batchIsLikedByUser(req.user._id, postsWithThumbnails.map(p => p._id)) : Promise.resolve(new Set()),
+        batchGetLikesCount(postsWithThumbnails),
+        batchGetLikedByUserIds(postsWithThumbnails.map(p => p._id)),
+    ]);
+
+    // Inject current user into likedByIdsMap if their like is still deferred in Redis
+    if (currentUserId) {
+        for (const [idStr, userIds] of likedByIdsMap) {
+            if (likedSet.has(idStr) && !userIds.includes(currentUserId)) userIds.push(currentUserId);
+        }
     }
+
+    const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
+    const UserModel = Post.db.model('User');
+    const likerProfiles = allLikerIds.length
+        ? await UserModel.find({ _id: { $in: allLikerIds } }, 'username profileImageUrl fullName isVerified').lean()
+        : [];
+    const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
+
     postsWithThumbnails.forEach(post => {
-        const pid = post._id.toString();
-        const likedByIds = likesByPost[pid] || [];
-        post.likedBy = likedByIds.map(uid => likedUsersMap[uid]).filter(Boolean); // array of user details
-        post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
+        const idStr = post._id.toString();
+        post.isLikedBy = currentUserId ? likedSet.has(idStr) : false;
+        post.likedBy = (likedByIdsMap.get(idStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
+        post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
     });
 
     // Add "Liked by" preview to each post
@@ -1624,37 +1674,32 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         const totalPages = Math.ceil(totalPosts / pageLimit);
         const visiblePostsCount = postsAfterBusinessFilter.length;
 
-        // Enhancement: Add isLikedBy and likedBy fields
+        // Stitch isLikedBy (Redis-first) and live like count
         const currentUserId = req.user?._id?.toString();
-        const postIds = postsAfterBusinessFilter.map(post => post._id);
-        // Fetch all likes for these posts
-        const likes = await Like.find({ postId: { $in: postIds } }).lean();
-        // Map postId to array of userIds who liked it
-        const likesByPost = {};
-        likes.forEach(like => {
-            const pid = like.postId.toString();
-            if (!likesByPost[pid]) likesByPost[pid] = [];
-            likesByPost[pid].push(like.userId.toString());
-        });
-        // Add isLikedBy and likedBy to each post
-        // Instead of just userIds, fetch user details for likedBy
-        const allLikedUserIds = Array.from(new Set(likes.flatMap(like => like.userId.toString())));
-        let likedUsersMap = {};
-        if (allLikedUserIds.length > 0) {
-            const likedUsers = await Post.db.model('User').find(
-                { _id: { $in: allLikedUserIds } },
-                'username profileImageUrl fullName isVerified'
-            ).lean();
-            likedUsersMap = likedUsers.reduce((acc, user) => {
-                acc[user._id.toString()] = user;
-                return acc;
-            }, {});
+        const [likedSet, likeCountMap, likedByIdsMap] = await Promise.all([
+            currentUserId ? batchIsLikedByUser(req.user._id, postsAfterBusinessFilter.map(p => p._id)) : Promise.resolve(new Set()),
+            batchGetLikesCount(postsAfterBusinessFilter),
+            batchGetLikedByUserIds(postsAfterBusinessFilter.map(p => p._id)),
+        ]);
+
+        // Inject current user into likedByIdsMap if their like is still deferred in Redis
+        if (currentUserId) {
+            for (const [idStr, userIds] of likedByIdsMap) {
+                if (likedSet.has(idStr) && !userIds.includes(currentUserId)) userIds.push(currentUserId);
+            }
         }
+
+        const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
+        const likerProfiles = allLikerIds.length
+            ? await Post.db.model('User').find({ _id: { $in: allLikerIds } }, 'username profileImageUrl fullName isVerified').lean()
+            : [];
+        const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
+
         postsAfterBusinessFilter.forEach(post => {
-            const pid = post._id.toString();
-            const likedByIds = likesByPost[pid] || [];
-            post.likedBy = likedByIds.map(uid => likedUsersMap[uid]).filter(Boolean); // array of user details
-            post.isLikedBy = currentUserId ? likedByIds.includes(currentUserId) : false;
+            const idStr = post._id.toString();
+            post.isLikedBy = currentUserId ? likedSet.has(idStr) : false;
+            post.likedBy = (likedByIdsMap.get(idStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
+            post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
         });
 
         // Add "Liked by" preview to each post
