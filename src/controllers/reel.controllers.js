@@ -8,7 +8,7 @@ import { enrichWithRatings } from "../utils/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import Like from "../models/like.models.js";
-import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from "../utils/postEngagement.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount, batchGetLikedByUserIds } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 import { getFollowStatus } from "../utils/followEngagement.utils.js";
 

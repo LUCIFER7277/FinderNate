@@ -80,7 +80,13 @@ export async function batchIsLikedByUser(userId, postIds) {
     const userSetKey = RedisKeys.userLikedSet(userIdStr);
 
     try {
-        const exists = await redisClient.exists(userSetKey);
+        // Guard against stale wrong-type keys (Hash from old code, now expects Set)
+        const keyType = await redisClient.type(userSetKey);
+        if (keyType !== 'none' && keyType !== 'set') {
+            await redisClient.del(userSetKey);
+        }
+
+        const exists = keyType === 'set';
 
         if (!exists) {
             // Seed full liked Set from DB so subsequent checks are authoritative
@@ -501,21 +507,28 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
         likedAt: Date.now(),
     });
 
+    const runLiked = () => redisClient.eval(
+        LIKE_LUA,
+        3,
+        RedisKeys.postLikesCount(postIdStr),
+        RedisKeys.userLikedSet(userIdStr),
+        RedisKeys.postLikedBy(postIdStr),
+        postIdStr,
+        userIdStr,
+        userData,
+        String(ENGAGEMENT_TTL),
+        String(LIKE_STATUS_TTL),
+    );
+
     try {
-        await redisClient.eval(
-            LIKE_LUA,
-            3,
-            RedisKeys.postLikesCount(postIdStr),
-            RedisKeys.userLikedSet(userIdStr),
-            RedisKeys.postLikedBy(postIdStr),
-            postIdStr,
-            userIdStr,
-            userData,
-            String(ENGAGEMENT_TTL),
-            String(LIKE_STATUS_TTL),
-        );
+        await runLiked();
         return true;
     } catch (err) {
+        if (err.message.includes('WRONGTYPE')) {
+            // Stale Hash key from old code — delete it and retry once
+            await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
+            try { await runLiked(); return true; } catch {}
+        }
         console.error('[PostEngagement] onPostLiked error:', err.message);
         return false;
     }
@@ -532,24 +545,32 @@ export async function onPostUnliked(userId, postId) {
     const userIdStr = userId.toString();
     const postIdStr = postId.toString();
 
+    const runUnliked = () => redisClient.eval(
+        UNLIKE_LUA,
+        3,
+        RedisKeys.postLikesCount(postIdStr),
+        RedisKeys.userLikedSet(userIdStr),
+        RedisKeys.postLikedBy(postIdStr),
+        postIdStr,
+        userIdStr,
+        String(ENGAGEMENT_TTL),
+        String(LIKE_STATUS_TTL),
+    );
+
     try {
-        await redisClient.eval(
-            UNLIKE_LUA,
-            3,
-            RedisKeys.postLikesCount(postIdStr),
-            RedisKeys.userLikedSet(userIdStr),
-            RedisKeys.postLikedBy(postIdStr),
-            postIdStr,
-            userIdStr,
-            String(ENGAGEMENT_TTL),
-            String(LIKE_STATUS_TTL),
-        );
-
-        // Unlikes are always written to DB immediately so the DB fallback is accurate.
+        await runUnliked();
         await Like.deleteOne({ userId, postId }).catch(() => {});
-
         return true;
     } catch (err) {
+        if (err.message.includes('WRONGTYPE')) {
+            // Stale Hash key from old code — delete it and retry once
+            await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
+            try {
+                await runUnliked();
+                await Like.deleteOne({ userId, postId }).catch(() => {});
+                return true;
+            } catch {}
+        }
         console.error('[PostEngagement] onPostUnliked error:', err.message);
         return false;
     }
