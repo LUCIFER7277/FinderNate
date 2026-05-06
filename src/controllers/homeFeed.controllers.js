@@ -15,7 +15,7 @@ import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utils/reviewUtils.js';
 import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
 import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
-import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from '../utils/postEngagement.utils.js';
 
 /**
  * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
@@ -53,12 +53,20 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const cachedRaw = await redisClient.get(FEED_CACHE_KEY);
         if (cachedRaw) {
             const cached = JSON.parse(cachedRaw);
-            if (userId && cached?.data?.feed?.length) {
-                const cachedPostIds = cached.data.feed.map(p => p._id);
-                const likedSet = await batchIsLikedByUser(userId, cachedPostIds);
-                cached.data.feed = cached.data.feed.map(post => ({
+            if (cached?.data?.feed?.length) {
+                const cachedPosts = cached.data.feed;
+                const cachedPostIds = cachedPosts.map(p => p._id);
+                const [likedSet, likeCountMap] = await Promise.all([
+                    userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
+                    batchGetLikesCount(cachedPosts),
+                ]);
+                cached.data.feed = cachedPosts.map(post => ({
                     ...post,
-                    isLikedBy: likedSet.has(post._id.toString())
+                    engagement: {
+                        ...post.engagement,
+                        likes: likeCountMap.get(post._id.toString()) ?? post.engagement?.likes ?? 0,
+                    },
+                    isLikedBy: likedSet.has(post._id.toString()),
                 }));
             }
             return res.status(200).json(cached);
@@ -265,9 +273,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        const [likedPostIds, likesByPost] = await Promise.all([
+        const [likedPostIds, likesByPost, likeCountMap] = await Promise.all([
             userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(postIds),
+            batchGetLikesCount(posts),
         ]);
 
         // ✅ 4. Get top comments efficiently (no nested queries)
@@ -331,6 +340,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
             return {
                 ...post,
+                engagement: {
+                    ...post.engagement,
+                    likes: likeCountMap.get(postIdStr) ?? post.engagement?.likes ?? 0,
+                },
                 comments: commentsByPost.get(postIdStr) || [],
                 isLikedBy: likedPostIds.has(postIdStr),
                 likedBy: likedByUsers,

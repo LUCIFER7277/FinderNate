@@ -5,7 +5,7 @@ import { ApiResponse } from '../utils/ApiResponse.js';
 import SavedPost from '../models/savedPost.models.js';
 import { User } from '../models/user.models.js';
 import Post from '../models/userPost.models.js';
-import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from '../utils/postEngagement.utils.js';
 
 /**
  * Save a post to the user's saved posts collection (Instagram-style: Always private)
@@ -135,16 +135,22 @@ const getSavedPosts = asyncHandler(async (req, res) => {
         let enrichedSavedPosts = savedPosts;
         if (postDocs.length) {
             const postIds = postDocs.map(p => p._id);
-            const [likedSet, likedByMap] = await Promise.all([
+            const [likedSet, likedByMap, savedLikeCountMap] = await Promise.all([
                 batchIsLikedByUser(userId, postIds),
                 batchGetLikedByUsers(postIds),
+                batchGetLikesCount(postDocs),
             ]);
             enrichedSavedPosts = savedPosts.map(s => {
                 const post = s.postId;
                 if (!post) return s.toObject ? s.toObject() : s;
                 const idStr = post._id.toString();
+                const postObj = post.toObject ? post.toObject() : post;
                 const enrichedPost = {
-                    ...(post.toObject ? post.toObject() : post),
+                    ...postObj,
+                    engagement: {
+                        ...postObj.engagement,
+                        likes: savedLikeCountMap.get(idStr) ?? postObj.engagement?.likes ?? 0,
+                    },
                     isLikedBy: likedSet.has(idStr),
                     likedBy: likedByMap.get(idStr) || [],
                 };
