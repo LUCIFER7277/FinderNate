@@ -41,6 +41,7 @@
     "@stream-io/node-sdk": "^0.7.15",
     "axios": "^1.11.0",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.76.6",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
