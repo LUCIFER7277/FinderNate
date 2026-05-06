@@ -8,7 +8,7 @@ import { enrichWithRatings } from "../utils/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import Like from "../models/like.models.js";
-import { batchIsLikedByUser, batchGetLikedByUsers } from "../utils/postEngagement.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 import { getFollowStatus } from "../utils/followEngagement.utils.js";
 
@@ -403,9 +403,10 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             // Get likedBy from Redis Hash (max 20 per reel) + isLikedBy status
             const reelIds = reels.map(reel => reel._id);
-            const [likedReelSet, likesByReel] = await Promise.all([
+            const [likedReelSet, likesByReel, reelLikeCountMap] = await Promise.all([
                 currentUserId ? batchIsLikedByUser(currentUserId, reelIds) : Promise.resolve(new Set()),
                 batchGetLikedByUsers(reelIds),
+                batchGetLikesCount(reels),
             ]);
 
             // Get viewer's social graph for preview text
@@ -431,6 +432,10 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
                 return {
                     ...reel,
+                    engagement: {
+                        ...reel.engagement,
+                        likes: reelLikeCountMap.get(reelIdStr) ?? reel.engagement?.likes ?? 0,
+                    },
                     isLikedBy: likedReelSet.has(reelIdStr),
                     likedBy: likedByUsers,
                     likedByPreview: likedByPreview.likedByText ? {

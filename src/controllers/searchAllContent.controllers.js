@@ -8,7 +8,7 @@ import { ApiError } from '../utils/ApiError.js';
 import { getCoordinates } from '../utils/getCoordinates.js';
 import { filterBusinessPostsByPaymentPlan } from '../utils/businessPlan.utils.js';
 import { addBadgesToNestedUsers, addBadgesToUsers } from '../utils/userBadge.utils.js';
-import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from '../utils/postEngagement.utils.js';
 import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
 
 export const searchAllContent = async (req, res) => {
@@ -512,9 +512,10 @@ export const searchAllContent = async (req, res) => {
         // Stitch isLikedBy + likedBy (max 20 from Redis Hash) into search results
         const currentUserId = req.user?._id?.toString() ?? null;
         const contentIds = paginatedContent.map(item => item._id);
-        const [likedSet, likedByMap] = await Promise.all([
+        const [likedSet, likedByMap, searchLikeCountMap] = await Promise.all([
             currentUserId ? batchIsLikedByUser(req.user._id, contentIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(contentIds),
+            batchGetLikesCount(paginatedContent),
         ]);
 
         let userFollowing = [];
@@ -531,6 +532,10 @@ export const searchAllContent = async (req, res) => {
             const preview = getLikedByPreview(likedByUsers, currentUserId, userFollowing, userFollowers);
             return {
                 ...item,
+                engagement: {
+                    ...item.engagement,
+                    likes: searchLikeCountMap.get(idStr) ?? item.engagement?.likes ?? 0,
+                },
                 isLikedBy: likedSet.has(idStr),
                 likedBy: likedByUsers,
                 likedByPreview: preview.likedByText ? {
