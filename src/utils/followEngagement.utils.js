@@ -86,12 +86,11 @@ export async function getFollowStatus(followerId, targetUserId) {
  * Call when A follows B.
  *
  * All Redis writes happen in a single pipeline so they are committed together:
- *   - follow-status key → '1'
- *   - dirty set for 4-hourly DB sync
+ *   - follow-status SET → add targetId
  *   - B's followers LIST  (lpush + ltrim, newest-first, max 15)
  *   - A's following LIST  (lpush + ltrim, newest-first, max 15)
- *   - B's followers:temp SET   (pending 2h flush to DB)
- *   - A's following:temp SET   (pending 2h flush to DB)
+ *   - B's followers:temp SET   (pending flush to DB via cron)
+ *   - A's following:temp SET   (pending flush to DB via cron)
  *   - active-users tracking SET for the cron
  *   - INCR B's followers count
  *   - INCR A's following count
@@ -105,7 +104,6 @@ export async function getFollowStatus(followerId, targetUserId) {
 export async function onUserFollowed(followerId, targetUserId) {
     const followerIdStr = followerId.toString();
     const targetIdStr = targetUserId.toString();
-    const dirtyKey = RedisKeys.followsDirty();
     const followingStatusKey = RedisKeys.userFollowingStatus(followerIdStr);
     const followersListKey = RedisKeys.userFollowers(targetIdStr);
     const followingListKey = RedisKeys.userFollowing(followerIdStr);
@@ -138,11 +136,9 @@ export async function onUserFollowed(followerId, targetUserId) {
 
         const pipeline = redisClient.pipeline();
 
-        // Add targetId to follower's following SET + dirty set for deferred DB sync
+        // Add targetId to follower's following status SET
         pipeline.sadd(followingStatusKey, targetIdStr);
         pipeline.expire(followingStatusKey, FOLLOW_STATUS_TTL);
-        pipeline.sadd(dirtyKey, `${followerIdStr}:${targetIdStr}`);
-        pipeline.expire(dirtyKey, 25 * 60 * 60);
 
         // B's followers LIST — push A to front, trim to 15
         pipeline.lpush(followersListKey, followerIdStr);        // index 3
@@ -187,8 +183,7 @@ export async function onUserFollowed(followerId, targetUserId) {
  * Call when A unfollows B.
  *
  * All Redis writes happen in a single pipeline:
- *   - follow-status key → '0'
- *   - dirty set for 4-hourly DB sync
+ *   - remove targetId from follower's following status SET
  *   - remove A from B's followers LIST
  *   - remove B from A's following LIST
  *   - remove A from B's followers:temp SET
@@ -205,7 +200,6 @@ export async function onUserFollowed(followerId, targetUserId) {
 export async function onUserUnfollowed(followerId, targetUserId) {
     const followerIdStr = followerId.toString();
     const targetIdStr = targetUserId.toString();
-    const dirtyKey = RedisKeys.followsDirty();
     const followingStatusKey = RedisKeys.userFollowingStatus(followerIdStr);
     const followersListKey = RedisKeys.userFollowers(targetIdStr);
     const followingListKey = RedisKeys.userFollowing(followerIdStr);
@@ -241,11 +235,9 @@ export async function onUserUnfollowed(followerId, targetUserId) {
 
         const pipeline = redisClient.pipeline();
 
-        // Remove targetId from follower's following SET + dirty set for deferred DB sync
+        // Remove targetId from follower's following status SET
         pipeline.srem(followingStatusKey, targetIdStr);
         pipeline.expire(followingStatusKey, FOLLOW_STATUS_TTL);
-        pipeline.sadd(dirtyKey, `${followerIdStr}:${targetIdStr}`);
-        pipeline.expire(dirtyKey, 25 * 60 * 60);
 
         // Remove A from B's followers LIST
         pipeline.lrem(followersListKey, 0, followerIdStr);
