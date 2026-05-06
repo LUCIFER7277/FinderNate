@@ -1,7 +1,7 @@
 import { User } from "../models/user.models.js";
 import { LegalVersion } from "../models/legalVersion.models.js";
 import { LEGAL_VERSIONS } from "../constants/legalVersions.js";
-import { ApiError } from "../utlis/ApiError.js";
+import { ApiError } from "../utils/ApiError.js";
 
 /**
  * Get effective version, preferring DB overrides over code constants.

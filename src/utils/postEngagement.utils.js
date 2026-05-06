@@ -102,7 +102,6 @@ export async function batchIsLikedByUser(userId, postIds) {
             const dbLikes = await Like.find({ userId, postId: { $in: unknownIds } }).select('postId').lean();
             const dbLikedSet = new Set(dbLikes.map(l => l.postId.toString()));
 
-            // Seed Hash with confirmed statuses
             const pipeline = redisClient.pipeline();
             const hsetArgs = [userHashKey];
             for (const id of unknownIds) {
@@ -435,8 +434,6 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
         batchGetLikedByUsers(items.map(i => i._id)),
     ]);
 
-    // Inject current user if their like is in the status cache but not yet in the likedBy Hash
-    // (happens when the likedBy Hash was seeded from DB before this like was committed to DB)
     if (userId) {
         const userIdStr = userId.toString();
         for (const [idStr, users] of likedByUsersMap) {
@@ -456,8 +453,6 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
         }
     }
 
-    // User profiles are already embedded in the Hash values — no separate lookup needed.
-    // Only fetch the viewer's social graph for the preview text.
     const UserModel = Post.db.model('User');
     const me = userId
         ? await UserModel.findById(userId, 'following followers').lean()
@@ -602,7 +597,6 @@ export async function updateUserInLikedByHashes(userId, { username, fullName, pr
 
         if (!likedPostIds.length) return;
 
-        // Fetch current likedAt values to preserve them
         const getPipeline = redisClient.pipeline();
         for (const postId of likedPostIds) {
             getPipeline.hget(RedisKeys.postLikedBy(postId), userIdStr);
@@ -629,7 +623,7 @@ export async function updateUserInLikedByHashes(userId, { username, fullName, pr
 }
 
 // ---------------------------------------------------------------------------
-// onCommentCreated / onCommentDeleted — unchanged
+// onCommentCreated / onCommentDeleted
 // ---------------------------------------------------------------------------
 
 export async function onCommentCreated(postId) {
