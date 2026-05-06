@@ -1,11 +1,11 @@
 import crypto from 'crypto';
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import Business from '../models/business.models.js';
 import { User } from '../models/user.models.js';
-import { FeedCacheManager } from '../utlis/cache.utils.js';
+import { FeedCacheManager } from '../utils/cache.utils.js';
 import { redisClient } from '../config/redis.config.js';
 
 /**

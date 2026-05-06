@@ -1,10 +1,10 @@
 import Notification from "../models/notification.models.js";
 import Message from "../models/message.models.js";
 import Chat from "../models/chat.models.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { ApiError } from "../utlis/ApiError.js";
-import notificationCache from "../utlis/notificationCache.utils.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import notificationCache from "../utils/notificationCache.utils.js";
 
 const sendRealTimeNotification = async (recipientId, notification) => {
     // Use Socket.IO Redis adapter to emit to user across all processes

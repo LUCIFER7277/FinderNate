@@ -1,6 +1,6 @@
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
 import {
@@ -16,7 +16,7 @@ import {
     SubscriptionLogger,
     ErrorLogger,
     MetricsCollector
-} from '../utlis/monitoring.utils.js';
+} from '../utils/monitoring.utils.js';
 
 // Subscription pricing configuration (in INR)
 const SUBSCRIPTION_PLANS = {
@@ -468,7 +468,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
 
     // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager, UserCacheManager } = await import('../utlis/cache.utils.js');
+        const { FeedCacheManager, UserCacheManager } = await import('../utils/cache.utils.js');
         await Promise.allSettled([
             UserCacheManager.invalidateUserProfile(userId.toString()),
             FeedCacheManager.invalidateUserFeed(userId),
@@ -621,7 +621,7 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
 
     // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager, UserCacheManager } = await import('../utlis/cache.utils.js');
+        const { FeedCacheManager, UserCacheManager } = await import('../utils/cache.utils.js');
 
         await Promise.allSettled([
             UserCacheManager.invalidateUserProfile(userId.toString()),

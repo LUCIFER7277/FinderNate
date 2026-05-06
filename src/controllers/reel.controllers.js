@@ -1,15 +1,15 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import Post from "../models/userPost.models.js";
 import { User } from "../models/user.models.js";
 import Follower from "../models/follower.models.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
-import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import Like from "../models/like.models.js";
 import mongoose from "mongoose";
-import { getFollowStatus } from "../utlis/followEngagement.utils.js";
+import { getFollowStatus } from "../utils/followEngagement.utils.js";
 
 
 // Simple in-memory cache

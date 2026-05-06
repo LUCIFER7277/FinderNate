@@ -1,20 +1,20 @@
 import Post from '../models/userPost.models.js';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Comment from '../models/comment.models.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import Like from '../models/like.models.js';
 import PostInteraction from '../models/postInteraction.models.js';
 import { setCache } from '../middlewares/cache.middleware.js';
 import { redisClient, RedisKeys, RedisTTL } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
-import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
+import { bulkCheckActivePaymentPlans } from '../utils/businessPlan.utils.js';
 import mongoose from 'mongoose';
-import { enrichWithRatings } from '../utlis/reviewUtils.js';
-import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
-import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
+import { enrichWithRatings } from '../utils/reviewUtils.js';
+import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
+import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
 
 /**
  * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY

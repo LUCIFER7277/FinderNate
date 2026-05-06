@@ -3,11 +3,11 @@ import Reel from '../models/reels.models.js';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
 import SearchSuggestion from '../models/searchSuggestion.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { getCoordinates } from '../utlis/getCoordinates.js';
-import { filterBusinessPostsByPaymentPlan } from '../utlis/businessPlan.utils.js';
-import { addBadgesToNestedUsers, addBadgesToUsers } from '../utlis/userBadge.utils.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
+import { getCoordinates } from '../utils/getCoordinates.js';
+import { filterBusinessPostsByPaymentPlan } from '../utils/businessPlan.utils.js';
+import { addBadgesToNestedUsers, addBadgesToUsers } from '../utils/userBadge.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {

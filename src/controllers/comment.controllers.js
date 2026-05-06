@@ -1,11 +1,11 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Comment from "../models/comment.models.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
 import { createCommentNotification } from "./notification.controllers.js";
-import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
+import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 
 // Create a new comment (or reply)
 export const createComment = asyncHandler(async (req, res) => {

@@ -1,29 +1,29 @@
 import mongoose from 'mongoose';
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import Reel from "../models/reels.models.js";
-import { uploadBufferToBunny, deleteMultipleFromBunny, deleteFromBunny, generateOptimizedImageUrl } from "../utlis/bunny.js";
-import { getCoordinates } from "../utlis/getCoordinates.js";
-import { validateDeliveryAndLocation } from "../utlis/deliveryValidation.js";
-import { filterPostsByPrivacy, canViewPost } from "../utlis/postPrivacy.js";
+import { uploadBufferToBunny, deleteMultipleFromBunny, deleteFromBunny, generateOptimizedImageUrl } from "../utils/bunny.js";
+import { getCoordinates } from "../utils/getCoordinates.js";
+import { validateDeliveryAndLocation } from "../utils/deliveryValidation.js";
+import { filterPostsByPrivacy, canViewPost } from "../utils/postPrivacy.js";
 import { User } from "../models/user.models.js";
 import Follower from "../models/follower.models.js";
 import Like from "../models/like.models.js";
-import { CacheManager, FeedCacheManager } from "../utlis/cache.utils.js";
+import { CacheManager, FeedCacheManager } from "../utils/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
-import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utlis/defaultSearch.utils.js";
+import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utils/defaultSearch.utils.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
-import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
-import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUserIds } from "../utlis/postEngagement.utils.js";
-import { hasActivePaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
+import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUserIds } from "../utils/postEngagement.utils.js";
+import { hasActivePaymentPlan } from "../utils/businessPlan.utils.js";
 import Business from "../models/business.models.js";
-import { getFollowStatus } from '../utlis/followEngagement.utils.js';
+import { getFollowStatus } from '../utils/followEngagement.utils.js';
 const extractMediaFiles = (files) => {
     const allFiles = [];
     ["image", "video", "reel", "story"].forEach((field) => {
@@ -1509,7 +1509,7 @@ export const getMyPosts = asyncHandler(async (req, res) => {
     const currentUserData = await User.findById(userId).select('isBusinessProfile').lean();
 
     if (currentUserData?.isBusinessProfile) {
-        const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+        const { hasActivePaymentPlan } = await import('../utils/businessPlan.utils.js');
         const hasActivePlan = await hasActivePaymentPlan(userId);
 
         if (!hasActivePlan) {
@@ -1639,7 +1639,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             const profileUser = await User.findById(userId).select('isBusinessProfile').lean();
 
             if (profileUser?.isBusinessProfile) {
-                const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+                const { hasActivePaymentPlan } = await import('../utils/businessPlan.utils.js');
                 const hasActivePlan = await hasActivePaymentPlan(userId);
 
                 if (!hasActivePlan) {

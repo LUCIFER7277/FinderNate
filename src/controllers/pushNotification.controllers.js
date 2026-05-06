@@ -1,6 +1,6 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { ApiError } from "../utlis/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
 import PushSubscription from "../models/pushSubscription.models.js";
 import webpush from 'web-push';
 
