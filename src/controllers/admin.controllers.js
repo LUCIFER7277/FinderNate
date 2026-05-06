@@ -7,12 +7,12 @@ import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import Comment from "../models/comment.models.js";
 import Chat from "../models/chat.models.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import mongoose from "mongoose";
 import socketManager from "../config/socket.js";
-import notificationCache from "../utlis/notificationCache.utils.js";
+import notificationCache from "../utils/notificationCache.utils.js";
 
 // ===============================
 // ADMIN AUTHENTICATION

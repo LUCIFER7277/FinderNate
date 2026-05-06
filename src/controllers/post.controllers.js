@@ -1,29 +1,29 @@
 import mongoose from 'mongoose';
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import Reel from "../models/reels.models.js";
-import { uploadBufferToBunny, deleteMultipleFromBunny, deleteFromBunny, generateOptimizedImageUrl } from "../utlis/bunny.js";
-import { getCoordinates } from "../utlis/getCoordinates.js";
-import { validateDeliveryAndLocation } from "../utlis/deliveryValidation.js";
-import { filterPostsByPrivacy, canViewPost } from "../utlis/postPrivacy.js";
+import { uploadBufferToBunny, deleteMultipleFromBunny, deleteFromBunny, generateOptimizedImageUrl } from "../utils/bunny.js";
+import { getCoordinates } from "../utils/getCoordinates.js";
+import { validateDeliveryAndLocation } from "../utils/deliveryValidation.js";
+import { filterPostsByPrivacy, canViewPost } from "../utils/postPrivacy.js";
 import { User } from "../models/user.models.js";
 import Follower from "../models/follower.models.js";
 import Like from "../models/like.models.js";
-import { CacheManager, FeedCacheManager } from "../utlis/cache.utils.js";
+import { CacheManager, FeedCacheManager } from "../utils/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
-import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utlis/defaultSearch.utils.js";
+// import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utils/defaultSearch.utils.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
-import { getLikedByPreview } from "../utlis/likedByPreview.utils.js";
-import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUserIds } from "../utlis/postEngagement.utils.js";
-import { hasActivePaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
+import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUsers, stitchEngagement } from "../utils/postEngagement.utils.js";
+import { hasActivePaymentPlan } from "../utils/businessPlan.utils.js";
 import Business from "../models/business.models.js";
-
+import { getFollowStatus } from '../utils/followEngagement.utils.js';
 const extractMediaFiles = (files) => {
     const allFiles = [];
     ["image", "video", "reel", "story"].forEach((field) => {
@@ -1349,22 +1349,7 @@ export const getTrendingPosts = asyncHandler(async (req, res) => {
         return res.status(200).json(new ApiResponse(200, posts, "Trending posts fetched successfully"));
     }
 
-    const [likedSet, likeCountMap] = await Promise.all([
-        currentUser ? batchIsLikedByUser(currentUser._id, posts.map(p => p._id)) : Promise.resolve(new Set()),
-        batchGetLikesCount(posts),
-    ]);
-
-    const stitched = posts.map(post => {
-        const idStr = post._id.toString();
-        return {
-            ...post,
-            isLikedBy: currentUser ? likedSet.has(idStr) : false,
-            engagement: {
-                ...(post.engagement || {}),
-                likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
-            },
-        };
-    });
+    const stitched = await stitchEngagement(currentUser?._id ?? null, posts);
 
     return res.status(200).json(new ApiResponse(200, stitched, "Trending posts fetched successfully"));
 });
@@ -1446,32 +1431,18 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         return postObj;
     });
 
-    // Stitch isLikedBy (Redis-first) and live like count for each post
+    // Stitch isLikedBy, live like count, and likedBy from Redis Hash
     const currentUserId = req.user?._id?.toString();
-    const [likedSet, likeCountMap, likedByIdsMap] = await Promise.all([
+    const [likedSet, likeCountMap, likedByUsersMap] = await Promise.all([
         currentUserId ? batchIsLikedByUser(req.user._id, postsWithThumbnails.map(p => p._id)) : Promise.resolve(new Set()),
         batchGetLikesCount(postsWithThumbnails),
-        batchGetLikedByUserIds(postsWithThumbnails.map(p => p._id)),
+        batchGetLikedByUsers(postsWithThumbnails.map(p => p._id)),
     ]);
-
-    // Inject current user into likedByIdsMap if their like is still deferred in Redis
-    if (currentUserId) {
-        for (const [idStr, userIds] of likedByIdsMap) {
-            if (likedSet.has(idStr) && !userIds.includes(currentUserId)) userIds.push(currentUserId);
-        }
-    }
-
-    const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
-    const UserModel = Post.db.model('User');
-    const likerProfiles = allLikerIds.length
-        ? await UserModel.find({ _id: { $in: allLikerIds } }, 'username profileImageUrl fullName isVerified').lean()
-        : [];
-    const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
 
     postsWithThumbnails.forEach(post => {
         const idStr = post._id.toString();
         post.isLikedBy = currentUserId ? likedSet.has(idStr) : false;
-        post.likedBy = (likedByIdsMap.get(idStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
+        post.likedBy = likedByUsersMap.get(idStr) || [];
         post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
     });
 
@@ -1509,7 +1480,7 @@ export const getMyPosts = asyncHandler(async (req, res) => {
     const currentUserData = await User.findById(userId).select('isBusinessProfile').lean();
 
     if (currentUserData?.isBusinessProfile) {
-        const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+        const { hasActivePaymentPlan } = await import('../utils/businessPlan.utils.js');
         const hasActivePlan = await hasActivePaymentPlan(userId);
 
         if (!hasActivePlan) {
@@ -1639,7 +1610,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             const profileUser = await User.findById(userId).select('isBusinessProfile').lean();
 
             if (profileUser?.isBusinessProfile) {
-                const { hasActivePaymentPlan } = await import('../utlis/businessPlan.utils.js');
+                const { hasActivePaymentPlan } = await import('../utils/businessPlan.utils.js');
                 const hasActivePlan = await hasActivePaymentPlan(userId);
 
                 if (!hasActivePlan) {
@@ -1674,31 +1645,18 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         const totalPages = Math.ceil(totalPosts / pageLimit);
         const visiblePostsCount = postsAfterBusinessFilter.length;
 
-        // Stitch isLikedBy (Redis-first) and live like count
+        // Stitch isLikedBy, live like count, and likedBy from Redis Hash
         const currentUserId = req.user?._id?.toString();
-        const [likedSet, likeCountMap, likedByIdsMap] = await Promise.all([
+        const [likedSet, likeCountMap, likedByUsersMap] = await Promise.all([
             currentUserId ? batchIsLikedByUser(req.user._id, postsAfterBusinessFilter.map(p => p._id)) : Promise.resolve(new Set()),
             batchGetLikesCount(postsAfterBusinessFilter),
-            batchGetLikedByUserIds(postsAfterBusinessFilter.map(p => p._id)),
+            batchGetLikedByUsers(postsAfterBusinessFilter.map(p => p._id)),
         ]);
-
-        // Inject current user into likedByIdsMap if their like is still deferred in Redis
-        if (currentUserId) {
-            for (const [idStr, userIds] of likedByIdsMap) {
-                if (likedSet.has(idStr) && !userIds.includes(currentUserId)) userIds.push(currentUserId);
-            }
-        }
-
-        const allLikerIds = [...new Set([...likedByIdsMap.values()].flat())];
-        const likerProfiles = allLikerIds.length
-            ? await Post.db.model('User').find({ _id: { $in: allLikerIds } }, 'username profileImageUrl fullName isVerified').lean()
-            : [];
-        const profileMap = new Map(likerProfiles.map(u => [u._id.toString(), u]));
 
         postsAfterBusinessFilter.forEach(post => {
             const idStr = post._id.toString();
             post.isLikedBy = currentUserId ? likedSet.has(idStr) : false;
-            post.likedBy = (likedByIdsMap.get(idStr) || []).map(uid => profileMap.get(uid)).filter(Boolean);
+            post.likedBy = likedByUsersMap.get(idStr) || [];
             post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
         });
 

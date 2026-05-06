@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import Subscription from '../models/subscription.models.js';
 import Business from '../models/business.models.js';
 import { User } from '../models/user.models.js';
-import { FeedCacheManager } from '../utlis/cache.utils.js';
+import { FeedCacheManager } from '../utils/cache.utils.js';
 import { redisClient } from '../config/redis.config.js';
 
 /**
@@ -63,7 +63,7 @@ export const handleExpiredSubscriptions = async () => {
 
                 // 3. Invalidate feed and profile caches (subscription badge changed on expiry)
                 try {
-                    const { UserCacheManager } = await import('../utlis/cache.utils.js');
+                    const { UserCacheManager } = await import('../utils/cache.utils.js');
                     await Promise.allSettled([
                         UserCacheManager.invalidateUserProfile(userId.toString()),
                         FeedCacheManager.invalidateUserFeed(userId),

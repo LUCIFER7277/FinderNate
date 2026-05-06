@@ -3,12 +3,13 @@ import Reel from "../models/reels.models.js";
 import Story from "../models/story.models.js";
 import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
+import { filterBusinessPostsByPaymentPlan } from "../utils/businessPlan.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -328,6 +329,25 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         totalAvailable = allPosts.length;
         totalPages = Math.ceil(totalAvailable / limit);
         hasNextPage = page < totalPages;
+    }
+
+    // Stitch like engagement onto feed items
+    const currentUserId = req.user?._id ?? null;
+    const feedIds = feed.map(item => item._id).filter(Boolean);
+    if (feedIds.length) {
+        const [likedSet, likedByMap] = await Promise.all([
+            currentUserId ? batchIsLikedByUser(currentUserId, feedIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(feedIds),
+        ]);
+        feed = feed.map(item => {
+            const idStr = item._id?.toString();
+            if (!idStr) return item;
+            return {
+                ...item,
+                isLikedBy: currentUserId ? likedSet.has(idStr) : false,
+                likedBy: likedByMap.get(idStr) || [],
+            };
+        });
     }
 
     res.status(200).json(new ApiResponse(200, {

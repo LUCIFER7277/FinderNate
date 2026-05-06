@@ -1,20 +1,21 @@
 import Post from '../models/userPost.models.js';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Comment from '../models/comment.models.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import Like from '../models/like.models.js';
 import PostInteraction from '../models/postInteraction.models.js';
 import { setCache } from '../middlewares/cache.middleware.js';
 import { redisClient, RedisKeys, RedisTTL } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
-import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
+import { bulkCheckActivePaymentPlans } from '../utils/businessPlan.utils.js';
 import mongoose from 'mongoose';
-import { enrichWithRatings } from '../utlis/reviewUtils.js';
-import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
-import { getLikedByPreview } from '../utlis/likedByPreview.utils.js';
+import { enrichWithRatings } from '../utils/reviewUtils.js';
+import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
+import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
 
 /**
  * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
@@ -54,9 +55,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             const cached = JSON.parse(cachedRaw);
             if (userId && cached?.data?.feed?.length) {
                 const cachedPostIds = cached.data.feed.map(p => p._id);
-                const userLikes = await Like.find({ userId, postId: { $in: cachedPostIds } })
-                    .select('postId').lean();
-                const likedSet = new Set(userLikes.map(l => l.postId.toString()));
+                const likedSet = await batchIsLikedByUser(userId, cachedPostIds);
                 cached.data.feed = cached.data.feed.map(post => ({
                     ...post,
                     isLikedBy: likedSet.has(post._id.toString())
@@ -264,41 +263,12 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             return res.status(200).json(emptyResponse);
         }
 
-        // ✅ 3. Get user likes in a single optimized query
+        // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        let likedPostIds = new Set();
-        if (userId) {
-            const userLikes = await Like.find({
-                userId: userId,
-                postId: { $in: postIds }
-            }).select('postId').lean();
-            likedPostIds = new Set(userLikes.map(like => like.postId.toString()));
-        }
-
-        // ✅ 3.5. Get all likes for posts with user details for "Liked by" preview
-        const allLikes = await Like.find({
-            postId: { $in: postIds }
-        })
-        .populate('userId', 'username fullName profileImageUrl')
-        .select('postId userId')
-        .lean();
-
-        // Group likes by postId
-        const likesByPost = new Map();
-        allLikes.forEach(like => {
-            if (like.userId) { // Filter out likes from deleted users
-                const postId = like.postId.toString();
-                if (!likesByPost.has(postId)) {
-                    likesByPost.set(postId, []);
-                }
-                likesByPost.get(postId).push({
-                    _id: like.userId._id,
-                    username: like.userId.username,
-                    fullName: like.userId.fullName,
-                    profileImageUrl: like.userId.profileImageUrl
-                });
-            }
-        });
+        const [likedPostIds, likesByPost] = await Promise.all([
+            userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(postIds),
+        ]);
 
         // ✅ 4. Get top comments efficiently (no nested queries)
         const allComments = await Comment.find({
@@ -352,7 +322,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             const postIdStr = post._id.toString();
             const likedByUsers = likesByPost.get(postIdStr) || [];
 
-            // Generate "Liked by" preview
             const likedByPreview = getLikedByPreview(
                 likedByUsers,
                 userId,
@@ -364,6 +333,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 ...post,
                 comments: commentsByPost.get(postIdStr) || [],
                 isLikedBy: likedPostIds.has(postIdStr),
+                likedBy: likedByUsers,
                 likedByPreview: likedByPreview.likedByText ? {
                     text: likedByPreview.likedByText,
                     previewUser: likedByPreview.previewUser,

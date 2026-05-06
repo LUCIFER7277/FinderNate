@@ -1,8 +1,8 @@
 import Story from "../models/story.models.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { uploadBufferToBunny } from "../utlis/bunny.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import { uploadBufferToBunny } from "../utils/bunny.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
 import { checkContentVisibility } from "../middlewares/privacy.middleware.js";
@@ -328,7 +328,7 @@ export const deleteStory = asyncHandler(async (req, res) => {
 
     // Delete media from Bunny CDN
     try {
-        const { deleteFromBunny } = await import("../utlis/bunny.js");
+        const { deleteFromBunny } = await import("../utils/bunny.js");
         await deleteFromBunny(story.mediaUrl);
     } catch (error) {
         console.error('⚠️ Failed to delete story media from Bunny CDN:', error.message);

@@ -1,12 +1,12 @@
 import Follower from "../models/follower.models.js";
 import FollowRequest from "../models/followRequest.models.js";
 import { User } from "../models/user.models.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { ApiError } from "../utlis/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
 import { createFollowNotification } from "./notification.controllers.js";
 import { redisClient, RedisKeys, FOLLOW_LIST_MAX } from "../config/redis.config.js";
-import { addBadgesToUsers } from "../utlis/userBadge.utils.js";
+import { addBadgesToUsers } from "../utils/userBadge.utils.js";
 import { invalidateViewableUsersCache } from "../middlewares/privacy.middleware.js";
 import {
     getFollowStatus,
@@ -14,7 +14,7 @@ import {
     onUserUnfollowed,
     getFollowersCount,
     getFollowingCount,
-} from "../utlis/followEngagement.utils.js";
+} from "../utils/followEngagement.utils.js";
 
 // Follow a user (with privacy support)
 export const followUser = asyncHandler(async (req, res) => {

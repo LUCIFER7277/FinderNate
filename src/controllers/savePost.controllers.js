@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { ApiError } from '../utils/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
 import SavedPost from '../models/savedPost.models.js';
 import { User } from '../models/user.models.js';
 import Post from '../models/userPost.models.js';
+import { batchIsLikedByUser, batchGetLikedByUsers } from '../utils/postEngagement.utils.js';
 
 /**
  * Save a post to the user's saved posts collection (Instagram-style: Always private)
@@ -129,9 +130,32 @@ const getSavedPosts = asyncHandler(async (req, res) => {
         // Get total count for pagination
         const totalSavedPosts = await SavedPost.countDocuments({ userId });
 
+        // Stitch like engagement on populated post objects
+        const postDocs = savedPosts.map(s => s.postId).filter(Boolean);
+        let enrichedSavedPosts = savedPosts;
+        if (postDocs.length) {
+            const postIds = postDocs.map(p => p._id);
+            const [likedSet, likedByMap] = await Promise.all([
+                batchIsLikedByUser(userId, postIds),
+                batchGetLikedByUsers(postIds),
+            ]);
+            enrichedSavedPosts = savedPosts.map(s => {
+                const post = s.postId;
+                if (!post) return s.toObject ? s.toObject() : s;
+                const idStr = post._id.toString();
+                const enrichedPost = {
+                    ...(post.toObject ? post.toObject() : post),
+                    isLikedBy: likedSet.has(idStr),
+                    likedBy: likedByMap.get(idStr) || [],
+                };
+                const base = s.toObject ? s.toObject() : { ...s };
+                return { ...base, postId: enrichedPost };
+            });
+        }
+
         return res.status(200).json(
             new ApiResponse(200, {
-                savedPosts,
+                savedPosts: enrichedSavedPosts,
                 pagination: {
                     totalPosts: totalSavedPosts,
                     currentPage: parseInt(page),
