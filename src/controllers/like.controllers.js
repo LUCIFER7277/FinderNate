@@ -67,12 +67,14 @@ async function getLikedByList(postId, { includeUser = null, includeUserId = null
     const postIdStr = postId.toString();
     const includeId = includeUser?._id?.toString() ?? (includeUserId ? includeUserId.toString() : null);
 
-    // Page 1: read from the Redis Hash
+    // Page 1: read from the Redis Hash; fall through to DB if empty or Redis is down
     if (page === 1) {
         try {
             const hashData = await redisClient.hgetall(RedisKeys.postLikedBy(postIdStr));
-            if (hashData !== null) {
-                let users = Object.values(hashData)
+            const entries = hashData ? Object.values(hashData) : null;
+
+            if (entries && entries.length > 0) {
+                let users = entries
                     .map(v => { try { return JSON.parse(v); } catch { return null; } })
                     .filter(Boolean);
 
@@ -103,8 +105,9 @@ async function getLikedByList(postId, { includeUser = null, includeUserId = null
 
                 return { users: pageUsers, hasMore };
             }
+            // hashData null (key missing) or empty hash → fall through to DB
         } catch (_) {
-            // Fall through to DB on any Redis/parse error
+            // Redis down or parse error → fall through to DB
         }
     }
 
@@ -247,30 +250,13 @@ export const getLikedByUsers = asyncHandler(async (req, res) => {
     const currentUserId = req.user?._id?.toString();
     const parsedPage = Math.max(1, parseInt(page, 10) || 1);
     const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
-    const skip = (parsedPage - 1) * parsedLimit;
 
-    // Exclude current user — client prepends them when isLikedByCurrentUser is true
-    const query = currentUserId
-        ? { postId, userId: { $ne: currentUserId } }
-        : { postId };
-
-    const likes = await Like.find(query)
-        .select('userId')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parsedLimit + 1)
-        .lean();
-
-    const hasMore = likes.length > parsedLimit;
-    const userIds = likes.slice(0, parsedLimit).map(l => l.userId);
-
-    const fetched = userIds.length
-        ? await User.find({ _id: { $in: userIds } }, USER_FIELDS).lean()
-        : [];
-
-    // Preserve DB sort order (User.find does not guarantee it)
-    const profileMap = new Map(fetched.map(u => [u._id.toString(), u]));
-    const users = userIds.map(id => profileMap.get(id.toString())).filter(Boolean);
+    // Page 1 reads from Redis hash (includes unsynced likes); page 2+ falls back to DB
+    const { users, hasMore } = await getLikedByList(postId, {
+        excludeUserId: currentUserId || null,
+        page: parsedPage,
+        limit: parsedLimit,
+    });
 
     return res.status(200).json(new ApiResponse(200, { users, hasMore, page: parsedPage }, "Liked by users fetched successfully"));
 });
