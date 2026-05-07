@@ -33,6 +33,12 @@ local userData   = ARGV[3]
 local engTTL     = tonumber(ARGV[4])
 local likeTTL    = tonumber(ARGV[5])
 local seedCount  = ARGV[6]
+local ct = redis.call('type', countKey).ok
+if ct ~= 'none' and ct ~= 'string' then redis.call('del', countKey) end
+local st = redis.call('type', userSetKey).ok
+if st ~= 'none' and st ~= 'set' then redis.call('del', userSetKey) end
+local ht = redis.call('type', likedByKey).ok
+if ht ~= 'none' and ht ~= 'hash' then redis.call('del', likedByKey) end
 redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
 local newCount = tonumber(redis.call('incr', countKey))
 redis.call('expire', countKey, engTTL)
@@ -54,6 +60,12 @@ local userId     = ARGV[2]
 local engTTL     = tonumber(ARGV[3])
 local likeTTL    = tonumber(ARGV[4])
 local seedCount  = ARGV[5]
+local ct = redis.call('type', countKey).ok
+if ct ~= 'none' and ct ~= 'string' then redis.call('del', countKey) end
+local st = redis.call('type', userSetKey).ok
+if st ~= 'none' and st ~= 'set' then redis.call('del', userSetKey) end
+local ht = redis.call('type', likedByKey).ok
+if ht ~= 'none' and ht ~= 'hash' then redis.call('del', likedByKey) end
 redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
 local c = tonumber(redis.call('decr', countKey))
 if c < 0 then
@@ -533,8 +545,14 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
         const newCount = await runLiked();
         return { ok: true, count: Number(newCount) };
     } catch (err) {
+        // Lua type guards handle this inline now; this catch is a last-resort fallback
+        // for any WRONGTYPE that slips through (e.g. key created between type-check and del)
         if (err.message.includes('WRONGTYPE')) {
-            await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
+            await Promise.all([
+                redisClient.del(RedisKeys.postLikesCount(postIdStr)).catch(() => {}),
+                redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {}),
+                redisClient.del(RedisKeys.postLikedBy(postIdStr)).catch(() => {}),
+            ]);
             try {
                 const newCount = await runLiked();
                 return { ok: true, count: Number(newCount) };
@@ -587,7 +605,11 @@ export async function onPostUnliked(userId, postId) {
         return { ok: true, count: Number(newCount) };
     } catch (err) {
         if (err.message.includes('WRONGTYPE')) {
-            await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
+            await Promise.all([
+                redisClient.del(RedisKeys.postLikesCount(postIdStr)).catch(() => {}),
+                redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {}),
+                redisClient.del(RedisKeys.postLikedBy(postIdStr)).catch(() => {}),
+            ]);
             try {
                 const newCount = await runUnliked();
                 await Like.deleteOne({ userId, postId }).catch(() => {});
