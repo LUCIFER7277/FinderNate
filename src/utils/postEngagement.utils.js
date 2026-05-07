@@ -40,6 +40,9 @@ if st ~= 'none' and st ~= 'set' then redis.call('del', userSetKey) end
 local ht = redis.call('type', likedByKey).ok
 if ht ~= 'none' and ht ~= 'hash' then redis.call('del', likedByKey) end
 redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
+if redis.call('hexists', likedByKey, userId) == 1 then
+  return tonumber(redis.call('get', countKey)) or tonumber(seedCount)
+end
 local newCount = tonumber(redis.call('incr', countKey))
 redis.call('expire', countKey, engTTL)
 redis.call('sadd', userSetKey, postId)
@@ -67,6 +70,9 @@ if st ~= 'none' and st ~= 'set' then redis.call('del', userSetKey) end
 local ht = redis.call('type', likedByKey).ok
 if ht ~= 'none' and ht ~= 'hash' then redis.call('del', likedByKey) end
 redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
+if redis.call('hexists', likedByKey, userId) == 0 then
+  return tonumber(redis.call('get', countKey)) or tonumber(seedCount)
+end
 local c = tonumber(redis.call('decr', countKey))
 if c < 0 then
   redis.call('set', countKey, '0', 'EX', engTTL)
