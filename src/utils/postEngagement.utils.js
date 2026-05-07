@@ -17,7 +17,12 @@ const PREVIEW_LIMIT = 20;
 // ---------------------------------------------------------------------------
 
 // KEYS: [countKey, userLikedSetKey, likedByKey]
-// ARGV: [postId, userId, userDataJSON, engTTL, likeTTL]
+// ARGV: [postId, userId, userDataJSON, engTTL, likeTTL, seedCount]
+//
+// seedCount: DB like count passed by caller; used to initialise countKey via SET NX
+// so the key always exists before INCR, preventing the race where two concurrent
+// likes both find the key missing, both skip the increment, and the count ends up
+// one (or more) short.
 const LIKE_LUA = `
 local countKey   = KEYS[1]
 local userSetKey = KEYS[2]
@@ -27,19 +32,19 @@ local userId     = ARGV[2]
 local userData   = ARGV[3]
 local engTTL     = tonumber(ARGV[4])
 local likeTTL    = tonumber(ARGV[5])
+local seedCount  = ARGV[6]
+redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
+local newCount = tonumber(redis.call('incr', countKey))
+redis.call('expire', countKey, engTTL)
 redis.call('sadd', userSetKey, postId)
 redis.call('expire', userSetKey, likeTTL)
-if redis.call('exists', countKey) == 1 then
-  redis.call('incr', countKey)
-  redis.call('expire', countKey, engTTL)
-end
 redis.call('hset', likedByKey, userId, userData)
 redis.call('expire', likedByKey, engTTL)
-return 1
+return newCount
 `;
 
 // KEYS: [countKey, userLikedSetKey, likedByKey]
-// ARGV: [postId, userId, engTTL, likeTTL]
+// ARGV: [postId, userId, engTTL, likeTTL, seedCount]
 const UNLIKE_LUA = `
 local countKey   = KEYS[1]
 local userSetKey = KEYS[2]
@@ -48,15 +53,19 @@ local postId     = ARGV[1]
 local userId     = ARGV[2]
 local engTTL     = tonumber(ARGV[3])
 local likeTTL    = tonumber(ARGV[4])
-redis.call('srem', userSetKey, postId)
-redis.call('expire', userSetKey, likeTTL)
-if redis.call('exists', countKey) == 1 then
-  local c = redis.call('decr', countKey)
-  if c < 0 then redis.call('set', countKey, '0') end
+local seedCount  = ARGV[5]
+redis.call('set', countKey, seedCount, 'EX', engTTL, 'NX')
+local c = tonumber(redis.call('decr', countKey))
+if c < 0 then
+  redis.call('set', countKey, '0', 'EX', engTTL)
+  c = 0
+else
   redis.call('expire', countKey, engTTL)
 end
+redis.call('srem', userSetKey, postId)
+redis.call('expire', userSetKey, likeTTL)
 redis.call('hdel', likedByKey, userId)
-return 1
+return c
 `;
 
 // ---------------------------------------------------------------------------
@@ -451,18 +460,10 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
         }
     }
 
-    const UserModel = Post.db.model('User');
-    const me = userId
-        ? await UserModel.findById(userId, 'following followers').lean()
-        : null;
-
-    const userFollowing = me?.following || [];
-    const userFollowers = me?.followers || [];
-
     return items.map(item => {
         const idStr = item._id.toString();
         const likedByUsers = likedByUsersMap.get(idStr) || [];
-        const preview = getLikedByPreview(likedByUsers, userId ? userId.toString() : null, userFollowing, userFollowers);
+        const preview = getLikedByPreview(likedByUsers, userId ? userId.toString() : null);
         return {
             ...item,
             engagement: {
@@ -472,11 +473,7 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
             },
             isLikedBy: userId ? likedSet.has(idStr) : false,
             likedBy: likedByUsers,
-            likedByPreview: preview.likedByText ? {
-                text: preview.likedByText,
-                previewUser: preview.previewUser,
-                othersCount: preview.othersCount,
-            } : null,
+            likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
         };
     });
 }
@@ -487,16 +484,27 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
 
 /**
  * Call this when a user likes a post.
- * Atomically via Lua: sets like status in user's Hash, marks dirty, increments
- * like count (if key exists), and HSET user profile into the likedBy Hash.
+ * Atomically via Lua: initialises count key from DB (SET NX) so it always
+ * exists before INCR, adds postId to user liked Set, HSET user profile into
+ * the likedBy Hash.
  *
- * @param {*} userId
- * @param {*} postId
- * @param {{ username: string, fullName: string, profileImageUrl: string }} userProfile
+ * Returns { ok: boolean, count: number|null }
  */
 export async function onPostLiked(userId, postId, userProfile = {}) {
     const userIdStr = userId.toString();
     const postIdStr = postId.toString();
+    const countKey  = RedisKeys.postLikesCount(postIdStr);
+
+    // Use existing Redis value if present; seed from DB only on a cache miss so
+    // we avoid a DB round-trip on every hot like.
+    let seedCount = 0;
+    const existing = await redisClient.get(countKey).catch(() => null);
+    if (existing === null) {
+        const doc = await Post.findById(postId).select('engagement.likes').lean();
+        seedCount = doc?.engagement?.likes ?? 0;
+    } else {
+        seedCount = parseInt(existing, 10);
+    }
 
     const userData = JSON.stringify({
         _id: userIdStr,
@@ -510,7 +518,7 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
     const runLiked = () => redisClient.eval(
         LIKE_LUA,
         3,
-        RedisKeys.postLikesCount(postIdStr),
+        countKey,
         RedisKeys.userLikedSet(userIdStr),
         RedisKeys.postLikedBy(postIdStr),
         postIdStr,
@@ -518,61 +526,76 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
         userData,
         String(ENGAGEMENT_TTL),
         String(LIKE_STATUS_TTL),
+        String(seedCount),
     );
 
     try {
-        await runLiked();
-        return true;
+        const newCount = await runLiked();
+        return { ok: true, count: Number(newCount) };
     } catch (err) {
         if (err.message.includes('WRONGTYPE')) {
-            // Stale Hash key from old code — delete it and retry once
             await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
-            try { await runLiked(); return true; } catch {}
+            try {
+                const newCount = await runLiked();
+                return { ok: true, count: Number(newCount) };
+            } catch {}
         }
         console.error('[PostEngagement] onPostLiked error:', err.message);
-        return false;
+        return { ok: false, count: null };
     }
 }
 
 /**
  * Call this when a user unlikes a post.
- * Atomically via Lua: sets like status to '0', marks dirty, decrements like count
- * (floor 0), and HDEL the user from the likedBy Hash.
- * Also deletes the Like document from DB immediately (so the DB fallback in
- * batchIsLikedByUser is always accurate for unlikes).
+ * Atomically via Lua: initialises count key from DB (SET NX), DECRs (floor 0),
+ * SREMs postId from user liked Set, HDELs user from likedBy Hash.
+ * Also immediately deletes the Like document from DB so the DB fallback stays
+ * accurate.
+ *
+ * Returns { ok: boolean, count: number|null }
  */
 export async function onPostUnliked(userId, postId) {
     const userIdStr = userId.toString();
     const postIdStr = postId.toString();
+    const countKey  = RedisKeys.postLikesCount(postIdStr);
+
+    let seedCount = 0;
+    const existing = await redisClient.get(countKey).catch(() => null);
+    if (existing === null) {
+        const doc = await Post.findById(postId).select('engagement.likes').lean();
+        seedCount = doc?.engagement?.likes ?? 0;
+    } else {
+        seedCount = parseInt(existing, 10);
+    }
 
     const runUnliked = () => redisClient.eval(
         UNLIKE_LUA,
         3,
-        RedisKeys.postLikesCount(postIdStr),
+        countKey,
         RedisKeys.userLikedSet(userIdStr),
         RedisKeys.postLikedBy(postIdStr),
         postIdStr,
         userIdStr,
         String(ENGAGEMENT_TTL),
         String(LIKE_STATUS_TTL),
+        String(seedCount),
     );
 
     try {
-        await runUnliked();
+        const newCount = await runUnliked();
         await Like.deleteOne({ userId, postId }).catch(() => {});
-        return true;
+        return { ok: true, count: Number(newCount) };
     } catch (err) {
         if (err.message.includes('WRONGTYPE')) {
-            // Stale Hash key from old code — delete it and retry once
             await redisClient.del(RedisKeys.userLikedSet(userIdStr)).catch(() => {});
             try {
-                await runUnliked();
+                const newCount = await runUnliked();
                 await Like.deleteOne({ userId, postId }).catch(() => {});
-                return true;
+                return { ok: true, count: Number(newCount) };
             } catch {}
         }
         console.error('[PostEngagement] onPostUnliked error:', err.message);
-        return false;
+        return { ok: false, count: null };
     }
 }
 

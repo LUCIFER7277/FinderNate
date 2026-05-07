@@ -4,9 +4,9 @@
  * Run:  node scripts/seedLikesToRedis.js
  *
  * What it writes:
- *   fn:user:{userId}:liked          Hash  field=postId  value='1'
- *   fn:post:{postId}:likedby        Hash  field=userId  value=JSON profile
- *   fn:post:{postId}:likes:count    String  value=N
+ *   fn:user:{userId}:liked          Set    members = postIds the user has liked
+ *   fn:post:{postId}:likedby        Hash   field=userId  value=JSON profile
+ *   fn:post:{postId}:likes:count    String value=N
  */
 
 import 'dotenv/config';
@@ -30,7 +30,7 @@ export async function seedLikesToRedis() {
     let cursor = null;
     let userKeyCount = 0;
 
-    console.log('[SeedLikes] Step 1/3 — writing per-user liked Hashes...');
+    console.log('[SeedLikes] Step 1/3 — writing per-user liked Sets...');
     do {
         const query = Like.find({ postId: { $ne: null } }).select('userId postId').lean();
         if (cursor) query.where('_id').gt(cursor);
@@ -38,7 +38,7 @@ export async function seedLikesToRedis() {
         if (!batch.length) break;
         cursor = batch[batch.length - 1]._id;
 
-        // Group by userId
+        // Group postIds by userId
         const byUser = new Map();
         for (const { userId, postId } of batch) {
             if (!userId || !postId) continue;
@@ -49,18 +49,16 @@ export async function seedLikesToRedis() {
 
         const pipeline = redisClient.pipeline();
         for (const [uid, postIds] of byUser) {
-            const hashKey = RedisKeys.userLikedHash(uid);
-            const args = [hashKey];
-            for (const pid of postIds) args.push(pid, '1');
-            pipeline.hset(...args);
-            pipeline.expire(hashKey, LIKE_TTL);
+            const setKey = RedisKeys.userLikedSet(uid);
+            pipeline.sadd(setKey, ...postIds);
+            pipeline.expire(setKey, LIKE_TTL);
             userKeyCount++;
         }
         await pipeline.exec();
 
         if (batch.length < BATCH_SIZE) break;
     } while (true);
-    console.log(`[SeedLikes] Step 1 done — ${userKeyCount} user Hashes written`);
+    console.log(`[SeedLikes] Step 1 done — ${userKeyCount} user Sets written`);
 
     // ── Step 2: per-post like count ──────────────────────────────────────────
     console.log('[SeedLikes] Step 2/3 — writing per-post like counts...');

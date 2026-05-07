@@ -1371,7 +1371,6 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
     const userWithCounts = {
         _id: targetUser._id,
         username: targetUser.username,
-        email: targetUser.email,
         fullName: targetUser.fullName,
         phoneNumber: targetUser.isPhoneNumberHidden ? null : (targetUser.phoneNumber || ""),
         address: targetUser.isAddressHidden ? null : (targetUser.address || ""),
@@ -1381,8 +1380,6 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         businessId: businessId,
         isEmailVerified: targetUser.isEmailVerified,
         isPhoneVerified: targetUser.isPhoneVerified,
-        isPhoneNumberHidden: targetUser.isPhoneNumberHidden,
-        isAddressHidden: targetUser.isAddressHidden,
         isContentVisible: targetUser.isBusinessProfile ? isContentVisible : true,
         contentVisibilityMessage: targetUser.isBusinessProfile && !isContentVisible
             ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
@@ -1708,14 +1705,14 @@ const getBlockedUsers = asyncHandler(async (req, res) => {
     const blockerId = req.user._id;
 
     const blockedUsers = await Block.find({ blockerId })
-        .populate('blockedId', 'fullName username profileImage')
+        .populate('blockedId', 'fullName username profileImageUrl')
         .sort({ createdAt: -1 });
 
     const formattedBlockedUsers = blockedUsers.map(block => ({
         blockedUserId: block.blockedId._id,
         fullName: block.blockedId.fullName,
         username: block.blockedId.username,
-        profileImage: block.blockedId.profileImage,
+        profileImageUrl: block.blockedId.profileImageUrl,
         blockedAt: block.createdAt,
         reason: block.reason
     }));

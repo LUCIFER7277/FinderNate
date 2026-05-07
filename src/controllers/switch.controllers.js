@@ -3,8 +3,8 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
 import TaggedUser from "../models/taggedUser.models.js";
-import Like from "../models/like.models.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 
 const allowedTabs = ["photos", "reels", "videos", "tagged", "stories"];
 const postProjection = {
@@ -127,11 +127,10 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
     // Add isLikedBy for posts (not stories)
     if (["photos", "reels", "videos", "tagged"].includes(tab) && data.length > 0 && currentUserId) {
         const postIds = data.map(post => post._id);
-        const likes = await Like.find({ postId: { $in: postIds }, userId: currentUserId }).lean();
-        const likedPostIds = new Set(likes.map(like => like.postId.toString()));
+        const likedSet = await batchIsLikedByUser(currentUserId, postIds);
         data = data.map(post => ({
             ...post,
-            isLikedBy: likedPostIds.has(post._id.toString())
+            isLikedBy: likedSet.has(post._id.toString())
         }));
     }
 

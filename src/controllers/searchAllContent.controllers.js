@@ -518,18 +518,10 @@ export const searchAllContent = async (req, res) => {
             batchGetLikesCount(paginatedContent),
         ]);
 
-        let userFollowing = [];
-        let userFollowers = [];
-        if (currentUserId) {
-            const viewer = await User.findById(currentUserId).select('following followers').lean();
-            userFollowing = viewer?.following || [];
-            userFollowers = viewer?.followers || [];
-        }
-
         const stitchedContent = paginatedContent.map(item => {
             const idStr = item._id.toString();
             const likedByUsers = likedByMap.get(idStr) || [];
-            const preview = getLikedByPreview(likedByUsers, currentUserId, userFollowing, userFollowers);
+            const preview = getLikedByPreview(likedByUsers, currentUserId);
             return {
                 ...item,
                 engagement: {
@@ -538,11 +530,7 @@ export const searchAllContent = async (req, res) => {
                 },
                 isLikedBy: likedSet.has(idStr),
                 likedBy: likedByUsers,
-                likedByPreview: preview.likedByText ? {
-                    text: preview.likedByText,
-                    previewUser: preview.previewUser,
-                    othersCount: preview.othersCount,
-                } : null,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
             };
         });
 
