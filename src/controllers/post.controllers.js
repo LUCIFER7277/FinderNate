@@ -14,7 +14,6 @@ import Follower from "../models/follower.models.js";
 import Like from "../models/like.models.js";
 import { CacheManager, FeedCacheManager } from "../utils/cache.utils.js";
 import { redisClient } from "../config/redis.config.js";
-// import { pushNewPostToBuffer, invalidateDefaultSnapshot } from "../utils/defaultSearch.utils.js";
 import Comment from "../models/comment.models.js";
 import SavedPost from "../models/savedPost.models.js";
 import { enrichWithRatings } from "../utils/reviewUtils.js";
@@ -767,9 +766,6 @@ export const editPost = asyncHandler(async (req, res) => {
         await FeedCacheManager.invalidateTrendingFeed();
     }
 
-    // Invalidate universal default snapshot (content changed)
-    invalidateDefaultSnapshot(postId).catch(() => {});
-
     return res.status(200).json(new ApiResponse(200, updatedPost, "Post updated successfully"));
 });
 
@@ -846,7 +842,6 @@ export const updatePost = asyncHandler(async (req, res) => {
     const post = await Post.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
     if (!post) throw new ApiError(404, "Post not found");
 
-    invalidateDefaultSnapshot(id).catch(() => {});
     return res.status(200).json(new ApiResponse(200, post, "Post updated successfully"));
 });
 
@@ -908,9 +903,6 @@ export const deletePost = asyncHandler(async (req, res) => {
         userId,
         { $pull: { posts: id } }
     );
-
-    // Invalidate universal default snapshot + remove from new-posts buffer
-    invalidateDefaultSnapshot(id).catch(() => {});
 
     // Delete related data (likes, comments, saved posts)
     await Promise.allSettled([
