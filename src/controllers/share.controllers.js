@@ -4,7 +4,6 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
-import Comment from "../models/comment.models.js";
 import PostInteraction from "../models/postInteraction.models.js";
 import Follower from "../models/follower.models.js";
 import { canViewPost } from "../utils/postPrivacy.js";
@@ -244,9 +243,6 @@ export const getSharedPost = asyncHandler(async (req, res) => {
     }
   }
 
-  // Fetch engagement data
-  const comments = await Comment.find({ postId }).lean();
-
   if (viewer) {
     const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
     post.isLikedBy = likedSet.has(postId.toString());
@@ -384,13 +380,9 @@ export const getSharedReel = asyncHandler(async (req, res) => {
     }
   }
 
-  // Fetch engagement data
-  const likes = await Like.find({ postId }).lean();
-  const comments = await Comment.find({ postId }).lean();
-
-  const likedByUserIds = likes.map((like) => like.userId.toString());
   if (viewer) {
-    post.isLikedBy = likedByUserIds.includes(viewer._id.toString());
+    const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+    post.isLikedBy = likedSet.has(postId.toString());
   }
 
   // Get top 3 users who liked

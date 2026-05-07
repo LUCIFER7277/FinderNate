@@ -6,7 +6,7 @@ import Post from "../models/userPost.models.js";
 import Comment from "../models/comment.models.js";
 import { createLikeNotification, createUnlikeNotification } from "./notification.controllers.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
-import { onPostLiked, onPostUnliked } from "../utils/postEngagement.utils.js";
+import { onPostLiked, onPostUnliked, batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 import { likeQueue } from "../queues/likeQueue.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
@@ -33,18 +33,14 @@ async function ensureLikesCount(postId, delta) {
 
 /**
  * Check whether a user has liked a specific post.
- * Set-based: EXISTS + SISMEMBER on fn:user:{userId}:liked.
- * Key exists → SISMEMBER is authoritative. Key missing → DB fallback.
+ * Delegates to batchIsLikedByUser which seeds the full user liked Set from DB
+ * on a cache miss, ensuring the check is always authoritative (no stale misses
+ * when the Set has expired but the Like document hasn't been written to DB yet).
  */
 async function getLikeStatus(userId, postId) {
     try {
-        const setKey = RedisKeys.userLikedSet(userId.toString());
-        const [[, exists], [, isMember]] = await redisClient.pipeline()
-            .exists(setKey)
-            .sismember(setKey, postId.toString())
-            .exec();
-        if (!exists) return !!(await Like.exists({ userId, postId }));
-        return isMember === 1;
+        const likedSet = await batchIsLikedByUser(userId, [postId]);
+        return likedSet.has(postId.toString());
     } catch {
         return !!(await Like.exists({ userId, postId }));
     }
@@ -160,7 +156,7 @@ export const likePost = asyncHandler(async (req, res) => {
     const alreadyLiked = await getLikeStatus(userId, postId);
     if (alreadyLiked) throw new ApiError(409, "You have already liked this post");
 
-    const redisOk = await onPostLiked(userId, postId, {
+    const result = await onPostLiked(userId, postId, {
         username: req.user.username,
         fullName: req.user.fullName,
         profileImageUrl: req.user.profileImageUrl,
@@ -180,10 +176,12 @@ export const likePost = asyncHandler(async (req, res) => {
         }
     }).catch(() => {});
 
-    const [{ users: likedBy, hasMore }, likesCount] = await Promise.all([
-        getLikedByList(postId, { includeUser: redisOk ? req.user : null }),
-        ensureLikesCount(postId, +1),
+    const [{ users: likedBy, hasMore }] = await Promise.all([
+        getLikedByList(postId, { includeUser: result.ok ? req.user : null }),
     ]);
+
+    // Lua returns the new count; fall back to DB-seed only if Lua failed entirely
+    const likesCount = result.count ?? await ensureLikesCount(postId, +1);
 
     return res.status(200).json(new ApiResponse(200, {
         likedBy,
@@ -202,7 +200,7 @@ export const unlikePost = asyncHandler(async (req, res) => {
     const isLiked = await getLikeStatus(userId, postId);
     if (!isLiked) throw new ApiError(404, "You have not liked this post");
 
-    const redisOk = await onPostUnliked(userId, postId);
+    const result = await onPostUnliked(userId, postId);
 
     // Enqueue DB sync job
     likeQueue.add('like-event', {
@@ -218,10 +216,11 @@ export const unlikePost = asyncHandler(async (req, res) => {
         }
     }).catch(() => {});
 
-    const [{ users: likedBy, hasMore }, likesCount] = await Promise.all([
-        getLikedByList(postId, { excludeUserId: redisOk ? userId : null }),
-        ensureLikesCount(postId, -1),
+    const [{ users: likedBy, hasMore }] = await Promise.all([
+        getLikedByList(postId, { excludeUserId: result.ok ? userId : null }),
     ]);
+
+    const likesCount = result.count ?? await ensureLikesCount(postId, -1);
 
     return res.status(200).json(new ApiResponse(200, {
         likedBy,

@@ -56,18 +56,27 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             if (cached?.data?.feed?.length) {
                 const cachedPosts = cached.data.feed;
                 const cachedPostIds = cachedPosts.map(p => p._id);
-                const [likedSet, likeCountMap] = await Promise.all([
+                const [likedSet, likeCountMap, likedByUsersMap] = await Promise.all([
                     userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
                     batchGetLikesCount(cachedPosts),
+                    batchGetLikedByUsers(cachedPostIds),
                 ]);
-                cached.data.feed = cachedPosts.map(post => ({
-                    ...post,
-                    engagement: {
-                        ...post.engagement,
-                        likes: likeCountMap.get(post._id.toString()) ?? post.engagement?.likes ?? 0,
-                    },
-                    isLikedBy: likedSet.has(post._id.toString()),
-                }));
+
+                cached.data.feed = cachedPosts.map(post => {
+                    const idStr = post._id.toString();
+                    const likedByUsers = likedByUsersMap.get(idStr) || [];
+                    const preview = getLikedByPreview(likedByUsers, userId);
+                    return {
+                        ...post,
+                        engagement: {
+                            ...post.engagement,
+                            likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
+                        },
+                        isLikedBy: likedSet.has(idStr),
+                        likedBy: likedByUsers,
+                        likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                    };
+                });
             }
             return res.status(200).json(cached);
         }
@@ -316,27 +325,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         });
 
         // ✅ 5. Format final response
-        // Get user's followers and following for "Liked by" preview (reuse from earlier fetch if available)
-        let userFollowing = [];
-        let userFollowers = [];
-        if (userId) {
-            const user = await User.findById(userId)
-                .select('following followers')
-                .lean();
-            userFollowing = user?.following || [];
-            userFollowers = user?.followers || [];
-        }
-
         const feedData = posts.map(post => {
             const postIdStr = post._id.toString();
             const likedByUsers = likesByPost.get(postIdStr) || [];
-
-            const likedByPreview = getLikedByPreview(
-                likedByUsers,
-                userId,
-                userFollowing,
-                userFollowers
-            );
+            const preview = getLikedByPreview(likedByUsers, userId);
 
             return {
                 ...post,
@@ -347,11 +339,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 comments: commentsByPost.get(postIdStr) || [],
                 isLikedBy: likedPostIds.has(postIdStr),
                 likedBy: likedByUsers,
-                likedByPreview: likedByPreview.likedByText ? {
-                    text: likedByPreview.likedByText,
-                    previewUser: likedByPreview.previewUser,
-                    othersCount: likedByPreview.othersCount
-                } : null
+                likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
             };
         });
         // Enrich posts with review/rating data

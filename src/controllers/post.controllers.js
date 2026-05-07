@@ -427,58 +427,43 @@ export const getPostById = asyncHandler(async (req, res) => {
         }
     }
 
-    // Fetch likes for this post and populate user details
-    const likes = await Like.find({ postId: postId }).lean();
-    const likedByUserIds = likes.map(like => like.userId.toString());
+    // Read likedBy from Redis Hash + check current user's like status — both Redis-first
+    const [likedByMap, likedSet, likeCountMap] = await Promise.all([
+        batchGetLikedByUsers([postId]),
+        currentUser ? batchIsLikedByUser(currentUser._id, [postId]) : Promise.resolve(new Set()),
+        batchGetLikesCount([post]),
+    ]);
 
-    // Inject current user if their like is deferred in Redis (not yet synced to DB).
-    // batchIsLikedByUser is Redis-first with automatic DB fallback on Redis failure.
-    if (currentUser) {
+    const postIdStr = postId.toString();
+    let likedByUsers = likedByMap.get(postIdStr) || [];
+    const currentUserLiked = currentUser ? likedSet.has(postIdStr) : false;
+
+    // Inject current user at front if their like is deferred (not yet in the likedBy cache)
+    if (currentUserLiked) {
         const curIdStr = currentUser._id.toString();
-        if (!likedByUserIds.includes(curIdStr)) {
-            const likedSet = await batchIsLikedByUser(currentUser._id, [postId]);
-            if (likedSet.has(postId.toString())) likedByUserIds.unshift(curIdStr);
+        if (!likedByUsers.find(u => (u._id || u.userId)?.toString() === curIdStr)) {
+            likedByUsers = [{
+                _id: curIdStr,
+                userId: curIdStr,
+                username: currentUser.username,
+                fullName: currentUser.fullName,
+                profileImageUrl: currentUser.profileImageUrl,
+                isVerified: currentUser.isVerified,
+            }, ...likedByUsers];
         }
     }
 
-    // Fetch user details for all users who liked the post
-    let likedByUsers = [];
-    if (likedByUserIds.length > 0) {
-        likedByUsers = await Post.db.model('User').find(
-            { _id: { $in: likedByUserIds } },
-            'username fullName profileImageUrl isVerified'
-        ).lean();
-    }
-
-    // Add likedBy array and isLikedBy flag to the post
     post.likedBy = likedByUsers;
-    post.isLikedBy = currentUser ? likedByUserIds.includes(currentUser._id.toString()) : false;
-
-    // Override stale DB count with Redis-accurate count (DB is only updated by 4h cron)
-    const likeCountMap = await batchGetLikesCount([post]);
+    post.isLikedBy = currentUserLiked;
     post.engagement = {
         ...(post.engagement || {}),
-        likes: likeCountMap.get(postId.toString()) ?? post.engagement?.likes ?? 0,
+        likes: likeCountMap.get(postIdStr) ?? post.engagement?.likes ?? 0,
     };
 
-    // Add "Liked by" preview
+    // Add "Liked by" preview text
     if (currentUser) {
-        const user = await User.findById(currentUser._id).select('following followers').lean();
-        const userFollowing = user?.following || [];
-        const userFollowers = user?.followers || [];
-
-        const likedByPreview = getLikedByPreview(
-            likedByUsers,
-            currentUser._id.toString(),
-            userFollowing,
-            userFollowers
-        );
-
-        post.likedByPreview = likedByPreview.likedByText ? {
-            text: likedByPreview.likedByText,
-            previewUser: likedByPreview.previewUser,
-            othersCount: likedByPreview.othersCount
-        } : null;
+        const preview = getLikedByPreview(likedByUsers, currentUser._id.toString());
+        post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
     }
 
     // Add subscription badge to post author
@@ -1446,25 +1431,10 @@ export const getMyPosts = asyncHandler(async (req, res) => {
         post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
     });
 
-    // Add "Liked by" preview to each post
-    const currentUserFollowData = await User.findById(userId).select('following followers').lean();
-    const userFollowing = currentUserFollowData?.following || [];
-    const userFollowers = currentUserFollowData?.followers || [];
-
+    // Add "Liked by" preview text to each post
     postsWithThumbnails.forEach(post => {
-        const likedByUsers = post.likedBy || [];
-        const likedByPreview = getLikedByPreview(
-            likedByUsers,
-            currentUserId,
-            userFollowing,
-            userFollowers
-        );
-
-        post.likedByPreview = likedByPreview.likedByText ? {
-            text: likedByPreview.likedByText,
-            previewUser: likedByPreview.previewUser,
-            othersCount: likedByPreview.othersCount
-        } : null;
+        const preview = getLikedByPreview(post.likedBy || [], currentUserId);
+        post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
     });
 
     // Enrich posts with review/rating data
@@ -1660,26 +1630,11 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             post.engagement = { ...(post.engagement || {}), likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0 };
         });
 
-        // Add "Liked by" preview to each post
+        // Add "Liked by" preview text to each post
         if (currentUser) {
-            const currentUserData = await User.findById(currentUser._id).select('following followers').lean();
-            const userFollowing = currentUserData?.following || [];
-            const userFollowers = currentUserData?.followers || [];
-
             postsAfterBusinessFilter.forEach(post => {
-                const likedByUsers = post.likedBy || [];
-                const likedByPreview = getLikedByPreview(
-                    likedByUsers,
-                    currentUserId,
-                    userFollowing,
-                    userFollowers
-                );
-
-                post.likedByPreview = likedByPreview.likedByText ? {
-                    text: likedByPreview.likedByText,
-                    previewUser: likedByPreview.previewUser,
-                    othersCount: likedByPreview.othersCount
-                } : null;
+                const preview = getLikedByPreview(post.likedBy || [], currentUserId);
+                post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
             });
         }
 
