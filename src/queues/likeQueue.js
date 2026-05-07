@@ -31,7 +31,7 @@ export const likeQueue = new Queue('like-sync', {
 
 let buffer = [];
 
-async function flushBuffer() {
+export async function flushBuffer() {
     if (!buffer.length) return;
 
     const batch = buffer.splice(0);
@@ -102,8 +102,6 @@ async function flushBuffer() {
             refreshLikedByHashes(postIdArr),
         ]);
 
-        batch.forEach(({ resolve }) => resolve());
-
         console.log(
             `[LikeQueue] Scheduled flush done — upserted ${toUpsert.length}, ` +
             `deleted ${toDelete.length}, posts ${affectedPostIds.size}, ` +
@@ -111,7 +109,6 @@ async function flushBuffer() {
         );
     } catch (err) {
         console.error('[LikeQueue] Scheduled flush failed:', err.message);
-        batch.forEach(({ reject }) => reject(err));
     }
 }
 
@@ -139,12 +136,8 @@ async function _refreshUserLikedSets(userIds) {
 
 // ── Worker (consumer side) ─────────────────────────────────────────────────
 
-// Worker processor — each job is added to the buffer; Promise resolves when
-// the scheduled flush runs and commits this batch to DB.
 async function processor(job) {
-    return new Promise((resolve, reject) => {
-        buffer.push({ data: job.data, resolve, reject });
-    });
+    buffer.push({ data: job.data });
 }
 
 export function startLikeWorker() {
