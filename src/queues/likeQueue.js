@@ -146,16 +146,16 @@ export function startLikeWorker() {
         concurrency: BATCH_SIZE,
     });
 
-    // Flush at 1 PM and 10 PM daily (server local time)
+    // Flush at 1 PM and 10 PM daily (IST)
     cron.schedule('0 13 * * *', () => {
         console.log('[LikeQueue] 1 PM scheduled flush triggered');
         flushBuffer();
-    });
+    }, { timezone: 'Asia/Kolkata' });
 
     cron.schedule('0 22 * * *', () => {
         console.log('[LikeQueue] 10 PM scheduled flush triggered');
         flushBuffer();
-    });
+    }, { timezone: 'Asia/Kolkata' });
 
     worker.on('failed', (job, err) => {
         console.error(`[LikeQueue] Job ${job?.id} failed after retries:`, err.message);
