@@ -12,7 +12,7 @@ import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from '../config/red
 import Like from '../models/like.models.js';
 import Comment from '../models/comment.models.js';
 import Follower from '../models/follower.models.js';
-import User from '../models/user.models.js';
+import { User } from '../models/user.models.js';
 
 const ENGAGEMENT_TTL  = RedisTTL.POST_ENGAGEMENT;
 const LIKE_STATUS_TTL = RedisTTL.POST_LIKE_STATUS;
