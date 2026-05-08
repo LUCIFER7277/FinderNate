@@ -324,8 +324,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         // Remove analytics field from all responses
         pipeline.push({
             $project: {
-                analytics: 0,
-                customization: 0
+                analytics: 0
             }
         });
 
