@@ -87,6 +87,11 @@ redisClient.on('connect', () => {
 
 redisClient.on('ready', () => {
     console.log('✅ Redis Client ready');
+    // Enable expired-key events so the cache warmer can react on key expiry.
+    // 'E' = keyevent channel, 'x' = expired events only.
+    redisClient.config('SET', 'notify-keyspace-events', 'Ex').catch((err) => {
+        console.warn('⚠️ Could not set notify-keyspace-events:', err.message, '— set it manually in Redis config/dashboard');
+    });
 });
 
 redisClient.on('error', (err) => {

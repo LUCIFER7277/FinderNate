@@ -8,6 +8,7 @@ import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
 import { startLikeWorker } from './queues/likeQueue.js';
 // import { seedLikesToRedis } from './scripts/seedLikesToRedis.js';
 import { redisClient } from './config/redis.config.js';
+import { startCacheWarmer } from './utils/cacheWarmer.utils.js';
 
 
 
@@ -54,12 +55,16 @@ connectDB()
         //     }
         // });
 
+        const warmerSubscriber = startCacheWarmer();
+
         server.listen(PORT, '0.0.0.0', () => {
 
             // Start cron jobs and queue workers
             startSubscriptionExpiryJob();
             startLikeWorker();
         });
+
+        server.on('close', () => warmerSubscriber.quit());
 
         server.on('error', (error) => {
             console.error('❌ Server error:', error);
