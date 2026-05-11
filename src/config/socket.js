@@ -722,6 +722,8 @@ class SocketManager {
     async getAllOnlineUsers() {
         try {
             const onlineUsers = await redisClient.hgetall('fn:online_users');
+            // ioredis v5 returns {} (not null) for missing keys
+            if (!onlineUsers || Object.keys(onlineUsers).length === 0) return [];
             return Object.keys(onlineUsers).map(userId => ({
                 userId,
                 ...JSON.parse(onlineUsers[userId])

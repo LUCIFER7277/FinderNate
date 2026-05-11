@@ -71,7 +71,8 @@ async function getLikedByList(postId, { includeUser = null, includeUserId = null
     if (page === 1) {
         try {
             const hashData = await redisClient.hgetall(RedisKeys.postLikedBy(postIdStr));
-            const entries = hashData ? Object.values(hashData) : null;
+            // ioredis v5 returns {} (not null) for missing keys
+            const entries = hashData && Object.keys(hashData).length > 0 ? Object.values(hashData) : null;
 
             if (entries && entries.length > 0) {
                 let users = entries

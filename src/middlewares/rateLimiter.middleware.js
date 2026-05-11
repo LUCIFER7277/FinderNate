@@ -94,8 +94,7 @@ class RedisStore {
 // General rate limiter for most endpoints
 export const generalRateLimit = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
-    max: 50000, // 50000 requests per minute per user/IP (increased for high-traffic usage)
-    max: 50000, // 50000 requests per minute per user/IP (increased for high-traffic usage)
+    max: 50000,
     message: {
         error: 'Too many requests from this IP, please try again later.',
         retryAfter: 60 // 60 seconds
@@ -118,8 +117,7 @@ export const generalRateLimit = rateLimit({
 // Rate limiter for notification endpoints
 export const notificationRateLimit = rateLimit({
     windowMs: 30 * 1000, // 30 seconds
-    max: 10000, // 10000 requests per 30 seconds per user (increased for high polling frequency)
-    max: 10000, // 10000 requests per 30 seconds per user (increased for high polling frequency)
+    max: 10000,
     message: {
         error: 'Too many notification requests, please try again later.',
         retryAfter: 30
@@ -133,8 +131,7 @@ export const notificationRateLimit = rateLimit({
 // Rate limiter for unread counts endpoint
 export const unreadCountsRateLimit = rateLimit({
     windowMs: 10 * 1000, // 10 seconds
-    max: 5000, // 5000 requests per 10 seconds per user (increased to accommodate polling patterns)
-    max: 5000, // 5000 requests per 10 seconds per user (increased to accommodate polling patterns)
+    max: 5000,
     message: {
         error: 'Too many unread count requests. Consider using WebSocket events instead of polling.',
         retryAfter: 10,
@@ -149,8 +146,7 @@ export const unreadCountsRateLimit = rateLimit({
 // Rate limiter for chat endpoints
 export const chatRateLimit = rateLimit({
     windowMs: 30 * 1000, // 30 seconds
-    max: 20000, // 20000 requests per 30 seconds per user (increased for active chat usage)
-    max: 20000, // 20000 requests per 30 seconds per user (increased for active chat usage)
+    max: 20000,
     message: {
         error: 'Too many chat requests, please try again later.',
         retryAfter: 30

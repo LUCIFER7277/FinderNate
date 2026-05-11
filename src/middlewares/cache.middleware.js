@@ -42,13 +42,17 @@ export const setCache = async (key, data, ttl = RedisTTL.USER_FEED) => {
     }
 };
 
-// Helper function to invalidate cache patterns
+// Helper function to invalidate cache patterns using non-blocking SCAN
 export const invalidateCache = async (pattern) => {
     try {
-        const keys = await redisClient.keys(pattern);
-        if (keys.length > 0) {
-            await redisClient.del(...keys);
-        }
+        let cursor = '0';
+        do {
+            const [nextCursor, keys] = await redisClient.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+            cursor = nextCursor;
+            if (keys.length > 0) {
+                await redisClient.del(...keys);
+            }
+        } while (cursor !== '0');
     } catch (error) {
         console.error('Failed to invalidate cache:', error);
     }

@@ -68,16 +68,22 @@ export class CacheManager {
     }
 
     /**
-     * Delete multiple keys by pattern
+     * Delete multiple keys by pattern using non-blocking SCAN
      * @param {string} pattern - Key pattern (e.g., 'fn:user:123:*')
      */
     static async delPattern(pattern) {
         try {
-            const keys = await redisClient.keys(pattern);
-            if (keys.length > 0) {
-                await redisClient.del(...keys);
-            }
-            return keys.length;
+            let count = 0;
+            let cursor = '0';
+            do {
+                const [nextCursor, keys] = await redisClient.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+                cursor = nextCursor;
+                if (keys.length > 0) {
+                    await redisClient.del(...keys);
+                    count += keys.length;
+                }
+            } while (cursor !== '0');
+            return count;
         } catch (error) {
             console.error(`Cache DEL pattern error for pattern ${pattern}:`, error);
             return 0;
@@ -165,7 +171,7 @@ export class FeedCacheManager extends CacheManager {
      * @param {string} userId - User ID
      */
     static async invalidateUserFeed(userId) {
-        const pattern = RedisKeys.userFeed(userId, '*').replace('*', '\\*');
+        const pattern = RedisKeys.userFeed(userId, '*');
         return await this.delPattern(pattern);
     }
 
@@ -454,41 +460,8 @@ export class CacheInvalidator {
         }, 5000); // 5 second debounce
     }
 
-    /**
-     * Use SCAN instead of KEYS for safe pattern deletion
-     * @param {string} pattern - Redis key pattern
-     */
     static async _scanAndDelete(pattern) {
-        try {
-            const keys = [];
-            let cursor = '0';
-
-            // Use SCAN to iterate through keys (non-blocking)
-            do {
-                const result = await redisClient.scan(
-                    cursor,
-                    'MATCH', pattern,
-                    'COUNT', 100
-                );
-                cursor = result[0];
-                keys.push(...result[1]);
-
-                // Delete in batches of 50
-                if (keys.length >= 50) {
-                    const batch = keys.splice(0, 50);
-                    if (batch.length > 0) {
-                        await redisClient.del(...batch);
-                    }
-                }
-            } while (cursor !== '0');
-
-            // Delete remaining keys
-            if (keys.length > 0) {
-                await redisClient.del(...keys);
-            }
-        } catch (error) {
-            console.error('SCAN and delete error:', error);
-        }
+        await CacheManager.delPattern(pattern);
     }
 
     /**
