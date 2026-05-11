@@ -28,91 +28,59 @@ export const likeQueue = new Queue('like-sync', {
     },
 });
 
+// IDs pending a Redis cache refresh at the next cron tick.
+// Only used for Redis resync — DB writes happen per-job in the processor.
+// Losing this set on restart is acceptable: caches re-seed lazily on next access.
+const dirtyPosts = new Set();
+const dirtyUsers = new Set();
 
-let buffer = [];
+// ── Worker (consumer side) ─────────────────────────────────────────────────
+// DB write happens here, before the job is marked complete by BullMQ,
+// so a process restart can never lose a like/unlike from the database.
 
-export async function flushBuffer() {
-    if (!buffer.length) return;
+async function processor(job) {
+    const { userId, postId, action } = job.data;
 
-    const batch = buffer.splice(0);
-    const toUpsert = [];
-    const toDelete = [];
-    const affectedPostIds = new Set();
-    const affectedUserIds = new Set();
-
-    for (const { data } of batch) {
-        affectedPostIds.add(data.postId);
-        affectedUserIds.add(data.userId);
-        if (data.action === 'like') toUpsert.push(data);
-        else                        toDelete.push(data);
-    }
-
-    try {
-        // ── DB writes ──────────────────────────────────────────────────────
-        if (toUpsert.length) {
-            await Like.bulkWrite(
-                toUpsert.map(({ userId, postId }) => ({
-                    updateOne: {
-                        filter: {
-                            userId: new mongoose.Types.ObjectId(userId),
-                            postId: new mongoose.Types.ObjectId(postId),
-                        },
-                        update: {
-                            $setOnInsert: {
-                                userId: new mongoose.Types.ObjectId(userId),
-                                postId: new mongoose.Types.ObjectId(postId),
-                            },
-                        },
-                        upsert: true,
-                    },
-                })),
-                { ordered: false }
-            );
-        }
-
-        if (toDelete.length) {
-            await Like.deleteMany({
-                $or: toDelete.map(({ userId, postId }) => ({
+    if (action === 'like') {
+        await Like.updateOne(
+            {
+                userId: new mongoose.Types.ObjectId(userId),
+                postId: new mongoose.Types.ObjectId(postId),
+            },
+            {
+                $setOnInsert: {
                     userId: new mongoose.Types.ObjectId(userId),
                     postId: new mongoose.Types.ObjectId(postId),
-                })),
-            });
-        }
-
-        // ── Sync engagement.likes counts → Post documents ──────────────────
-        const postIdArr = [...affectedPostIds];
-        if (postIdArr.length) {
-            const counts = await redisClient.mget(
-                ...postIdArr.map(id => RedisKeys.postLikesCount(id))
-            );
-            const ops = postIdArr
-                .map((postId, i) => counts[i] !== null ? {
-                    updateOne: {
-                        filter: { _id: new mongoose.Types.ObjectId(postId) },
-                        update: { $set: { 'engagement.likes': parseInt(counts[i], 10) } },
-                    },
-                } : null)
-                .filter(Boolean);
-            if (ops.length) await Post.bulkWrite(ops, { ordered: false });
-        }
-
-        // ── Refresh Redis caches from authoritative DB state ───────────────
-        await Promise.all([
-            _refreshUserLikedSets([...affectedUserIds]),
-            refreshLikedByHashes(postIdArr),
-        ]);
-
-        console.log(
-            `[LikeQueue] Scheduled flush done — upserted ${toUpsert.length}, ` +
-            `deleted ${toDelete.length}, posts ${affectedPostIds.size}, ` +
-            `users ${affectedUserIds.size}`
+                },
+            },
+            { upsert: true }
         );
-    } catch (err) {
-        console.error('[LikeQueue] Scheduled flush failed:', err.message);
     }
-}
+    // 'unlike': Like.deleteOne is called immediately in onPostUnliked — no DB write needed here
 
-// ── Rebuild fn:user:{userId}:liked Set from DB after sync ─────────────────
+    // Sync Post.engagement.likes from the live Redis counter.
+    // If the key has expired, fall back to an exact DB count and re-seed the key.
+    const countRaw = await redisClient.get(RedisKeys.postLikesCount(postId));
+    let likesCount;
+    if (countRaw !== null) {
+        likesCount = parseInt(countRaw, 10);
+    } else {
+        likesCount = await Like.countDocuments({ postId: new mongoose.Types.ObjectId(postId) });
+        await redisClient.set(
+            RedisKeys.postLikesCount(postId),
+            likesCount,
+            'EX',
+            RedisTTL.POST_ENGAGEMENT
+        );
+    }
+    await Post.updateOne(
+        { _id: new mongoose.Types.ObjectId(postId) },
+        { $set: { 'engagement.likes': likesCount } }
+    );
+
+    dirtyPosts.add(postId);
+    dirtyUsers.add(userId);
+}
 
 async function _refreshUserLikedSets(userIds) {
     for (const userId of userIds) {
@@ -120,13 +88,11 @@ async function _refreshUserLikedSets(userIds) {
             const dbLikes = await Like.find({ userId: new mongoose.Types.ObjectId(userId) })
                 .select('postId')
                 .lean();
+            if (!dbLikes.length) continue;
             const setKey = RedisKeys.userLikedSet(userId);
             const pipeline = redisClient.pipeline();
-            pipeline.del(setKey);
-            if (dbLikes.length) {
-                pipeline.sadd(setKey, ...dbLikes.map(l => l.postId.toString()));
-                pipeline.expire(setKey, LIKE_STATUS_TTL);
-            }
+            pipeline.sadd(setKey, ...dbLikes.map(l => l.postId.toString()));
+            pipeline.expire(setKey, LIKE_STATUS_TTL);
             await pipeline.exec();
         } catch (err) {
             console.error(`[LikeQueue] Refresh set error for user ${userId}:`, err.message);
@@ -134,10 +100,38 @@ async function _refreshUserLikedSets(userIds) {
     }
 }
 
-// ── Worker (consumer side) ─────────────────────────────────────────────────
+// ── Cron: periodic Redis resync from authoritative DB state ───────────────
+// Refreshes likedBy Hashes and user liked Sets for posts/users that had
+// activity since the last tick. DB writes are already done in the processor.
 
-async function processor(job) {
-    buffer.push({ data: job.data });
+function scheduleResync() {
+    const resync = async (label) => {
+        const postIds = [...dirtyPosts];
+        const userIds = [...dirtyUsers];
+        dirtyPosts.clear();
+        dirtyUsers.clear();
+
+        if (!postIds.length && !userIds.length) {
+            console.log(`[LikeQueue] ${label} resync — nothing to refresh`);
+            return;
+        }
+
+        console.log(`[LikeQueue] ${label} resync triggered — ${postIds.length} posts, ${userIds.length} users`);
+        try {
+            await Promise.all([
+                refreshLikedByHashes(postIds),
+                _refreshUserLikedSets(userIds),
+            ]);
+            console.log(`[LikeQueue] ${label} resync done`);
+        } catch (err) {
+            console.error(`[LikeQueue] ${label} resync failed:`, err.message);
+        }
+    };
+
+    cron.schedule('0 13 * * *', () => resync('1 PM'), { timezone: 'Asia/Kolkata' });
+    cron.schedule('0 22 * * *', () => resync('10 PM'), { timezone: 'Asia/Kolkata' });
+    // cron.schedule('*/5 * * * *', () => resync('5m'), { timezone: 'Asia/Kolkata' });
+
 }
 
 export function startLikeWorker() {
@@ -146,16 +140,7 @@ export function startLikeWorker() {
         concurrency: BATCH_SIZE,
     });
 
-    // Flush at 1 PM and 10 PM daily (IST)
-    cron.schedule('0 13 * * *', () => {
-        console.log('[LikeQueue] 1 PM scheduled flush triggered');
-        flushBuffer();
-    }, { timezone: 'Asia/Kolkata' });
-
-    cron.schedule('0 22 * * *', () => {
-        console.log('[LikeQueue] 10 PM scheduled flush triggered');
-        flushBuffer();
-    }, { timezone: 'Asia/Kolkata' });
+    scheduleResync();
 
     worker.on('failed', (job, err) => {
         console.error(`[LikeQueue] Job ${job?.id} failed after retries:`, err.message);
@@ -165,6 +150,6 @@ export function startLikeWorker() {
         console.error('[LikeQueue] Worker error:', err.message);
     });
 
-    console.log('✅ LikeQueue worker started — flushes scheduled at 1 PM and 10 PM');
+    console.log('✅ LikeQueue worker started — DB writes per job, Redis resync at 1 PM & 10 PM');
     return worker;
 }

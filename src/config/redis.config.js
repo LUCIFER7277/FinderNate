@@ -27,7 +27,6 @@ const REDIS_CONFIG = {
 
     // Connection pooling to limit connections
     enableAutoPipelining: true,
-    maxRetriesPerRequest: 3,
 
     // Error handling
     enableOfflineQueue: true,
@@ -238,8 +237,8 @@ export const RedisTTL = {
     FOLLOW_LIST: 12 * 24 * 60 * 60,  // 12 days
 
     // Post engagement counters + per-user like status Set
-    POST_ENGAGEMENT: 7 * 24 * 60 * 60,  // 7 days
-    POST_LIKE_STATUS: 7 * 24 * 60 * 60, // 7 days
+    POST_ENGAGEMENT: 12 * 24 * 60 * 60,  // 7 days
+    POST_LIKE_STATUS: 12 * 24 * 60 * 60, // 7 days
 
     // Per-user follow status Set
     FOLLOW_STATUS: 7 * 24 * 60 * 60, // 7 days

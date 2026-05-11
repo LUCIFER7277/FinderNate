@@ -12,17 +12,7 @@ const MAX_LIKEDBY = 50;
 // How many likers to return from Hash for page-1 preview
 const PREVIEW_LIMIT = 20;
 
-// ---------------------------------------------------------------------------
-// Lua scripts for atomic like / unlike
-// ---------------------------------------------------------------------------
 
-// KEYS: [countKey, userLikedSetKey, likedByKey]
-// ARGV: [postId, userId, userDataJSON, engTTL, likeTTL, seedCount]
-//
-// seedCount: DB like count passed by caller; used to initialise countKey via SET NX
-// so the key always exists before INCR, preventing the race where two concurrent
-// likes both find the key missing, both skip the increment, and the count ends up
-// one (or more) short.
 const LIKE_LUA = `
 local countKey   = KEYS[1]
 local userSetKey = KEYS[2]
@@ -86,19 +76,6 @@ redis.call('hdel', likedByKey, userId)
 return c
 `;
 
-// ---------------------------------------------------------------------------
-// batchIsLikedByUser — Set-based (fn:user:{userId}:liked)
-// ---------------------------------------------------------------------------
-
-/**
- * Batch-check whether the current user has liked each post.
- *
- * Uses per-user Set `fn:user:{userId}:liked` (members = liked postIds).
- * Key exists → pipeline SISMEMBER (authoritative, no DB needed).
- * Key missing → full DB seed then check.
- *
- * Returns a Set of postId strings the user has liked.
- */
 export async function batchIsLikedByUser(userId, postIds) {
     if (!userId || !postIds.length) return new Set();
 
@@ -150,16 +127,7 @@ export async function batchIsLikedByUser(userId, postIds) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// batchGetLikesCount
-// ---------------------------------------------------------------------------
 
-/**
- * Batch-get like counts for a list of items (posts or reels).
- * Redis MGET first; seeds from DB-embedded count on cache miss.
- *
- * Returns a Map<postIdStr, count>.
- */
 export async function batchGetLikesCount(items) {
     if (!items.length) return new Map();
     const seen = new Set();
@@ -205,16 +173,7 @@ export async function batchGetLikesCount(items) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// batchGetCommentsCount
-// ---------------------------------------------------------------------------
 
-/**
- * Batch-get comment counts for a list of items.
- * Redis MGET first; seeds from DB on cache miss.
- *
- * Returns a Map<postIdStr, count>.
- */
 export async function batchGetCommentsCount(items) {
     if (!items.length) return new Map();
     const seen = new Set();
@@ -268,15 +227,7 @@ export async function batchGetCommentsCount(items) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// likedBy Hash helpers
-// ---------------------------------------------------------------------------
 
-/**
- * Re-seed fn:post:{postId}:likedby Hash for every affected post.
- * DEL + re-populate to remove stale likers (e.g. users who unliked).
- * Used by the like-sync job after committing DB writes.
- */
 export async function refreshLikedByHashes(postIds) {
     if (!postIds.length) return;
 
@@ -373,14 +324,7 @@ async function _seedLikedByHashFromDB(postIds, map) {
     await pipeline.exec();
 }
 
-/**
- * Batch-get likedBy user objects for multiple posts.
- * Reads from the Redis Hash `fn:post:{postId}:likedby`
- * (field=userId, value=JSON{_id,userId,username,fullName,profileImageUrl,likedAt}).
- * Seeds from DB on cache miss, capped at MAX_LIKEDBY.
- *
- * Returns a Map<postIdStr, UserObject[]> sorted newest-first, up to PREVIEW_LIMIT.
- */
+
 export async function batchGetLikedByUsers(postIds) {
     if (!postIds.length) return new Map();
     const idStrs = [...new Set(postIds.map(id => id.toString()))];
@@ -394,7 +338,8 @@ export async function batchGetLikedByUsers(postIds) {
         const missedIds = [];
 
         results.forEach(([err, hashData], i) => {
-            if (err || hashData === null) {
+            // ioredis v5 returns {} (not null) for missing keys — treat empty object as a cache miss
+            if (err || !hashData || Object.keys(hashData).length === 0) {
                 missedIds.push(idStrs[i]);
             } else {
                 const users = Object.values(hashData)
@@ -496,18 +441,6 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
     });
 }
 
-// ---------------------------------------------------------------------------
-// onPostLiked / onPostUnliked — Lua-script atomic updates
-// ---------------------------------------------------------------------------
-
-/**
- * Call this when a user likes a post.
- * Atomically via Lua: initialises count key from DB (SET NX) so it always
- * exists before INCR, adds postId to user liked Set, HSET user profile into
- * the likedBy Hash.
- *
- * Returns { ok: boolean, count: number|null }
- */
 export async function onPostLiked(userId, postId, userProfile = {}) {
     const userIdStr = userId.toString();
     const postIdStr = postId.toString();
@@ -569,15 +502,7 @@ export async function onPostLiked(userId, postId, userProfile = {}) {
     }
 }
 
-/**
- * Call this when a user unlikes a post.
- * Atomically via Lua: initialises count key from DB (SET NX), DECRs (floor 0),
- * SREMs postId from user liked Set, HDELs user from likedBy Hash.
- * Also immediately deletes the Like document from DB so the DB fallback stays
- * accurate.
- *
- * Returns { ok: boolean, count: number|null }
- */
+
 export async function onPostUnliked(userId, postId) {
     const userIdStr = userId.toString();
     const postIdStr = postId.toString();
@@ -627,30 +552,13 @@ export async function onPostUnliked(userId, postId) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// updateUserInLikedByHashes — called on profile update
-// ---------------------------------------------------------------------------
 
-/**
- * When a user updates their profile (username / profileImageUrl / fullName),
- * propagate the change to every likedBy Hash they appear in.
- *
- * Strategy:
- *   1. HGETALL fn:user:{userId}:liked → find postIds where value='1'
- *   2. For each postId, HGET the user's current entry in fn:post:{postId}:likedby
- *   3. If the entry exists, HSET it with updated profile data (preserving likedAt)
- *
- * Only updates entries that are already in Redis — stale hashes that have expired
- * will be re-seeded from DB (with fresh profile data) on next access.
- */
 export async function updateUserInLikedByHashes(userId, { username, fullName, profileImageUrl }) {
     const userIdStr = userId.toString();
     const userSetKey = RedisKeys.userLikedSet(userIdStr);
 
     try {
         const likedPostIds = await redisClient.smembers(userSetKey);
-        if (!likedPostIds.length) return;
-
         if (!likedPostIds.length) return;
 
         const getPipeline = redisClient.pipeline();
