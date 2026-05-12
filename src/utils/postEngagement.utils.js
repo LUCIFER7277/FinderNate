@@ -629,3 +629,55 @@ export async function onCommentDeleted(postId) {
         console.error('[PostEngagement] onCommentDeleted error:', err.message);
     }
 }
+
+export async function batchSharedCount(items) {
+    if (!items || !items.length) return new Map();
+    const seen = new Set();
+    const unique = items.filter(i => {
+        const id = (i._id ?? i).toString();
+        return seen.has(id) ? false : seen.add(id);
+    });
+    const idStrs = unique.map(i => (i._id ?? i).toString());
+
+    try {
+        const keys = idStrs.map(id => RedisKeys.postShareCount(id));
+        const values = await redisClient.mget(...keys);
+
+        const counts = new Map();
+        const missedIds = [];
+        const missedItems = [];
+
+        values.forEach((val, i) => {
+            if (val !== null) {
+                counts.set(idStrs[i], parseInt(val, 10));
+            } else {
+                missedIds.push(idStrs[i]);
+                missedItems.push(unique[i]);
+            }
+        });
+
+        if (missedIds.length) {
+            const missedOids = missedIds.map(id => new mongoose.Types.ObjectId(id));
+            const dbPosts = await Post.find({ _id: { $in: missedOids } }).select('engagement.shares').lean();
+            const dbMap = new Map(dbPosts.map(p => [p._id.toString(), p.engagement?.shares ?? 0]));
+
+            const pipeline = redisClient.pipeline();
+            missedIds.forEach((id, i) => {
+                const count = dbMap.get(id) ?? (missedItems[i]?.engagement?.shares ?? 0);
+                counts.set(id, count);
+                pipeline.set(RedisKeys.postShareCount(id), count, 'EX', RedisTTL.SHARE_COUNT);
+            });
+            await pipeline.exec();
+        }
+
+        return counts;
+    } catch (err) {
+        console.error('[PostEngagement] batchSharedCount error:', err.message);
+        const counts = new Map();
+        unique.forEach(item => {
+            const id = (item._id ?? item).toString();
+            counts.set(id, item?.engagement?.shares ?? 0);
+        });
+        return counts;
+    }
+}

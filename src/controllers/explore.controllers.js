@@ -9,7 +9,7 @@ import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utils/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
 import { filterBusinessPostsByPaymentPlan } from "../utils/businessPlan.utils.js";
-import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from "../utils/postEngagement.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -335,10 +335,11 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
     const currentUserId = req.user?._id ?? null;
     const feedIds = feed.map(item => item._id).filter(Boolean);
     if (feedIds.length) {
-        const [likedSet, likedByMap, likeCountMap] = await Promise.all([
+        const [likedSet, likedByMap, likeCountMap, sharedCountMap] = await Promise.all([
             currentUserId ? batchIsLikedByUser(currentUserId, feedIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(feedIds),
             batchGetLikesCount(feed),
+            batchSharedCount(feed)
         ]);
         feed = feed.map(item => {
             const idStr = item._id?.toString();
@@ -348,6 +349,7 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
                 engagement: {
                     ...item.engagement,
                     likes: likeCountMap.get(idStr) ?? item.engagement?.likes ?? 0,
+                    shares: sharedCountMap.get(idStr) ?? item.engagement?.shares ?? 0
                 },
                 isLikedBy: currentUserId ? likedSet.has(idStr) : false,
                 likedBy: likedByMap.get(idStr) || [],

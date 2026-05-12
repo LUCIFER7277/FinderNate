@@ -190,6 +190,7 @@ export const RedisKeys = {
     // Post engagement counters
     postLikesCount: (postId) => `fn:post:${postId}:likes:count`,
     postCommentsCount: (postId) => `fn:post:${postId}:comments:count`,
+    postShareCount: (postId) => `fn:post:${postId}:shares:count`,
 
     // Universal default search page (no query — browse mode)
     defaultResults: () => 'fn:default:results',
@@ -200,11 +201,16 @@ export const RedisKeys = {
     postLikedBy: (postId) => `fn:post:${postId}:likedby`,
 
     userLikedSet: (userId) => `fn:user:${userId}:liked`,
-
     // Real-time features
     chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,
     onlineUsers: () => 'fn:live:online_users',
     tempUpload: (userId) => `fn:temp:upload:${userId}`,
+
+    // IP-based share rate limit: max 5 shares per IP per postId per day
+    shareIpLimit: (ip, postId) => {
+        const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        return `fn:share:ip:${ip}:${postId}:${date}`;
+    },
 };
 
 export const RedisTTL = {
@@ -232,7 +238,8 @@ export const RedisTTL = {
     
     // Follow counters (long-lived, updated in-place on follow/unfollow)
     FOLLOW_COUNT: 7 * 24 * 60 * 60,  // 7 days
-
+    //  store the share count for post to avoid expensive recounting on every feed request and  reordering of the feed based on share count.
+    SHARE_COUNT: 7 * 24 * 60 * 60,   // 7 days
     // Followers/following LISTs (top-15 newest IDs, rebuilt by cron or on expiry)
     FOLLOW_LIST: 12 * 24 * 60 * 60,  // 12 days
 
@@ -249,6 +256,9 @@ export const RedisTTL = {
     // Temporary data
     TEMP_UPLOAD: 10 * 60,            // 10 minutes
     PASSWORD_RESET: 15 * 60,         // 15 minutes
+
+    // IP-based share rate-limit window
+    SHARE_IP_LIMIT: 24 * 60 * 60,   // 24 hours
 };
 
 export default redisClient;
