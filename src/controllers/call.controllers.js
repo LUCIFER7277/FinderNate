@@ -349,7 +349,7 @@ export const initiateCall = asyncHandler(async (req, res) => {
                     chatId,
                     sender: currentUserId,
                     message: `${callType} call ${callType === 'voice' ? '📞' : '📹'}`,
-                    messageType: 'text'
+                    messageType: 'call'
                 });
                 await callMessage.save();
             } catch (messageError) {

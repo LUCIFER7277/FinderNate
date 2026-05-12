@@ -788,8 +788,8 @@ export const addMessage = asyncHandler(async (req, res) => {
     const replyTo = body.replyTo;
     const mediaFile = req.file; // File uploaded via FormData
 
-    // 🏷️ Handle product reference for business/product-related chats
-    const productReference = body.productReference ? (
+    // 🏷️ Product reference is only valid for contact_seller messages
+    const productReference = (messageType === 'contact_seller' && body.productReference) ? (
         typeof body.productReference === 'string'
             ? JSON.parse(body.productReference)
             : body.productReference
@@ -850,7 +850,7 @@ export const addMessage = asyncHandler(async (req, res) => {
         }))
     };
 
-    // 🏷️ Add product reference if provided (for business/product chats)
+    // 🏷️ Attach product reference only when the message originates from Contact Seller flow
     if (productReference) {
         messageData.productReference = productReference;
     }
