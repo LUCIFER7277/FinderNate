@@ -441,7 +441,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         name: post.caption || "Product",
         description: post.description || "",
         price: numericAmount,
-        images: post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || []
+        images: post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || []
     };
 
     // If post has product customization, use those details
@@ -537,7 +537,7 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
         name: post.caption || "Product",
         description: post.description || "",
         price: numericAmount,
-        images: post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || []
+        images: post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || []
     };
 
     if (post.customization?.product) {
@@ -620,6 +620,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     let productName = paymentLink.productDetails?.name || "Product";
     let productDescription = paymentLink.productDetails?.description || "";
     let productImages = paymentLink.productDetails?.images || [];
+    let productVideos = post.media?.filter(m => m.type === 'video').map(m => ({ url: m.url, thumbnailUrl: m.thumbnailUrl || '' })).filter(v => v.url) || [];
     let productCategory = paymentLink.productDetails?.category || "";
     let productType = post.contentType || "product";
     let specifications = [];
@@ -671,6 +672,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                 productName,
                 productDescription,
                 productImages,
+                productVideos,
                 productCategory,
                 productType,
                 specifications,
@@ -776,7 +778,7 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
         name: post.caption || "Product",
         description: post.description || "",
         price: numericAmount,
-        images: post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || []
+        images: post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || []
     };
 
     if (post.customization?.product) {
@@ -975,7 +977,7 @@ export const showProductInterest = asyncHandler(async (req, res) => {
     let productName = "Product";
     let productDescription = post.caption || "";
     let productPrice = 0;
-    let productImages = post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || [];
+    let productImages = post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || [];
     let productCategory = "";
     let productType = post.contentType || "product";
 
@@ -1099,6 +1101,7 @@ export const showProductInterest = asyncHandler(async (req, res) => {
             postId: post._id,
             productName,
             productImage: productImages[0] || '',
+            productVideos: post.media?.filter(m => m.type === 'video').map(m => ({ url: m.url, thumbnailUrl: m.thumbnailUrl || '' })).filter(v => v.url) || [],
             productPrice,
             productType,
             productDescription,
@@ -1219,7 +1222,7 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
     let productName = "Product";
     let productDescription = post.caption || "";
     let productPrice = 0;
-    let productImages = post.media?.map(m => m.url || m.thumbnailUrl).filter(Boolean) || [];
+    let productImages = post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || [];
     let productCategory = "";
     let productType = post.contentType || "product";
     let specifications = [];
@@ -1358,6 +1361,7 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
             postId: post._id,
             productName,
             productImage: productImages[0] || '',
+            productVideos: post.media?.filter(m => m.type === 'video').map(m => ({ url: m.url, thumbnailUrl: m.thumbnailUrl || '' })).filter(v => v.url) || [],
             productPrice: totalPrice,
             productType,
             productDescription,
@@ -1477,7 +1481,16 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
     const post=await Post.findById(checkout.postId)
     if (!post){
         throw new ApiError(404, `${checkout?.productType} not found, please contact the seller `);
-    } 
+    }
+
+    // Always derive fresh media from the post so images/videos are current
+    let productImages = post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || [];
+    const productVideos = post.media?.filter(m => m.type === 'video').map(m => ({ url: m.url, thumbnailUrl: m.thumbnailUrl || '' })).filter(v => v.url) || [];
+    // Fall back to stored images if post has none (e.g. customization-only products)
+    if (productImages.length === 0 && checkout.productImages?.length) {
+        productImages = checkout.productImages.filter(url => !/\.(mp4|mov|webm|ogg)(\?.*)?$/i.test(url));
+    }
+
     return res.status(200).json(
         new ApiResponse(200, {
             messageId: message._id,
@@ -1487,7 +1500,8 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 postId: checkout.postId,
                 productName: checkout.productName,
                 productDescription: checkout.productDescription,
-                productImages: checkout.productImages,
+                productImages,
+                productVideos,
                 productCategory: checkout.productCategory,
                 productType: checkout.productType,
                 specifications: checkout.specifications,
