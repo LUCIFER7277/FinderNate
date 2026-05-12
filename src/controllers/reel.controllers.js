@@ -8,7 +8,7 @@ import { enrichWithRatings } from "../utils/reviewUtils.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import Like from "../models/like.models.js";
-import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount } from "../utils/postEngagement.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount, batchSharedCount } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 import { getFollowStatus } from "../utils/followEngagement.utils.js";
 
@@ -167,11 +167,12 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             const cachedData = cache.reels.data;
             if (currentUserId && cachedData.reels?.length) {
                 const reelIds = cachedData.reels.map(r => r._id);
-                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap] = await Promise.all([
+                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap] = await Promise.all([
                     batchIsLikedByUser(currentUserId, reelIds),
                     batchGetLikesCount(cachedData.reels),
                     batchGetCommentsCount(cachedData.reels),
                     batchGetLikedByUsers(reelIds),
+                    batchSharedCount(cachedData.reels)
                 ]);
                 const userIdStr = currentUserId.toString();
                 const updatedReels = cachedData.reels.map(r => {
@@ -184,7 +185,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                     const preview = getLikedByPreview(likedByUsers, currentUserId);
                     return {
                         ...r,
-                        engagement: { ...(r.engagement || {}), likes: likeCountMap.get(rid) ?? r.engagement?.likes ?? 0, comments: commentCountMap.get(rid) ?? r.engagement?.comments ?? 0 },
+                        engagement: { ...(r.engagement || {}), likes: likeCountMap.get(rid) ?? r.engagement?.likes ?? 0, comments: commentCountMap.get(rid) ?? r.engagement?.comments ?? 0, shares: sharedCountMap.get(rid) ?? r.engagement?.shares ?? 0 },
                         isLikedBy: likedSet.has(rid),
                         likedBy: likedByUsers,
                         likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
@@ -396,10 +397,12 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
             // Get likedBy from Redis Hash (max 20 per reel) + isLikedBy status
             const reelIds = reels.map(reel => reel._id);
-            const [likedReelSet, likesByReel, reelLikeCountMap] = await Promise.all([
+            const [likedReelSet, likesByReel, reelLikeCountMap, commentCountMap, sharedCountMap] = await Promise.all([
                 currentUserId ? batchIsLikedByUser(currentUserId, reelIds) : Promise.resolve(new Set()),
                 batchGetLikedByUsers(reelIds),
                 batchGetLikesCount(reels),
+                batchGetCommentsCount(reels),
+                batchSharedCount(reels)
             ]);
 
             // Inject current user into likedBy if their like is deferred
@@ -422,6 +425,8 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                     engagement: {
                         ...reel.engagement,
                         likes: reelLikeCountMap.get(reelIdStr) ?? reel.engagement?.likes ?? 0,
+                        comments: commentCountMap.get(reelIdStr) ?? reel.engagement?.comments ?? 0,
+                        shares: sharedCountMap.get(reelIdStr) ?? reel.engagement?.shares ?? 0,
                     },
                     isLikedBy: likedReelSet.has(reelIdStr),
                     likedBy: likedByUsers,

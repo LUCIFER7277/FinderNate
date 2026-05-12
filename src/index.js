@@ -5,6 +5,7 @@ import http from 'http';
 import socketManager from './config/socket.js';
 import './config/firebase-admin.config.js'; // Initialize Firebase Admin on startup
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
+import { startShareSyncJob } from './jobs/shareSync.job.js';
 import { startLikeWorker } from './queues/likeQueue.js';
 // import { seedLikesToRedis } from './scripts/seedLikesToRedis.js';
 import { redisClient } from './config/redis.config.js';
@@ -61,6 +62,7 @@ connectDB()
 
             // Start cron jobs and queue workers
             startSubscriptionExpiryJob();
+            startShareSyncJob();
             startLikeWorker();
         });
 

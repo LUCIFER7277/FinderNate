@@ -13,7 +13,7 @@ import {
   sanitizePostForGuest,
   generateErrorHTML,
 } from "../utils/shareUtils.js";
-import { redisClient } from "../config/redis.config.js";
+import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 
 /**
@@ -534,6 +534,17 @@ export const trackShare = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid post ID");
   }
 
+  // IP-based rate limit: max 5 shares per IP per postId per day
+  const ip = req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown';
+  const ipLimitKey = RedisKeys.shareIpLimit(ip, postId);
+  const ipShareCount = await redisClient.incr(ipLimitKey);
+  if (ipShareCount === 1) {
+    await redisClient.expire(ipLimitKey, RedisTTL.SHARE_IP_LIMIT);
+  }
+  if (ipShareCount > 5) {
+    throw new ApiError(429, "Share limit reached. You can share this post up to 5 times per day.");
+  }
+
   // Find post
   const post = await Post.findById(postId);
 
@@ -546,11 +557,26 @@ export const trackShare = asyncHandler(async (req, res) => {
   if (!shareCheck.canShare) {
     throw new ApiError(403, shareCheck.reason);
   }
+  let shareCount;
+  try {
+    const results = await redisClient
+      .multi()
+      .incr(RedisKeys.postShareCount(postId))
+      .expire(RedisKeys.postShareCount(postId), RedisTTL.SHARE_COUNT)
+      .exec();
+    shareCount = results?.[0] ?? null;
+  } catch (_) {
+    
+  }
 
-  // Increment engagement counter
-  await Post.findByIdAndUpdate(postId, {
-    $inc: { "engagement.shares": 1 },
-  });
+  if (shareCount == null) {
+    const updated = await Post.findByIdAndUpdate(
+      postId,
+      { $inc: { "engagement.shares": 1 } },
+      { new: true }
+    ).select("engagement.shares");
+    shareCount = updated?.engagement?.shares ?? 0;
+  }
 
   // Create PostInteraction record
   await PostInteraction.create({
@@ -574,16 +600,13 @@ export const trackShare = asyncHandler(async (req, res) => {
               userAgent: req.get("user-agent"),
             },
           ],
-          $slice: -100, // Keep only last 100 share events
+          $slice: -100,
         },
       },
     });
   }
 
-  // Get updated share count
-  const updatedPost = await Post.findById(postId).select("engagement.shares");
-
-  // Invalidate cache
+  // Invalidate share-page cache
   await redisClient.del(`fn:share:post:${postId}`);
   await redisClient.del(`fn:share:reel:${postId}`);
 
@@ -591,7 +614,7 @@ export const trackShare = asyncHandler(async (req, res) => {
     new ApiResponse(
       200,
       {
-        shareCount: updatedPost.engagement.shares,
+        shareCount,
         shareUrl: `https://findernate.com/${post.postType === "reel" || post.postType === "video" ? "r" : "p"}/${postId}`,
       },
       "Share tracked successfully"

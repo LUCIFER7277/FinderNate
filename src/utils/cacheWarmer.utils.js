@@ -13,6 +13,7 @@ import Like from '../models/like.models.js';
 import Comment from '../models/comment.models.js';
 import Follower from '../models/follower.models.js';
 import { User } from '../models/user.models.js';
+import Post from '../models/userPost.models.js';
 
 const ENGAGEMENT_TTL  = RedisTTL.POST_ENGAGEMENT;
 const LIKE_STATUS_TTL = RedisTTL.POST_LIKE_STATUS;
@@ -22,6 +23,7 @@ const STATUS_TTL      = RedisTTL.FOLLOW_STATUS;
 const MAX_LIKEDBY     = 50;
 const DB = parseInt(process.env.REDIS_DB) || 0;
 
+const SHARES_COUNT_RE   = /^fn:post:([^:]+):shares:count$/;
 const LIKES_COUNT_RE    = /^fn:post:([^:]+):likes:count$/;
 const COMMENTS_COUNT_RE = /^fn:post:([^:]+):comments:count$/;
 const USER_LIKED_RE     = /^fn:user:([^:]+):liked$/;
@@ -31,6 +33,26 @@ const FOLLOWING_ZSET_RE = /^fn:user:([^:]+):following$/;
 const FOLLOWERS_CNT_RE  = /^fn:user:([^:]+):followers:count$/;
 const FOLLOWING_CNT_RE  = /^fn:user:([^:]+):following:count$/;
 const FOLLOW_STATUS_RE  = /^fn:user:([^:]+):following:status$/;
+
+async function reseedShareCount(postId) {
+    const key = RedisKeys.postShareCount(postId);
+
+    const exists = await redisClient.exists(key);
+    if (exists) {
+        console.log(`[CacheWarmer] shares:count already present, skipping reseed post=${postId}`);
+        return;
+    }
+
+    const post = await Post.findById(postId).select('engagement.shares').lean();
+    const count = post?.engagement?.shares ?? 0;
+
+    const set = await redisClient.set(key, count, 'EX', RedisTTL.SHARE_COUNT, 'NX');
+    if (set) {
+        console.log(`shares:count re-seeded post=${postId} count=${count}`);
+    } else {
+        console.log(`hares:count refreshed concurrently, skipping post=${postId}`);
+    }
+}
 
 async function reseedLikeCount(postId) {
     const key = RedisKeys.postLikesCount(postId);
@@ -314,6 +336,14 @@ export function startCacheWarmer() {
     });
 
     subscriber.on('pmessage', (_pattern, _channel, key) => {
+        const sharesMatch = SHARES_COUNT_RE.exec(key);
+        if (sharesMatch) {
+            reseedShareCount(sharesMatch[1]).catch(err =>
+                console.error(`[CacheWarmer] reseedShareCount error key=${key}:`, err.message)
+            );
+            return;
+        }
+
         const likesMatch = LIKES_COUNT_RE.exec(key);
         if (likesMatch) {
             reseedLikeCount(likesMatch[1]).catch(err =>
