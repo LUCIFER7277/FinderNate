@@ -104,6 +104,7 @@ const MessageSchema = new mongoose.Schema({
         },
         productName: String,
         productImage: String,
+        productVideos: [{ url: String, thumbnailUrl: String }],
         productPrice: Number,
         productType: {
             type: String,
