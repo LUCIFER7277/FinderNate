@@ -23,6 +23,14 @@ import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUsers, stitchEng
 import { hasActivePaymentPlan } from "../utils/businessPlan.utils.js";
 import Business from "../models/business.models.js";
 import { getFollowStatus } from '../utils/followEngagement.utils.js';
+const pushNewPostToBuffer = async (postId, userId) => {
+    await Promise.all([
+        FeedCacheManager.invalidateUserFeed(userId),
+        FeedCacheManager.invalidateTrendingFeed(),
+        FeedCacheManager.invalidateExploreFeed(),
+    ]);
+};
+
 const extractMediaFiles = (files) => {
     const allFiles = [];
     ["image", "video", "reel", "story"].forEach((field) => {
@@ -145,7 +153,7 @@ export const createNormalPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
-    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
+    if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
@@ -192,7 +200,7 @@ export const createTweetPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
-    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
+    if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Tweet post created successfully"));
 });
 
@@ -237,7 +245,7 @@ export const createProductPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
-    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
+    if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Product post created successfully"));
 });
 
@@ -280,7 +288,7 @@ export const createServicePost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
-    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
+    if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Service post created successfully"));
 });
 
@@ -325,7 +333,7 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     });
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
-    if (post.status === 'published') pushNewPostToBuffer(post._id).catch(() => {});
+    if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
     return res.status(201).json(new ApiResponse(201, post, "Business post created successfully"));
 });
 
