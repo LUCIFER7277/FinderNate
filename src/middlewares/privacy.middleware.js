@@ -127,7 +127,8 @@ export const getViewableUserIds = async (viewerId) => {
     let viewableUserIds;
 
     // Base filter: exclude banned and deleted users from all feeds
-    const activeUserFilter = { accountStatus: 'active', isDeleted: { $ne: true } };
+    // Use $nin instead of exact 'active' match so users without the field set (legacy records) are included
+    const activeUserFilter = { accountStatus: { $nin: ['deactivated', 'banned'] }, isDeleted: { $ne: true } };
 
     if (!viewerId) {
         // Anonymous users can only see public content

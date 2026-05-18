@@ -214,9 +214,9 @@ const BusinessDetailsSchema = new mongoose.Schema({
     // 🚚 Delivery Options
     deliveryOptions: {
         type: String,
-        enum: ['online', 'offline', 'both'],
+        enum: ['', 'online', 'offline', 'both'],
         required: true,
-        default: 'online'
+        default: ''
     },
     contact: BusinessContactSchema,
     location: BusinessLocationSchema,

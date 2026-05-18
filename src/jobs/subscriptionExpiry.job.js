@@ -51,15 +51,11 @@ export const handleExpiredSubscriptions = async () => {
                 subscription.status = 'expired';
                 await subscription.save();
 
-                // 2. Update business profile if exists
-                const business = await Business.findOne({ userId });
-                if (business) {
-                    // Downgrade to free plan
-                    business.plan = 'plan1';
-                    business.subscriptionStatus = 'pending';
-                    await business.save();
-
-                }
+                // 2. Downgrade business profile to free plan (no-op if no Business doc)
+                await Business.updateOne(
+                    { userId },
+                    { $set: { plan: 'plan1', subscriptionStatus: 'pending' } }
+                );
 
                 // 3. Invalidate feed and profile caches (subscription badge changed on expiry)
                 try {
