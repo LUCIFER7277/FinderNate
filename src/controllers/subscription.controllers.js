@@ -319,6 +319,18 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'User not found');
     }
 
+    // Only business profile users can purchase a subscription
+    if (!user.isBusinessProfile) {
+        throw new ApiError(403, 'Only business accounts can purchase a subscription. Please create a business profile first.');
+    }
+
+    // Ensure the Business document exists
+    const Business = (await import('../models/business.models.js')).default;
+    const businessProfile = await Business.findOne({ userId });
+    if (!businessProfile) {
+        throw new ApiError(403, 'Business profile not found. Please complete your business profile setup before subscribing.');
+    }
+
     // Get plan details
     const planDetails = SUBSCRIPTION_PLANS[plan];
     if (!planDetails) {
@@ -426,6 +438,10 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'User not found');
     }
 
+    if (!user.isBusinessProfile) {
+        throw new ApiError(403, 'Only business accounts can activate a subscription.');
+    }
+
     const planMapping = {
         'small_business': 'plan2',
         'corporate': 'plan3'
@@ -456,15 +472,13 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         });
     }
 
-    // Update Business model if user has a business profile
+    // Update Business model — upsert ensures users who subscribed before creating their profile are also covered
     const Business = (await import('../models/business.models.js')).default;
-    const business = await Business.findOne({ userId });
-
-    if (business) {
-        business.plan = planMapping[plan];
-        business.subscriptionStatus = 'active';
-        await business.save();
-    }
+    const business = await Business.findOneAndUpdate(
+        { userId },
+        { $set: { plan: planMapping[plan], subscriptionStatus: 'active', isVerified: true } },
+        { upsert: true, new: true }
+    );
 
     // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
@@ -491,7 +505,7 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
     res.status(200).json(
         new ApiResponse(200, {
             subscription,
-            business: business ? { plan: business.plan, subscriptionStatus: business.subscriptionStatus } : null,
+            business: { plan: business.plan, subscriptionStatus: business.subscriptionStatus },
             tier: plan,
             features: {
                 calling: {
@@ -608,16 +622,16 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
         }
     }
 
-    // IMPORTANT: Also update Business model if user has a business profile
-    // The home feed checks Business model for post visibility
+    // Update Business model — upsert ensures users who subscribed before creating their profile are also covered
     const Business = (await import('../models/business.models.js')).default;
-    const business = await Business.findOne({ userId });
-
-    if (business) {
-        business.plan = planMapping[plan];
-        business.subscriptionStatus = plan === 'free' ? 'pending' : 'active';
-        await business.save();
-    }
+    const updateFields = plan === 'free'
+        ? { plan: planMapping[plan], subscriptionStatus: 'pending' }
+        : { plan: planMapping[plan], subscriptionStatus: 'active', isVerified: true };
+    const business = await Business.findOneAndUpdate(
+        { userId },
+        { $set: updateFields },
+        { upsert: true, new: true }
+    );
 
     // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
