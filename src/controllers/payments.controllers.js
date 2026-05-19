@@ -651,7 +651,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
         productCategory = s.category || productCategory;
         productType = "service";
         deliveryOptions = s.deliveryOptions || "offline";
-        shippingCharges = s.shippingCharges || 0;
+        shippingCharges = (s.additionalCharges || 0) + (s.shippingCharges || 0);
         gstPercent = s.gstPercent || 0;
         if (s.location) {
             sellerLocation = s.location.name || s.location.address || s.location.city || "";
@@ -682,7 +682,8 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                 isInStock: post.contentType === 'product' ? (post.customization?.product?.inStock ?? true) : true,
                 priceBreakdown: {
                     basePrice,
-                    shippingCharges,
+                    shippingCharges: productType === 'service' ? 0 : shippingCharges,
+                    additionalCharges: productType === 'service' ? shippingCharges : 0,
                     gstPercent,
                     gstAmount,
                     totalPrice,
@@ -1258,7 +1259,8 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
         productType = "service";
         deliveryOptions = s.deliveryOptions || "offline";
         currency = s.currency || "INR";
-        shippingCharges = s.shippingCharges || 0;
+        // additionalCharges is the primary extra-fee field for services; shippingCharges covers physical delivery if any
+        shippingCharges = (s.additionalCharges || 0) + (s.shippingCharges || 0);
         gstPercent = s.gstPercent || 0;
         if (s.location) {
             sellerLocation = s.location.name || s.location.address || s.location.city || "";
@@ -1511,7 +1513,8 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
                 isInStock: post.contentType === 'product' ? (post.customization?.product?.inStock ?? true) : true,
                 priceBreakdown: {
                     basePrice: checkout.basePrice,
-                    shippingCharges: checkout.shippingCharges,
+                    shippingCharges: checkout.productType === 'service' ? 0 : (checkout.shippingCharges || 0),
+                    additionalCharges: checkout.productType === 'service' ? (checkout.shippingCharges || 0) : 0,
                     gstPercent: checkout.gstPercent,
                     gstAmount: checkout.gstAmount,
                     totalPrice: checkout.totalPrice,
