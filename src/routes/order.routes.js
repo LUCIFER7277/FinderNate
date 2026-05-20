@@ -24,7 +24,7 @@ import {
     getSellerOrderStatistics,
     exportOrdersToCSV,
     getUserReviews
-} from "../controllers/orders.controllers.js";
+} from "../controllers/order/index.js";
 
 const router = Router();
 
