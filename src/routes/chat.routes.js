@@ -26,7 +26,7 @@ import {
     forwardMessage,
     togglePinMessage,
     getPinnedMessages
-} from '../controllers/chat.controllers.js';
+} from '../controllers/chat/index.js';
 
 const router = express.Router();
 

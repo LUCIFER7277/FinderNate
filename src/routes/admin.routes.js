@@ -62,6 +62,11 @@ import {
 } from "../controllers/monitoring.controllers.js";
 
 import {
+    debugUserChats,
+    cleanupProblematicChats
+} from "../controllers/admin/chat.controllers.js";
+
+import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";
@@ -198,5 +203,11 @@ router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
 router.route("/escrow/orders/:orderId/confirm").post(manualConfirmPayment);
 router.route("/escrow/orders/:orderId/seller-bank-details").get(getSellerBankDetailsByOrder);
 router.route("/escrow/analytics").get(getOrderAnalytics);
+
+// ===============================
+// CHAT MANAGEMENT ROUTES
+// ===============================
+router.route("/chats/debug").get(requirePermission('manageUsers'), debugUserChats);
+router.route("/chats/cleanup").post(requirePermission('manageUsers'), cleanupProblematicChats);
 
 export default router;
