@@ -8,7 +8,7 @@ import {
     verifySubscriptionPayment,
     subscriptionWebhook,
     testUpgradeSubscription
-} from '../controllers/subscription.controllers.js';
+} from '../controllers/subscription/index.js';
 import {
     getPaymentLogs,
     getSubscriptionLogs,
