@@ -42,18 +42,9 @@ export const canViewPost = (post, postOwner, viewer, viewerFollowing = [], viewe
         return true;
     }
 
-    // If post is private, only followers/following can see it
+    // If post is private, only the owner can see it (already handled above)
     if (postPrivacy === 'private') {
-        if (!viewer) return false; // Anonymous users cannot see private posts
-
-        const viewerId = viewer._id.toString();
-        const postOwnerId = postOwner._id.toString();
-
-        // Check if viewer follows the post owner OR post owner follows the viewer
-        const isFollowing = viewerFollowing.includes(postOwnerId);
-        const isFollowedBy = viewerFollowers.includes(postOwnerId);
-
-        return isFollowing || isFollowedBy;
+        return false; // Non-owners cannot see private posts
     }
 
     return false;

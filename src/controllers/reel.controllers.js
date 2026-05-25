@@ -99,10 +99,11 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
 
         // Build match criteria for reels discovery feed
         // Show reels from: ALL public users + private users that viewer follows
-        // Exclude blocked users
+        // Exclude blocked users and private posts
         const matchCriteria = {
             status: { $in: ["published", "scheduled"] },
-            userId: { $in: allowedUserIds, $nin: blockedUsers }
+            userId: { $in: allowedUserIds, $nin: blockedUsers },
+            "settings.privacy": { $ne: "private" }  // Exclude posts marked as private
         };
 
         // Filter by postType if specified (reel, photo, video, story)
