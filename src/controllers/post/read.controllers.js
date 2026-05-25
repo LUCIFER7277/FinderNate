@@ -370,6 +370,9 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         const enrichedPosts = await enrichWithRatings(postsAfterBusinessFilter, 'userId');
         const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
 
+        // Strip description from each post before sending
+        postsWithBadges.forEach(post => { delete post.description; });
+
         return res.status(200).json(
             new ApiResponse(200, {
                 posts: postsWithBadges,
