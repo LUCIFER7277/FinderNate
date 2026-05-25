@@ -123,7 +123,8 @@ export const searchAllContent = async (req, res) => {
                 { 'customization.business.location.state': searchRegex },
                 { 'customization.business.location.country': searchRegex },
             ],
-            contentType: { $in: ['normal', 'service', 'product', 'business'] }
+            contentType: { $in: ['normal', 'service', 'product', 'business'] },
+            'settings.privacy': { $ne: 'private' }  // Never show private posts in search results
         };
 
         // Filter by contentType
@@ -359,7 +360,8 @@ export const searchAllContent = async (req, res) => {
                     { 'location.state': searchRegex },
                     { 'location.country': searchRegex }
                 ],
-                userId: { $nin: blockedUsers }
+                userId: { $nin: blockedUsers },
+                isPublic: true  // Never show private reels in search results
             };
 
             // Add username search to reel filters

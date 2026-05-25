@@ -33,8 +33,9 @@ export const getOnlineStoreProducts = asyncHandler(async (req, res) => {
 
     // ── Base filter ──────────────────────────────────────────────────────────
     const filter = {
-        userId:      STORE_USER_ID,
-        contentType: 'product',
+        userId:             STORE_USER_ID,
+        contentType:        'product',
+        'settings.privacy': { $ne: 'private' }  // Never show private product posts
     };
 
     // ── Search (name, description, category) ────────────────────────────────

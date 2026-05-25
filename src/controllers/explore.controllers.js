@@ -75,7 +75,8 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
     // Get all posts matching the criteria using the same reliable approach as homeFeed (excluding blocked users and respecting privacy)
     const allPosts = await Post.find({
         ...postMatch,
-        userId: { $in: viewableUserIds, $nin: blockedUsers }
+        userId: { $in: viewableUserIds, $nin: blockedUsers },
+        'settings.privacy': { $ne: 'private' }  // Never show private posts in public feeds
     })
         .sort({ createdAt: -1 })
         .limit(EXPLORE_LIMIT)

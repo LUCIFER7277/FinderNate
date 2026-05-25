@@ -117,6 +117,8 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
             postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
             userId: { $in: viewableUserIds, $nin: blockedUsers },
+            // Never show private posts in any public feed
+            'settings.privacy': { $ne: 'private' },
             // For logged-out users, only show posts with public visibility
             ...(userId ? {} : {
                 $or: [
@@ -358,11 +360,12 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         if (page === 1 && posts.length === limit) {
             // Only do count query for first page if it's full
             try {
-                // Count all posts, filtering out business content from unpaid business accounts
+                // Count all posts, filtering out business content from unpaid business accounts and private posts
                 const allPostsForCount = await Post.find({
                     contentType: { $in: ['normal', 'service', 'product', 'business'] },
                     postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
-                    userId: { $nin: blockedUsers, $in: viewableUserIds }
+                    userId: { $nin: blockedUsers, $in: viewableUserIds },
+                    'settings.privacy': { $ne: 'private' }
                 }).select('userId contentType postType').lean();
 
                 // Filter: keep all posts from paid plans, all from non-business,
