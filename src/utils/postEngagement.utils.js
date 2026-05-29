@@ -436,7 +436,7 @@ export async function stitchEngagement(userId, items, currentUserProfile = null)
             },
             isLikedBy: userId ? likedSet.has(idStr) : false,
             likedBy: likedByUsers,
-            likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+            likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
         };
     });
 }

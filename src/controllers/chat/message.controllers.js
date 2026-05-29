@@ -215,8 +215,45 @@ export const addMessage = asyncHandler(async (req, res) => {
     }
 
     if (mediaFile) {
+        // Per-type size limits
+        const CHAT_MEDIA_LIMITS = {
+            audio: 6 * 1024 * 1024,   // 6 MB
+            video: 50 * 1024 * 1024,  // 50 MB
+            file: 7 * 1024 * 1024,    // 7 MB  (documents)
+            image: 10 * 1024 * 1024,  // 10 MB (images)
+        };
+
+        let detectedCategory;
+        if (mediaFile.mimetype.startsWith('image/')) {
+            detectedCategory = 'image';
+        } else if (mediaFile.mimetype.startsWith('video/')) {
+            detectedCategory = 'video';
+        } else if (mediaFile.mimetype.startsWith('audio/')) {
+            detectedCategory = 'audio';
+        } else {
+            detectedCategory = 'file';
+        }
+
+        const sizeLimit = CHAT_MEDIA_LIMITS[detectedCategory];
+        if (mediaFile.size > sizeLimit) {
+            const limitMB = sizeLimit / (1024 * 1024);
+            throw new ApiError(400, `${detectedCategory.charAt(0).toUpperCase() + detectedCategory.slice(1)} file too large. Maximum allowed size is ${limitMB} MB`);
+        }
+
+        const folderMap = {
+            image: 'chat_images',
+            video: 'chat_videos',
+            audio: 'chat_audio',
+            file: 'chat_files',
+        };
+
         try {
-            const uploadResult = await uploadBufferToBunny(mediaFile.buffer, 'chat_media');
+            const uploadResult = await uploadBufferToBunny(
+                mediaFile.buffer,
+                folderMap[detectedCategory],
+                mediaFile.originalname,
+                mediaFile.mimetype
+            );
             messageData.mediaUrl = uploadResult.secure_url;
             messageData.fileName = mediaFile.originalname;
             messageData.fileSize = mediaFile.size;
@@ -226,15 +263,13 @@ export const addMessage = asyncHandler(async (req, res) => {
             }
 
             if (messageType === 'text') {
-                if (mediaFile.mimetype.startsWith('image/')) {
-                    messageData.messageType = 'image';
-                } else if (mediaFile.mimetype.startsWith('video/')) {
-                    messageData.messageType = 'video';
-                } else if (mediaFile.mimetype.startsWith('audio/')) {
-                    messageData.messageType = 'audio';
-                } else {
-                    messageData.messageType = 'file';
-                }
+                const categoryToMsgType = {
+                    image: 'image',
+                    video: 'video',
+                    audio: 'audio',
+                    file: 'file',
+                };
+                messageData.messageType = categoryToMsgType[detectedCategory];
             }
         } catch (uploadError) {
             throw new ApiError(500, `Failed to upload media file: ${uploadError.message}`);
@@ -247,6 +282,7 @@ export const addMessage = asyncHandler(async (req, res) => {
     chat.lastMessage = {
         sender: currentUserId,
         message: finalMessage,
+        messageType: messageData.messageType,
         timestamp: new Date()
     };
     chat.lastMessageId = newMessage._id;

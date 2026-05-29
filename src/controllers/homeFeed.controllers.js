@@ -76,7 +76,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                         },
                         isLikedBy: likedSet.has(idStr),
                         likedBy: likedByUsers,
-                        likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                        likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
                     };
                 });
             }
@@ -345,7 +345,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 comments: commentsByPost.get(postIdStr) || [],
                 isLikedBy: likedPostIds.has(postIdStr),
                 likedBy: likedByUsers,
-                likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
             };
         });
         // Enrich posts with review/rating data
