@@ -125,7 +125,7 @@ export const getPostById = asyncHandler(async (req, res) => {
 
     if (currentUser) {
         const preview = getLikedByPreview(likedByUsers, currentUser._id.toString());
-        post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
+        post.likedByPreview = preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null;
     }
 
     const [postWithBadge] = await addBadgesToNestedUsers([post]);
@@ -189,7 +189,7 @@ export const getMyPosts = asyncHandler(async (req, res) => {
 
     postsWithThumbnails.forEach(post => {
         const preview = getLikedByPreview(post.likedBy || [], currentUserId);
-        post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
+        post.likedByPreview = preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null;
     });
 
     const enrichedPosts = await enrichWithRatings(postsWithThumbnails, 'userId');
@@ -363,7 +363,7 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         if (currentUser) {
             postsAfterBusinessFilter.forEach(post => {
                 const preview = getLikedByPreview(post.likedBy || [], currentUserId);
-                post.likedByPreview = preview.likedByText ? { text: preview.likedByText } : null;
+                post.likedByPreview = preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null;
             });
         }
 

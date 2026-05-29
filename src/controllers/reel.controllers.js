@@ -189,7 +189,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                         engagement: { ...(r.engagement || {}), likes: likeCountMap.get(rid) ?? r.engagement?.likes ?? 0, comments: commentCountMap.get(rid) ?? r.engagement?.comments ?? 0, shares: sharedCountMap.get(rid) ?? r.engagement?.shares ?? 0 },
                         isLikedBy: likedSet.has(rid),
                         likedBy: likedByUsers,
-                        likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                        likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
                     };
                 });
                 return res.status(200).json(new ApiResponse(200, { ...cachedData, reels: updatedReels }, "Reels fetched from cache"));
@@ -431,7 +431,7 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
                     },
                     isLikedBy: likedReelSet.has(reelIdStr),
                     likedBy: likedByUsers,
-                    likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                    likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
                 };
             });
 

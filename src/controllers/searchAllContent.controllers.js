@@ -535,7 +535,7 @@ export const searchAllContent = async (req, res) => {
                 },
                 isLikedBy: likedSet.has(idStr),
                 likedBy: likedByUsers,
-                likedByPreview: preview.likedByText ? { text: preview.likedByText } : null,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
             };
         });
 
