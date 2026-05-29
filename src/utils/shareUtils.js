@@ -43,9 +43,7 @@ export const generateOpenGraphMetaTags = (post, type = "post") => {
 
   const mediaUrl =
     post.media?.[0]?.thumbnailUrl || post.media?.[0]?.url || "";
-  const shareUrl = `https://findernate.com/${type === "reel" ? "r" : "p"}/${
-    post._id
-  }`;
+  const shareUrl = `https://findernate.com/r/${post._id}`;
 
   const metaTags = {
     "og:title": `${author.fullName || author.username} on FinderNate`,
