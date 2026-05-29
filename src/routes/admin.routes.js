@@ -67,6 +67,13 @@ import {
 } from "../controllers/admin/chat.controllers.js";
 
 import {
+    addSetting,
+    getSetting,
+    getAllSettings,
+    updateSetting
+} from "../controllers/admin/settings.controllers.js";
+
+import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";
@@ -203,6 +210,12 @@ router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
 router.route("/escrow/orders/:orderId/confirm").post(manualConfirmPayment);
 router.route("/escrow/orders/:orderId/seller-bank-details").get(getSellerBankDetailsByOrder);
 router.route("/escrow/analytics").get(getOrderAnalytics);
+
+// ===============================
+// SETTINGS ROUTES (admin-only)
+// ===============================
+router.route("/settings").post(addSetting).get(getAllSettings);
+router.route("/settings/:key").get(getSetting).put(updateSetting);
 
 // ===============================
 // CHAT MANAGEMENT ROUTES

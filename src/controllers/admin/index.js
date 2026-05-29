@@ -6,3 +6,4 @@ export * from "./business.controllers.js";
 export * from "./analytics.controllers.js";
 export * from "./superadmin.controllers.js";
 export * from "./chat.controllers.js";
+export * from "./settings.controllers.js";

@@ -4,6 +4,7 @@ import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
+import { getFeeRates } from "../utils/fees.utils.js";
 import {
     generateCashfreeRefundId,
     getCashfreeOrderStatus,
@@ -75,7 +76,7 @@ export const getEscrowTransactions = asyncHandler(async (req, res) => {
 export const getAllOrders = asyncHandler(async (req, res) => {
     const { status, paymentStatus, page = 1, limit = 20 } = req.query;
 
-    const query = {};
+    const query = { paymentStatus: { $ne: 'pending' } };
     if (status) query.orderStatus = status;
     if (paymentStatus) query.paymentStatus = paymentStatus;
 
@@ -165,8 +166,9 @@ const calculateFeeBreakdown = async (order) => {
         }
     }
 
-    const gatewayFee = Number((productPrice * 0.02).toFixed(2));       // 2% payment gateway fee
-    const platformFee = Number((productPrice * 0.025).toFixed(2));     // 2.5% platform fee
+    const { gatewayFeeRate, platformFeeRate } = await getFeeRates();
+    const gatewayFee = Number((productPrice * gatewayFeeRate).toFixed(2));
+    const platformFee = Number((productPrice * platformFeeRate).toFixed(2));
     const totalDeductions = shippingCharges + gatewayFee + platformFee;
     const buyerRefund = Math.max(0, order.amount - totalDeductions);
     const sellerSettlement = shippingCharges;
@@ -237,6 +239,11 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         }
 
         feeBreakdown = await calculateFeeBreakdown(order);
+
+        if (feeBreakdown.buyerRefund < 2) {
+            throw new ApiError(400, `Invalid refund value for the order: calculated refund ₹${feeBreakdown.buyerRefund} is below the minimum allowed (₹2)`);
+        }
+
         refundId = order.refundId || generateCashfreeRefundId();
 
         let cashfreeOrder;
@@ -250,7 +257,8 @@ export const resolveDispute = asyncHandler(async (req, res) => {
             throw new ApiError(400, `Cashfree order is not PAID (status: ${cashfreeOrder.order_status})`);
         }
 
-        if (order.refundId) {
+        if (order
+            .refundId) {
             try {
                 const existing = await getCashfreeRefund(order.cashfreeOrderId, order.refundId);
                 refundStatus = existing.refund_status;
@@ -268,6 +276,7 @@ export const resolveDispute = asyncHandler(async (req, res) => {
                     `Dispute resolution refund - Order ${order.orderNumber}`
                 );
             } catch (err) {
+                 
                 throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
             }
             refundStatus = cfRefund.refund_status;
@@ -418,6 +427,11 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
     }
 
     const feeBreakdown = await calculateFeeBreakdown(order);
+
+    if (feeBreakdown.buyerRefund < 2) {
+        throw new ApiError(400, `Invalid refund value for the order: calculated refund ₹${feeBreakdown.buyerRefund} is below the minimum allowed (₹2)`);
+    }
+
     const refundId = order.refundId || generateCashfreeRefundId();
 
     // ── 1. Verify Cashfree order is PAID ──────────────────────────────────────
@@ -447,6 +461,7 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
     // ── 3. Create refund on Cashfree if not already SUCCESS ───────────────────
     if (refundStatus !== 'SUCCESS') {
         let cfRefund;
+         
         try {
             cfRefund = await createCashfreeRefund(
                 order.cashfreeOrderId,
@@ -455,6 +470,7 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
                 `Admin manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`
             );
         } catch (err) {
+            console.log(err)
             throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
         }
         refundStatus = cfRefund.refund_status;
@@ -562,7 +578,10 @@ export const getOrderAnalytics = asyncHandler(async (req, res) => {
     if (startDate) dateFilter.$gte = new Date(startDate);
     if (endDate) dateFilter.$lte = new Date(endDate);
 
-    const matchStage = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
+    const matchStage = {
+        paymentStatus: { $ne: 'pending' },
+        ...(Object.keys(dateFilter).length ? { createdAt: dateFilter } : {})
+    };
 
     const analytics = await Order.aggregate([
         { $match: matchStage },
