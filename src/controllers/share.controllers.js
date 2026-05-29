@@ -53,7 +53,7 @@ export const generatePostShareLink = asyncHandler(async (req, res) => {
   }
 
   // Generate shareable link
-  const shareLink = `https://findernate.com/p/${postId}`;
+  const shareLink = `https://findernate.com/r/${postId}`;
 
   // Prepare preview data
   const previewData = {
@@ -261,7 +261,7 @@ export const getSharedPost = asyncHandler(async (req, res) => {
   const responseData = {
     post: sanitizedPost,
     shareMetadata: {
-      shareUrl: `https://findernate.com/p/${postId}`,
+      shareUrl: `https://findernate.com/r/${postId}`,
       canShare: true,
       viewerCanInteract: !!viewer,
     },
@@ -272,7 +272,7 @@ export const getSharedPost = asyncHandler(async (req, res) => {
   const cacheData = {
     post: sanitizePostForGuest(post, null),
     shareMetadata: {
-      shareUrl: `https://findernate.com/p/${postId}`,
+      shareUrl: `https://findernate.com/r/${postId}`,
       canShare: true,
       viewerCanInteract: false,
     },
@@ -615,7 +615,7 @@ export const trackShare = asyncHandler(async (req, res) => {
       200,
       {
         shareCount,
-        shareUrl: `https://findernate.com/${post.postType === "reel" || post.postType === "video" ? "r" : "p"}/${postId}`,
+        shareUrl: `https://findernate.com/r/${postId}`,
       },
       "Share tracked successfully"
     )

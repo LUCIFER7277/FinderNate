@@ -9,7 +9,8 @@ import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
 import { enrichWithRatings } from "../utils/reviewUtils.js";
 import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
 import { filterBusinessPostsByPaymentPlan } from "../utils/businessPlan.utils.js";
-import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount } from "../utils/postEngagement.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchSharedCount } from "../utils/postEngagement.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -345,6 +346,8 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         feed = feed.map(item => {
             const idStr = item._id?.toString();
             if (!idStr) return item;
+            const likedByUsers = likedByMap.get(idStr) || [];
+            const preview = getLikedByPreview(likedByUsers, currentUserId);
             return {
                 ...item,
                 engagement: {
@@ -353,7 +356,8 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
                     shares: sharedCountMap.get(idStr) ?? item.engagement?.shares ?? 0
                 },
                 isLikedBy: currentUserId ? likedSet.has(idStr) : false,
-                likedBy: likedByMap.get(idStr) || [],
+                likedBy: likedByUsers,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
             };
         });
     }
