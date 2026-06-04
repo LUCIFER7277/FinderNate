@@ -1,0 +1,198 @@
+import Business from "../../models/business.models.js";
+import { ApiError } from "../../utils/ApiError.js";
+import { ApiResponse } from "../../utils/ApiResponse.js";
+import { asyncHandler } from "../../utils/asyncHandler.js";
+
+// GET /api/v1/admin/aadhaar-verification/pending
+export const getPendingAadhaarVerifications = asyncHandler(async (req, res) => {
+    const { page = 1, limit = 20, search } = req.query;
+
+    let filter = {
+        $or: [
+            { 'documents': { $elemMatch: { documentType: 'aadhaar', verified: false } } },
+            { aadhaarNumber: { $exists: true, $ne: null, $ne: "" }, isVerified: false }
+        ]
+    };
+
+    if (search) {
+        filter.$and = [
+            filter,
+            {
+                $or: [
+                    { businessName: { $regex: search, $options: 'i' } },
+                    { aadhaarNumber: { $regex: search, $options: 'i' } }
+                ]
+            }
+        ];
+    }
+
+    const businesses = await Business.find(filter)
+        .populate('userId', 'username fullName email phoneNumber')
+        .populate('documents.verifiedBy', 'username fullName')
+        .select('businessName aadhaarNumber gstNumber contact location documents createdAt')
+        .sort({ createdAt: -1 })
+        .limit(limit * 1)
+        .skip((page - 1) * limit);
+
+    const businessesWithAadhaarDocs = businesses.map(business => {
+        const businessObj = business.toObject();
+        if (businessObj.documents) {
+            businessObj.documents = businessObj.documents.filter(
+                doc => doc.documentType === 'aadhaar' && !doc.verified
+            );
+        }
+        return businessObj;
+    });
+
+    const totalBusinesses = await Business.countDocuments(filter);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            businesses: businessesWithAadhaarDocs,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(totalBusinesses / limit),
+                totalBusinesses,
+                hasNext: page < Math.ceil(totalBusinesses / limit),
+                hasPrev: page > 1
+            }
+        }, "Pending Aadhaar verifications fetched successfully")
+    );
+});
+
+// POST /api/v1/admin/aadhaar-verification/verify/:businessId
+export const verifyAadhaarCard = asyncHandler(async (req, res) => {
+    const { businessId } = req.params;
+    const { status, remarks } = req.body;
+
+    if (!['approved', 'rejected'].includes(status)) {
+        throw new ApiError(400, "Status must be either 'approved' or 'rejected'");
+    }
+
+    const business = await Business.findById(businessId).populate('userId');
+    if (!business) {
+        throw new ApiError(404, "Business not found");
+    }
+
+    if (!business.aadhaarNumber) {
+        throw new ApiError(400, "No Aadhaar number found for this business");
+    }
+
+    if (status === 'approved') {
+        business.isVerified = true;
+        business.verificationStatus = 'approved';
+        business.verificationRemarks = remarks || 'Aadhaar verification approved';
+        business.verifiedAt = new Date();
+        business.verifiedBy = req.admin._id;
+    } else {
+        business.isVerified = false;
+        business.verificationStatus = 'rejected';
+        business.verificationRemarks = remarks || 'Aadhaar verification rejected';
+        business.rejectedAt = new Date();
+        business.rejectedBy = req.admin._id;
+    }
+
+    await business.save();
+
+    await req.admin.logActivity(
+        `aadhaar_verification_${status}`,
+        'business',
+        businessId,
+        `Aadhaar verification ${status} for business: ${business.businessName}`
+    );
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            business: {
+                _id: business._id,
+                businessName: business.businessName,
+                isVerified: business.isVerified,
+                verificationStatus: business.verificationStatus,
+                verificationRemarks: business.verificationRemarks
+            }
+        }, `Aadhaar verification ${status} successfully`)
+    );
+});
+
+// GET /api/v1/admin/aadhaar-verification/history
+export const getAadhaarVerificationHistory = asyncHandler(async (req, res) => {
+    const { page = 1, limit = 20, status } = req.query;
+
+    let filter = {
+        aadhaarNumber: { $exists: true, $ne: null, $ne: "" },
+        verificationStatus: { $exists: true }
+    };
+
+    if (status && ['approved', 'rejected'].includes(status)) {
+        filter.verificationStatus = status;
+    }
+
+    const businesses = await Business.aggregate([
+        { $match: filter },
+        {
+            $addFields: {
+                lastVerificationDate: {
+                    $max: ['$verifiedAt', '$rejectedAt']
+                }
+            }
+        },
+        { $sort: { lastVerificationDate: -1 } },
+        { $skip: (page - 1) * limit },
+        { $limit: limit * 1 },
+        {
+            $lookup: {
+                from: 'users',
+                localField: 'userId',
+                foreignField: '_id',
+                as: 'userId',
+                pipeline: [{ $project: { username: 1, fullName: 1, email: 1 } }]
+            }
+        },
+        {
+            $lookup: {
+                from: 'admins',
+                localField: 'verifiedBy',
+                foreignField: '_id',
+                as: 'verifiedBy',
+                pipeline: [{ $project: { fullName: 1, username: 1 } }]
+            }
+        },
+        {
+            $lookup: {
+                from: 'admins',
+                localField: 'rejectedBy',
+                foreignField: '_id',
+                as: 'rejectedBy',
+                pipeline: [{ $project: { fullName: 1, username: 1 } }]
+            }
+        },
+        {
+            $project: {
+                businessName: 1,
+                aadhaarNumber: 1,
+                verificationStatus: 1,
+                verificationRemarks: 1,
+                verifiedAt: 1,
+                rejectedAt: 1,
+                userId: { $arrayElemAt: ['$userId', 0] },
+                verifiedBy: { $arrayElemAt: ['$verifiedBy', 0] },
+                rejectedBy: { $arrayElemAt: ['$rejectedBy', 0] }
+            }
+        }
+    ]);
+
+    const totalBusinesses = await Business.countDocuments(filter);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            businesses,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(totalBusinesses / limit),
+                totalBusinesses,
+                hasNext: page < Math.ceil(totalBusinesses / limit),
+                hasPrev: page > 1
+            }
+        }, "Aadhaar verification history fetched successfully")
+    );
+});
