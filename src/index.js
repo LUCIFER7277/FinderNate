@@ -5,6 +5,7 @@ import http from 'http';
 import socketManager from './config/socket.js';
 import './config/firebase-admin.config.js'; // Initialize Firebase Admin on startup
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
+import { ensureCollections } from './services/typesense/index.js';
 
 dotenv.config({
     path: './.env'
@@ -39,6 +40,13 @@ const server = http.createServer(app);
 connectDB()
     .then(async () => {
         console.log('✅ Database connected successfully');
+
+        // Ensure Typesense collections exist (non-fatal — search falls back to Mongo).
+        try {
+            await ensureCollections();
+        } catch (err) {
+            console.error('⚠️  Typesense ensureCollections failed (continuing without it):', err.message);
+        }
 
         // Initialize Socket.IO with our enhanced manager after DB connection
         try {

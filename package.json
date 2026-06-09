@@ -14,6 +14,9 @@
     "build": "echo 'Build completed - Node.js project ready for deployment'",
     "db:indexes": "node src/scripts/createIndexes.js",
     "db:indexes:list": "node -e \"import('./src/scripts/createIndexes.js').then(({listExistingIndexes}) => listExistingIndexes())\"",
+    "typesense:bootstrap": "node src/scripts/typesense.bootstrap.js",
+    "typesense:backfill": "node src/scripts/typesense.backfill.js",
+    "typesense:sync": "node src/scripts/typesense.sync.js",
     "seed:orders": "node scripts/seedTestOrders.js",
     "clean:orders": "node scripts/cleanTestOrders.js",
     "transfer:orders": "node scripts/transferOrders.js",
@@ -64,6 +67,7 @@
     "qrcode": "^1.5.4",
     "razorpay": "^2.9.6",
     "socket.io": "^4.8.1",
+    "typesense": "^3.0.6",
     "uuid": "^11.1.0",
     "web-push": "^3.6.7"
   },
