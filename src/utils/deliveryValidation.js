@@ -12,12 +12,10 @@ export const validateDeliveryAndLocation = async (postData, postType) => {
         throw new ApiError(400, `${postType} data is required`);
     }
 
-    const { deliveryOptions, location } = postData;
+    const { location } = postData;
 
-    // Validate delivery options
-    if (!deliveryOptions) {
-        throw new ApiError(400, "Delivery options (online/offline/both) are required");
-    }
+    // Delivery option is optional; default to 'online' when not provided.
+    const deliveryOptions = postData.deliveryOptions || 'online';
 
     if (!['online', 'offline', 'both'].includes(deliveryOptions)) {
         throw new ApiError(400, "Delivery options must be 'online', 'offline', or 'both'");
@@ -25,7 +23,7 @@ export const validateDeliveryAndLocation = async (postData, postType) => {
 
     // If online only, no location validation needed
     if (deliveryOptions === 'online') {
-        return postData;
+        return { ...postData, deliveryOptions };
     }
 
     // For offline or both, location is mandatory
@@ -71,7 +69,7 @@ export const validateDeliveryAndLocation = async (postData, postType) => {
         }
     }
 
-    return { ...postData, location };
+    return { ...postData, deliveryOptions, location };
 };
 
 /**
