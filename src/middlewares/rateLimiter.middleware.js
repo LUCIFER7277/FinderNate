@@ -108,8 +108,9 @@ export const generalRateLimit = rateLimit({
                req.path === '/health' ||
                req.path === '/api/v1/health';
     },
-    // In development, don't trust proxy headers for rate limiting
-    trustProxy: process.env.NODE_ENV === 'production',
+    // Note: trust-proxy is configured once on the Express app via
+    // `app.set('trust proxy', 1)` (see app.js) — NOT here. express-rate-limit
+    // v8 rejects a `trustProxy` option with ERR_ERL_UNKNOWN_OPTION.
     // Use custom Redis store
     store: new RedisStore({ prefix: 'rl:general:', windowMs: 1 * 60 * 1000 })
 });
@@ -124,7 +125,6 @@ export const notificationRateLimit = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
-    trustProxy: process.env.NODE_ENV === 'production',
     store: new RedisStore({ prefix: 'rl:notif:', windowMs: 30 * 1000 })
 });
 
@@ -139,7 +139,6 @@ export const unreadCountsRateLimit = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
-    trustProxy: process.env.NODE_ENV === 'production',
     store: new RedisStore({ prefix: 'rl:unread:', windowMs: 10 * 1000 })
 });
 
@@ -153,7 +152,6 @@ export const chatRateLimit = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
-    trustProxy: process.env.NODE_ENV === 'production',
     store: new RedisStore({ prefix: 'rl:chat:', windowMs: 30 * 1000 })
 });
 
@@ -169,6 +167,5 @@ export const healthCheckRateLimit = rateLimit({
     legacyHeaders: false,
     // Skip rate limiting for OPTIONS requests (CORS preflight)
     skip: (req) => req.method === 'OPTIONS',
-    trustProxy: process.env.NODE_ENV === 'production',
     store: new RedisStore({ prefix: 'rl:health:', windowMs: 1 * 60 * 1000 })
 });
