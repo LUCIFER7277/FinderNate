@@ -59,6 +59,8 @@ const allowedOrigins = [
         "http://127.0.0.1:4000",
         "https://z0n8vrlt-4000.inc1.devtunnels.ms",
          /^https?:\/\/[\w-]+\.194\.164\.151\.15\.sslip\.io$/,
+        // Allow any findernate.com subdomain (frontend, CDN edge domains, etc.)
+        /^https:\/\/[\w-]+\.findernate\.com$/,
         "https://apis.findernate.com",
         // Allow all local network IPs for development
         ...(process.env.NODE_ENV === 'development' ? [/^http:\/\/192\.168\.\d+\.\d+:4000$/] : []),
