@@ -7,6 +7,7 @@ import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile,
 import { searchAllContent } from "../controllers/searchAllContent.controllers.js";
 import { followUser, unfollowUser, getFollowers, getFollowing, approveFollowRequest, rejectFollowRequest, getPendingFollowRequests, getSentFollowRequests } from "../controllers/follower.controllers.js";
 import { getSearchSuggestions } from "../controllers/searchSuggestion.controllers.js";
+import { instantSearch, searchProfiles, searchProducts } from "../controllers/search.controllers.js";
 
 const router = Router();
 
@@ -41,6 +42,12 @@ router.get("/follow-requests/sent", verifyJWT, getSentFollowRequests);
 
 // Search suggestion routes
 router.get("/search-suggestions", verifyJWT, getSearchSuggestions);
+
+// ⚡ Typesense-powered fast search (typo-tolerant, instant). optionalVerifyJWT so
+// logged-out users can search too; getBlockedUsers filters blocked profiles when authed.
+router.get("/search/instant", optionalVerifyJWT, getBlockedUsersMiddleware, instantSearch);
+router.get("/search/profiles", optionalVerifyJWT, getBlockedUsersMiddleware, searchProfiles);
+router.get("/search/products", optionalVerifyJWT, searchProducts);
 
 // Search tracking routes
 router.post("/track-search", trackSearch);
