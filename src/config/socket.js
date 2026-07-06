@@ -87,7 +87,6 @@ class SocketManager {
 
             // Add process identification for debugging
             const PROCESS_ID = process.env.INSTANCE_ID || process.env.pm_id || `process-${process.pid}`;
-            console.log(`🔧 Socket.IO initialized on process: ${PROCESS_ID}`);
 
             // Authentication middleware
             this.io.use(async (socket, next) => {
@@ -114,7 +113,6 @@ class SocketManager {
             });
 
             this.setupEventHandlers();
-            console.log('Socket.IO initialized successfully');
         } catch (error) {
             console.error('Failed to initialize Socket.IO:', error);
             this.io = null;
@@ -155,7 +153,6 @@ class SocketManager {
             // Join user to their personal room
             const userRoom = `user_${socket.userId}`;
             socket.join(userRoom);
-            console.log(`✅ User ${socket.userId} joined personal room: ${userRoom}`);
 
             // Auto-join user to all their active chat rooms for real-time messaging
             (async () => {
@@ -175,7 +172,6 @@ class SocketManager {
                         socket.chatRooms.add(chat._id.toString());
                     });
 
-                    console.log(`✅ User ${socket.userId} auto-joined ${activeChats.length} chat rooms on connect`);
                 } catch (error) {
                     console.error(`❌ Error auto-joining chat rooms for user ${socket.userId}:`, error);
                 }
@@ -187,14 +183,12 @@ class SocketManager {
             socket.on('join_chat', (chatId) => {
                 socket.join(`chat:${chatId}`);
                 socket.chatRooms.add(chatId); // Track for cleanup
-                console.log(`User ${socket.userId} joined chat ${chatId}`);
             });
 
             // Handle leaving chat rooms
             socket.on('leave_chat', (chatId) => {
                 socket.leave(`chat:${chatId}`);
                 socket.chatRooms.delete(chatId); // Remove from tracking
-                console.log(`User ${socket.userId} left chat ${chatId}`);
             });
 
             // Handle typing events
@@ -352,6 +346,111 @@ class SocketManager {
                 });
             });
 
+            // ===== ENHANCED MESSAGING EVENTS =====
+
+            // Handle message reaction events (real-time sync)
+            socket.on('add_reaction', (data) => {
+                const { chatId, messageId, emoji, reaction } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_reaction_added', {
+                    chatId,
+                    messageId,
+                    emoji,
+                    reaction: reaction || {
+                        emoji,
+                        userId: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName,
+                        profileImageUrl: socket.user.profileImageUrl,
+                        createdAt: new Date()
+                    }
+                });
+            });
+
+            socket.on('remove_reaction', (data) => {
+                const { chatId, messageId, emoji } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_reaction_removed', {
+                    chatId,
+                    messageId,
+                    emoji,
+                    userId: socket.userId
+                });
+            });
+
+            // Handle message edit events (real-time sync)
+            socket.on('edit_message', (data) => {
+                const { chatId, messageId, newContent, editedAt, originalContent } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_edited', {
+                    chatId,
+                    messageId,
+                    newContent,
+                    editedAt: editedAt || new Date(),
+                    editedBy: {
+                        _id: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName
+                    },
+                    originalContent
+                });
+            });
+
+            // Handle message forward events (real-time notification)
+            socket.on('forward_message', (data) => {
+                const { targetChatIds, originalMessage, newMessages } = data;
+                
+                // Emit to each target chat
+                targetChatIds.forEach((targetChatId, index) => {
+                    socket.to(`chat:${targetChatId}`).emit('message_forwarded', {
+                        chatId: targetChatId,
+                        originalMessage,
+                        newMessage: newMessages?.[index],
+                        forwardedBy: {
+                            _id: socket.userId,
+                            username: socket.user.username,
+                            fullName: socket.user.fullName,
+                            profileImageUrl: socket.user.profileImageUrl
+                        },
+                        timestamp: new Date()
+                    });
+                });
+            });
+
+            // Handle message pin events (real-time sync)
+            socket.on('pin_message', (data) => {
+                const { chatId, messageId, isPinned, pinnedMessage } = data;
+                
+                socket.to(`chat:${chatId}`).emit('message_pin_toggled', {
+                    chatId,
+                    messageId,
+                    isPinned,
+                    pinnedMessage,
+                    pinnedBy: isPinned ? {
+                        _id: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName
+                    } : null,
+                    timestamp: new Date()
+                });
+            });
+
+            // Handle voice message recording notification (optional UX enhancement)
+            socket.on('recording_voice', (data) => {
+                const { chatId, isRecording } = data;
+                
+                socket.to(`chat:${chatId}`).emit('user_recording_voice', {
+                    chatId,
+                    userId: socket.userId,
+                    username: socket.user.username,
+                    fullName: socket.user.fullName,
+                    isRecording,
+                    timestamp: new Date()
+                });
+            });
+
+            // ===== END ENHANCED MESSAGING EVENTS =====
+
             // Handle online status
             socket.on('set_online_status', (status) => {
                 socket.to(`user_${socket.userId}`).emit('user_status_changed', {
@@ -364,7 +463,7 @@ class SocketManager {
             // 🚀 NEW: Handle request for initial unread counts (alternative to HTTP polling)
             socket.on('request_unread_counts', async () => {
                 try {
-                    const notificationCache = (await import('../utlis/notificationCache.utils.js')).default;
+                    const notificationCache = (await import('../utils/notificationCache.utils.js')).default;
                     const counts = await notificationCache.getUnreadCounts(socket.userId);
 
                     socket.emit('unread_counts_updated', {
@@ -401,7 +500,6 @@ class SocketManager {
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/accept
             socket.on('call_accept', async (data) => {
                 const { callId, callerId } = data;
-                console.log(`📞 Socket: User ${socket.userId} signaling call acceptance for ${callId}`);
 
                 // Real-time notification only - HTTP endpoint handles DB update
                 this.emitToUser(callerId, 'call_accepted', {
@@ -415,14 +513,12 @@ class SocketManager {
                     timestamp: new Date()
                 });
 
-                console.log(`📡 Socket: Call acceptance signaled to caller ${callerId}`);
             });
 
             // OPTIONAL: Handle call decline signaling (for real-time UI updates)
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/decline
             socket.on('call_decline', (data) => {
                 const { callId, callerId } = data;
-                console.log(`📞 Socket: User ${socket.userId} signaling call decline for ${callId}`);
 
                 // Real-time notification only - HTTP endpoint handles DB update
                 this.emitToUser(callerId, 'call_declined', {
@@ -441,7 +537,6 @@ class SocketManager {
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/end
             socket.on('call_end', (data) => {
                 const { callId, participants, endReason = 'normal' } = data;
-                console.log(`📞 Socket: User ${socket.userId} signaling call end for ${callId}`);
 
                 // Real-time notification only - HTTP endpoint handles DB update
                 participants
@@ -477,7 +572,6 @@ class SocketManager {
                     socket.chatRooms.forEach(chatId => {
                         socket.leave(`chat:${chatId}`);
                     });
-                    console.log(`User ${userId || 'unknown'} cleaned up from ${socket.chatRooms.size} chat rooms`);
                     socket.chatRooms.clear();
                 }
 
@@ -503,7 +597,6 @@ class SocketManager {
                 // This prevents "already in a call" errors after disconnection
                 if (!userId) {
                     console.warn('Socket disconnected without userId, skipping call cleanup');
-                    console.log(`User disconnected and cleaned up`);
                     return;
                 }
 
@@ -517,7 +610,6 @@ class SocketManager {
                     }).select('_id participants'); // Only get IDs for efficiency
 
                     if (activeCalls.length > 0) {
-                        console.log(`📵 Ending ${activeCalls.length} active call(s) for disconnected user ${userId}`);
 
                         for (const call of activeCalls) {
                             const callId = call._id;
@@ -535,7 +627,6 @@ class SocketManager {
 
                                     // Skip if already ended (race condition protection)
                                     if (['ended', 'declined', 'missed', 'failed'].includes(callToUpdate.status)) {
-                                        console.log(`Call ${callId} already ended, skipping`);
                                         return;
                                     }
 
@@ -548,11 +639,9 @@ class SocketManager {
                                     // If call was never started, set startedAt to endedAt for duration calculation
                                     if (!callToUpdate.startedAt) {
                                         callToUpdate.startedAt = callToUpdate.endedAt;
-                                        console.log(`⏱️ Call ${callId} ended before being started, setting startedAt = endedAt`);
                                     }
 
                                     await callToUpdate.save({ session });
-                                    console.log(`✅ Ended call ${callId} due to user ${userId} disconnection`);
                                 });
                             } catch (callError) {
                                 console.error(`❌ Error ending call ${callId} on disconnect:`, callError);
@@ -577,7 +666,6 @@ class SocketManager {
 
                                 // Skip notification if call is not in ended state (might have been ended by another process)
                                 if (populatedCall.status !== 'ended') {
-                                    console.log(`Call ${callId} status is ${populatedCall.status}, skipping notification`);
                                     continue;
                                 }
 
@@ -587,7 +675,6 @@ class SocketManager {
 
                                 // Notify other participants via socket
                                 if (otherParticipants.length > 0) {
-                                    console.log(`📡 Emitting call end to ${otherParticipants.length} participant(s) for call ${callId}`);
                                     otherParticipants.forEach(participantId => {
                                         this.emitToUser(participantId, 'call_ended', {
                                             callId: callId.toString(),
@@ -614,7 +701,6 @@ class SocketManager {
                     // Don't block disconnect cleanup if call ending fails
                 }
 
-                console.log(`User ${userId} disconnected and cleaned up`);
             });
         });
     }
@@ -636,6 +722,8 @@ class SocketManager {
     async getAllOnlineUsers() {
         try {
             const onlineUsers = await redisClient.hgetall('fn:online_users');
+            // ioredis v5 returns {} (not null) for missing keys
+            if (!onlineUsers || Object.keys(onlineUsers).length === 0) return [];
             return Object.keys(onlineUsers).map(userId => ({
                 userId,
                 ...JSON.parse(onlineUsers[userId])
@@ -658,10 +746,6 @@ class SocketManager {
         const socketsInRoom = this.io.sockets.adapter.rooms.get(roomName);
         const socketCount = socketsInRoom ? socketsInRoom.size : 0;
 
-        console.log(`📡 Emitting '${event}' to user room: ${roomName}`);
-        console.log(`   User ID: ${userId}`);
-        console.log(`   Sockets in room: ${socketCount}`);
-        console.log(`   Event data:`, JSON.stringify(data).substring(0, 200));
 
         // Emit to user's personal room (works across all PM2 processes via Redis adapter)
         // Use volatile emit for better performance (doesn't queue if client is offline)
@@ -674,7 +758,6 @@ class SocketManager {
             this.io.to(roomName).volatile.emit(event, data);
         }
 
-        console.log(`✅ Event '${event}' emitted to room ${roomName} (${socketCount} socket(s))`);
 
         // Warn if no sockets are connected (user might be offline)
         if (socketCount === 0) {

@@ -1,8 +1,9 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Business from "../models/business.models.js";
 import Follower from "../models/follower.models.js";
+import { User } from "../models/user.models.js";
 
 const getTrendingBusinessOwners = asyncHandler(async (req, res) => {
     // Handle case where req.user is undefined (no authentication)
@@ -17,13 +18,17 @@ const getTrendingBusinessOwners = asyncHandler(async (req, res) => {
 
     try {
         // Get trending business owners (businesses with most followers) - excluding blocked users
+        // Get IDs of banned/deleted users to exclude their businesses
+        const restrictedUsers = await User.find({
+            $or: [{ accountStatus: { $ne: 'active' } }, { isDeleted: true }]
+        }).select('_id').lean();
+        const restrictedUserIds = restrictedUsers.map(u => u._id);
+
         const trendingBusinesses = await Business.aggregate([
             {
                 $match: {
-                    // Show businesses that are not inactive (includes 'pending' and 'active')
                     subscriptionStatus: { $ne: 'inactive' },
-                    // Exclude businesses owned by blocked users
-                    userId: { $nin: blockedUsers }
+                    userId: { $nin: [...blockedUsers, ...restrictedUserIds] }
                 }
             },
             {

@@ -1,5 +1,5 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
 import jwt from "jsonwebtoken";
 import { User } from "../models/user.models.js";
 import { redisClient } from "../config/redis.config.js";
@@ -56,6 +56,18 @@ export const verifyJWT = asyncHandler(async (req, _, next) => {
                 console.error('Auth cache write error:', cacheError);
                 // Continue without caching
             }
+        }
+
+        if (user.isDeleted) {
+            throw new ApiError(403, "Your account has been deleted. Please contact Find support.");
+        }
+
+        if (user.accountStatus === 'banned') {
+            throw new ApiError(403, "Your account has been banned. Please contact Find support.");
+        }
+
+        if (user.accountStatus === 'deactivated') {
+            throw new ApiError(403, "Your account has been deactivated. Please contact Find support.");
         }
 
         req.user = user;

@@ -1,11 +1,11 @@
 // Cloudinary import removed - now using Bunny.net
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { uploadBufferToBunny } from "../utlis/bunny.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { uploadBufferToBunny } from "../utils/bunny.js";
 import { User } from "../models/user.models.js";
 
-// Upload single media file (image or video)
+// Upload single media file (image, video, audio, document)
 const uploadSingleMedia = asyncHandler(async (req, res) => {
     const { file } = req;
     const userId = req.user?._id;
@@ -18,60 +18,83 @@ const uploadSingleMedia = asyncHandler(async (req, res) => {
         throw new ApiError(401, "User authentication required");
     }
 
-    // Check file type
+    // Allowed types — prefix matching accepts any browser MIME variant
     const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
-    const allowedVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/flv', 'video/webm'];
-    const allowedTypes = [...allowedImageTypes, ...allowedVideoTypes];
+    const allowedVideoTypes = ['video/mp4', 'video/avi', 'video/quicktime', 'video/mov', 'video/x-ms-wmv', 'video/wmv', 'video/webm', 'video/x-flv', 'video/flv'];
+    const allowedAudioTypes = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/flac', 'audio/webm'];
+    const allowedDocTypes = [
+        'application/pdf', 'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-powerpoint',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'text/plain', 'application/zip', 'application/x-rar-compressed',
+    ];
 
-    if (!allowedTypes.includes(file.mimetype)) {
-        throw new ApiError(400, "Invalid file type. Only images and videos are allowed");
+    const mime = file.mimetype || '';
+    const isImage = mime.startsWith('image/');
+    const isVideo = mime.startsWith('video/');
+    const isAudio = mime.startsWith('audio/');
+    const isDoc   = allowedDocTypes.some(t => mime.startsWith(t));
+
+    if (!isImage && !isVideo && !isAudio && !isDoc) {
+        throw new ApiError(400, `File type "${mime}" is not allowed`);
     }
 
-    // Check file size (50MB limit)
-    const maxSize = 50 * 1024 * 1024; // 50MB
+    // Per-type size limits
+    const category = isVideo ? 'video' : isAudio ? 'audio' : isDoc ? 'file' : 'image';
+    const sizeLimitMB = { image: 10, video: 50, audio: 6, file: 7 };
+    const maxSize = sizeLimitMB[category] * 1024 * 1024;
     if (file.size > maxSize) {
-        throw new ApiError(400, "File size too large. Maximum size is 50MB");
+        throw new ApiError(400, `File too large. Maximum size for ${category} is ${sizeLimitMB[category]} MB`);
     }
 
+    // image/video → existing proven Bunny folders; audio/docs → new folders
+    const folderMap = { image: 'images', video: 'videos', audio: 'chat_audio', file: 'chat_files' };
+    const folder = folderMap[category];
+
+    // mimeTypeHint only for audio/docs — image/video use original magic-byte detection
+    const mimeHint = (isAudio || isDoc) ? mime : null;
+
+    let result;
     try {
-        // Determine folder based on file type
-        const isVideo = allowedVideoTypes.includes(file.mimetype);
-        const folder = isVideo ? "videos" : "images";
-
-        // Upload to Bunny.net
-        const result = await uploadBufferToBunny(file.buffer, folder, file.originalname);
-
-        // Get user details
-        const user = await User.findById(userId).select("-password -refreshToken");
-
-        // Return success response with file details and user info
-        return res.status(200).json(
-            new ApiResponse(200, {
-                public_id: result.public_id,
-                secure_url: result.secure_url,
-                format: result.format,
-                resource_type: result.resource_type,
-                bytes: result.bytes,
-                width: result.width,
-                height: result.height,
-                duration: result.duration, // for videos
-                folder: folder,
-                original_name: file.originalname,
-                mimetype: file.mimetype,
-                uploaded_by: {
-                    _id: user._id,
-                    username: user.username,
-                    fullName: user.fullName,
-                    email: user.email,
-                    profileImageUrl: user.profileImageUrl,
-                    isBusinessProfile: user.isBusinessProfile
-                },
-                uploaded_at: new Date().toISOString()
-            }, "Media uploaded successfully")
-        );
-    } catch (error) {
-        throw new ApiError(500, "Error uploading file to Bunny.net", [error.message]);
+        result = await uploadBufferToBunny(file.buffer, folder, file.originalname, mimeHint);
+    } catch (uploadError) {
+        throw new ApiError(500, `Upload failed: ${uploadError.message}`);
     }
+
+    // User details — non-fatal if DB lookup fails
+    let uploadedBy = null;
+    try {
+        const user = await User.findById(userId).select("-password -refreshToken");
+        if (user) {
+            uploadedBy = {
+                _id: user._id,
+                username: user.username,
+                fullName: user.fullName,
+                email: user.email,
+                profileImageUrl: user.profileImageUrl,
+                isBusinessProfile: user.isBusinessProfile
+            };
+        }
+    } catch (_) {}
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            public_id: result.public_id,
+            secure_url: result.secure_url,
+            format: result.format,
+            resource_type: result.resource_type,
+            category,
+            bytes: result.bytes,
+            folder,
+            original_name: file.originalname,
+            mimetype: file.mimetype,
+            uploaded_by: uploadedBy,
+            uploaded_at: new Date().toISOString()
+        }, "Media uploaded successfully")
+    );
 });
 
 // Upload multiple media files
@@ -177,7 +200,7 @@ const deleteMedia = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { deleteFromBunny } = await import("../utlis/bunny.js");
+        const { deleteFromBunny } = await import("../utils/bunny.js");
         const result = await deleteFromBunny(url);
 
         if (result.success) {
@@ -216,7 +239,7 @@ const deleteMultipleMedia = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { deleteMultipleFromBunny } = await import("../utlis/bunny.js");
+        const { deleteMultipleFromBunny } = await import("../utils/bunny.js");
         const deletionResult = await deleteMultipleFromBunny(urls);
 
         const results = deletionResult.results.map(result => ({
@@ -261,7 +284,7 @@ const getMediaInfo = asyncHandler(async (req, res) => {
     }
 
     try {
-        const { isBunnyUrl } = await import("../utlis/bunny.js");
+        const { isBunnyUrl } = await import("../utils/bunny.js");
 
         if (!isBunnyUrl(url)) {
             throw new ApiError(400, "Invalid Bunny.net URL");

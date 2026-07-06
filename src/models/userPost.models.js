@@ -59,6 +59,7 @@ const ProductDetailsSchema = new mongoose.Schema({
     brand: String,
     sku: String,
     availability: String,
+    inStock: { type: Boolean, default: true },
     variants: [ProductVariantSchema],
     specifications: [ProductSpecificationSchema],
     images: [String],
@@ -77,6 +78,18 @@ const ProductDetailsSchema = new mongoose.Schema({
         required: true,
         default: 'online'
     },
+    // 💰 Shipping & GST (set by seller)
+    shippingCharges: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    gstPercent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100
+    },
     location: {
         name: String,
         address: String,
@@ -85,13 +98,15 @@ const ProductDetailsSchema = new mongoose.Schema({
         country: String,
         coordinates: GeoJSONPointSchema
     },
-    link: { type: String }
+    link: { type: String },
+
 }, { _id: false });
 
 // 💼 Service Details
 const ServiceAvailabilitySchema = new mongoose.Schema({
     schedule: [{
         day: String,
+        isClosed: { type: Boolean, default: false },
         timeSlots: [{
             startTime: String,
             endTime: String
@@ -119,6 +134,7 @@ const ServiceDetailsSchema = new mongoose.Schema({
     category: String,
     subcategory: String,
     duration: Number,
+    durationUnit: { type: String, enum: ['minutes', 'hours'], default: 'minutes' },
     serviceType: String,
     // 🚚 Delivery Options
     deliveryOptions: {
@@ -127,12 +143,31 @@ const ServiceDetailsSchema = new mongoose.Schema({
         required: true,
         default: 'online'
     },
+    // 💰 Shipping & GST (set by seller)
+    shippingCharges: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    additionalCharges:{
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    gstPercent: {
+        type: Number,
+        default: 0,
+        min: 0,
+        max: 100
+    },
     availability: ServiceAvailabilitySchema,
     location: ServiceLocationSchema,
     requirements: [String],
     deliverables: [String],
     tags: [String],
-    link: { type: String }
+    link: { type: String },
+    isCurrentlyAvailable: { type: Boolean, default: true },
+
 }, { _id: false });
 
 // 🏢 Business Details
@@ -179,9 +214,9 @@ const BusinessDetailsSchema = new mongoose.Schema({
     // 🚚 Delivery Options
     deliveryOptions: {
         type: String,
-        enum: ['online', 'offline', 'both'],
+        enum: ['', 'online', 'offline', 'both'],
         required: true,
-        default: 'online'
+        default: ''
     },
     contact: BusinessContactSchema,
     location: BusinessLocationSchema,
@@ -271,7 +306,7 @@ const AnalyticsSchema = new mongoose.Schema({
 // 📬 Post Schema
 const PostSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    postType: { type: String, required: true, enum: ['photo', 'reel', 'video', 'story'] },
+    postType: { type: String, required: true, enum: ['photo', 'reel', 'video', 'story', 'tweet'] },
     contentType: { type: String, required: true, enum: ['normal', 'product', 'service', 'business'] },
     caption: String,
     description: String,

@@ -3,12 +3,14 @@ import Reel from "../models/reels.models.js";
 import Story from "../models/story.models.js";
 import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import { getViewableUserIds } from "../middlewares/privacy.middleware.js";
-import { enrichWithRatings } from "../utlis/reviewUtils.js";
-import { addBadgesToNestedUsers, addBadgesToUsers } from "../utlis/userBadge.utils.js";
-import { filterBusinessPostsByPaymentPlan } from "../utlis/businessPlan.utils.js";
+import { enrichWithRatings } from "../utils/reviewUtils.js";
+import { addBadgesToNestedUsers, addBadgesToUsers } from "../utils/userBadge.utils.js";
+import { filterBusinessPostsByPaymentPlan } from "../utils/businessPlan.utils.js";
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchSharedCount } from "../utils/postEngagement.utils.js";
+import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
@@ -74,7 +76,8 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
     // Get all posts matching the criteria using the same reliable approach as homeFeed (excluding blocked users and respecting privacy)
     const allPosts = await Post.find({
         ...postMatch,
-        userId: { $in: viewableUserIds, $nin: blockedUsers }
+        userId: { $in: viewableUserIds, $nin: blockedUsers },
+        'settings.privacy': { $ne: 'private' }  // Never show private posts in public feeds
     })
         .sort({ createdAt: -1 })
         .limit(EXPLORE_LIMIT)
@@ -328,6 +331,35 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         totalAvailable = allPosts.length;
         totalPages = Math.ceil(totalAvailable / limit);
         hasNextPage = page < totalPages;
+    }
+
+    // Stitch like engagement onto feed items
+    const currentUserId = req.user?._id ?? null;
+    const feedIds = feed.map(item => item._id).filter(Boolean);
+    if (feedIds.length) {
+        const [likedSet, likedByMap, likeCountMap, sharedCountMap] = await Promise.all([
+            currentUserId ? batchIsLikedByUser(currentUserId, feedIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(feedIds),
+            batchGetLikesCount(feed),
+            batchSharedCount(feed)
+        ]);
+        feed = feed.map(item => {
+            const idStr = item._id?.toString();
+            if (!idStr) return item;
+            const likedByUsers = likedByMap.get(idStr) || [];
+            const preview = getLikedByPreview(likedByUsers, currentUserId);
+            return {
+                ...item,
+                engagement: {
+                    ...item.engagement,
+                    likes: likeCountMap.get(idStr) ?? item.engagement?.likes ?? 0,
+                    shares: sharedCountMap.get(idStr) ?? item.engagement?.shares ?? 0
+                },
+                isLikedBy: currentUserId ? likedSet.has(idStr) : false,
+                likedBy: likedByUsers,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+            };
+        });
     }
 
     res.status(200).json(new ApiResponse(200, {

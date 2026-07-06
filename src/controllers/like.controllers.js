@@ -1,96 +1,265 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Like from "../models/like.models.js";
 import Post from "../models/userPost.models.js";
 import Comment from "../models/comment.models.js";
-import { createLikeNotification } from "./notification.controllers.js";
-import { createUnlikeNotification } from "./notification.controllers.js";
+import { createLikeNotification, createUnlikeNotification } from "./notification.controllers.js";
+import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
+import { onPostLiked, onPostUnliked, batchIsLikedByUser } from "../utils/postEngagement.utils.js";
+import { likeQueue } from "../queues/likeQueue.js";
 
-// Like a post
+const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
+
+/**
+ * Ensure fn:post:{postId}:likes:count exists in Redis.
+ * If missing (new post or key expired), seeds it from DB and applies the delta.
+ * Returns the up-to-date count.
+ */
+async function ensureLikesCount(postId, delta) {
+    const countKey = RedisKeys.postLikesCount(postId.toString());
+    let count = await redisClient.get(countKey);
+    if (count === null) {
+        // Key missing — seed from DB then apply delta
+        const doc = await Post.findById(postId).select('engagement.likes').lean();
+        const base = doc?.engagement?.likes ?? 0;
+        count = Math.max(0, base + delta);
+        await redisClient.set(countKey, count, 'EX', ENGAGEMENT_TTL);
+    } else {
+        count = parseInt(count, 10);
+    }
+    return count;
+}
+
+/**
+ * Check whether a user has liked a specific post.
+ * Delegates to batchIsLikedByUser which seeds the full user liked Set from DB
+ * on a cache miss, ensuring the check is always authoritative (no stale misses
+ * when the Set has expired but the Like document hasn't been written to DB yet).
+ */
+async function getLikeStatus(userId, postId) {
+    try {
+        const likedSet = await batchIsLikedByUser(userId, [postId]);
+        return likedSet.has(postId.toString());
+    } catch {
+        return !!(await Like.exists({ userId, postId }));
+    }
+}
+
+const User = Post.db.model('User');
+const USER_FIELDS = 'username profileImageUrl fullName isVerified';
+
+/**
+ * Fetch the likedBy user list with pagination.
+ *
+ * Page 1: reads the likedBy Redis Hash (fn:post:{postId}:likedby).
+ *   field = userId, value = JSON{_id, userId, username, fullName, profileImageUrl, likedAt}.
+ *   Entries sorted newest-first (likedAt desc), up to `limit`.
+ *   Falls back to DB on cache miss.
+ * Page 2+: always reads from DB.
+ *
+ * Lag compensation:
+ *   - includeUser:   viewer just liked; Lua already HSET them into the Hash.
+ *     We unshift at position 0 to guarantee they appear first.
+ *   - excludeUserId: viewer just unliked; Lua already HDELd them from the Hash.
+ */
+async function getLikedByList(postId, { includeUser = null, includeUserId = null, excludeUserId = null, page = 1, limit = 20 } = {}) {
+    const postIdStr = postId.toString();
+    const includeId = includeUser?._id?.toString() ?? (includeUserId ? includeUserId.toString() : null);
+
+    // Page 1: read from the Redis Hash; fall through to DB if empty or Redis is down
+    if (page === 1) {
+        try {
+            const hashData = await redisClient.hgetall(RedisKeys.postLikedBy(postIdStr));
+            // ioredis v5 returns {} (not null) for missing keys
+            const entries = hashData && Object.keys(hashData).length > 0 ? Object.values(hashData) : null;
+
+            if (entries && entries.length > 0) {
+                let users = entries
+                    .map(v => { try { return JSON.parse(v); } catch { return null; } })
+                    .filter(Boolean);
+
+                const excludeStr = excludeUserId?.toString();
+                if (excludeStr) users = users.filter(u => (u._id || u.userId) !== excludeStr);
+                if (includeId) users = users.filter(u => (u._id || u.userId) !== includeId);
+
+                // Sort newest-first by likedAt
+                users.sort((a, b) => (b.likedAt || 0) - (a.likedAt || 0));
+                const hasMore = users.length > limit;
+                let pageUsers = users.slice(0, limit);
+
+                if (includeId) {
+                    let me;
+                    if (includeUser) {
+                        me = {
+                            _id: includeUser._id,
+                            username: includeUser.username,
+                            fullName: includeUser.fullName,
+                            profileImageUrl: includeUser.profileImageUrl,
+                            isVerified: includeUser.isVerified,
+                        };
+                    } else {
+                        me = await User.findById(includeUserId, USER_FIELDS).lean();
+                    }
+                    if (me) pageUsers.unshift(me);
+                }
+
+                return { users: pageUsers, hasMore };
+            }
+            // hashData null (key missing) or empty hash → fall through to DB
+        } catch (_) {
+            // Redis down or parse error → fall through to DB
+        }
+    }
+
+    // DB path: cache miss or page > 1
+    const skip = (page - 1) * limit;
+    const likes = await Like.find({ postId })
+        .select('userId')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit + 1)
+        .lean();
+
+    let userIds = likes.map(l => l.userId.toString());
+    const hasMore = userIds.length > limit;
+    if (hasMore) userIds = userIds.slice(0, limit);
+
+    if (excludeUserId) userIds = userIds.filter(id => id !== excludeUserId.toString());
+    if (page === 1 && includeId) userIds = userIds.filter(id => id !== includeId);
+
+    const users = userIds.length
+        ? await User.find({ _id: { $in: userIds } }, USER_FIELDS).lean()
+        : [];
+
+    if (page === 1 && includeId) {
+        let me;
+        if (includeUser) {
+            me = {
+                _id: includeUser._id,
+                username: includeUser.username,
+                fullName: includeUser.fullName,
+                profileImageUrl: includeUser.profileImageUrl,
+                isVerified: includeUser.isVerified,
+            };
+        } else {
+            me = await User.findById(includeUserId, USER_FIELDS).lean();
+        }
+        if (me) users.unshift(me);
+    }
+
+    return { users, hasMore };
+}
+
+// Like a post — writes to Redis only; DB synced by nightly cron at 22:00
 export const likePost = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
 
-    try {
-        await Like.create({ userId, postId });
-        await Post.findByIdAndUpdate(postId, { $inc: { "engagement.likes": 1 } });
+    const alreadyLiked = await getLikeStatus(userId, postId);
+    if (alreadyLiked) throw new ApiError(409, "You have already liked this post");
 
-        // Notify post owner (if not self) - with error handling
-        try {
-            const post = await Post.findById(postId).select("userId");
-            if (post && post.userId.toString() !== userId.toString()) {
-                await createLikeNotification({ recipientId: post.userId, sourceUserId: userId, postId });
-            }
-        } catch (notificationError) {
-            console.error('Error sending like notification:', notificationError);
-            // Don't fail the like operation if notification fails
-        }
+    const result = await onPostLiked(userId, postId, {
+        username: req.user.username,
+        fullName: req.user.fullName,
+        profileImageUrl: req.user.profileImageUrl,
+    });
 
-        // Return updated likedBy and isLikedBy
-        const likes = await Like.find({ postId }).lean();
-        const userIds = likes.map(like => like.userId.toString());
-        let users = [];
-        if (userIds.length > 0) {
-            users = await Post.db.model('User').find(
-                { _id: { $in: userIds } },
-                'username profileImageUrl fullName isVerified'
-            ).lean();
+    // Enqueue DB sync job (BullMQ handles retry + batch write)
+    likeQueue.add('like-event', {
+        userId: userId.toString(),
+        postId: postId.toString(),
+        action: 'like',
+    }).catch(() => {});
+
+    // Fire-and-forget notification (does not block response)
+    Post.findById(postId).select('userId').lean().then(post => {
+        if (post && post.userId.toString() !== userId.toString()) {
+            createLikeNotification({ recipientId: post.userId, sourceUserId: userId, postId }).catch(() => {});
         }
-        const isLikedBy = userIds.includes(userId.toString());
-        return res.status(200).json(new ApiResponse(200, { likedBy: users, isLikedBy }, "Post liked successfully"));
-    } catch (err) {
-        if (err.code === 11000) {
-            throw new ApiError(409, "You have already liked this post");
-        }
-        throw err;
-    }
+    }).catch(() => {});
+
+    const [{ users: likedBy, hasMore }] = await Promise.all([
+        getLikedByList(postId, { includeUser: result.ok ? req.user : null }),
+    ]);
+
+    // Lua returns the new count; fall back to DB-seed only if Lua failed entirely
+    const likesCount = result.count ?? await ensureLikesCount(postId, +1);
+
+    return res.status(200).json(new ApiResponse(200, {
+        likedBy,
+        hasMore,
+        isLikedBy: true,
+        likesCount,
+    }, "Post liked successfully"));
 });
 
-// Unlike a post
+// Unlike a post — writes to Redis only; DB synced by nightly cron at 22:00
 export const unlikePost = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
 
-    // Check if like exists and delete it
-    const deletedLike = await Like.findOneAndDelete({ userId, postId });
-    if (!deletedLike) {
-        throw new ApiError(404, "You have not liked this post");
-    }
+    const isLiked = await getLikeStatus(userId, postId);
+    if (!isLiked) throw new ApiError(404, "You have not liked this post");
 
-    // Get post first to validate it exists and get userId for notification
-    const post = await Post.findById(postId).select("userId");
-    if (!post) {
-        throw new ApiError(404, "Post not found");
-    }
+    const result = await onPostUnliked(userId, postId);
 
-    // Decrement engagement count (MongoDB will handle defaults from schema)
-    await Post.findByIdAndUpdate(postId, { $inc: { "engagement.likes": -1 } });
+    // Enqueue DB sync job
+    likeQueue.add('like-event', {
+        userId: userId.toString(),
+        postId: postId.toString(),
+        action: 'unlike',
+    }).catch(() => {});
 
-    // Notify post owner (if not self) - with error handling
-    try {
-        if (post.userId && post.userId.toString() !== userId.toString()) {
-            await createUnlikeNotification({ recipientId: post.userId, sourceUserId: userId, postId });
+    // Fire-and-forget notification
+    Post.findById(postId).select('userId').lean().then(post => {
+        if (post && post.userId.toString() !== userId.toString()) {
+            createUnlikeNotification({ recipientId: post.userId, sourceUserId: userId, postId }).catch(() => {});
         }
-    } catch (notificationError) {
-        console.error('Error sending unlike notification:', notificationError);
-        // Don't fail the unlike operation if notification fails
-    }
+    }).catch(() => {});
 
-    // Return updated likedBy and isLikedBy (user has unliked, so isLikedBy should be false)
-    const likes = await Like.find({ postId }).lean();
-    const userIds = likes.map(likeDoc => likeDoc.userId.toString());
-    let users = [];
-    if (userIds.length > 0) {
-        users = await Post.db.model('User').find(
-            { _id: { $in: userIds } },
-            'username profileImageUrl fullName isVerified'
-        ).lean();
-    }
-    // After unliking, isLikedBy should always be false
-    return res.status(200).json(new ApiResponse(200, { likedBy: users, isLikedBy: false }, "Post unliked successfully"));
+    const [{ users: likedBy, hasMore }] = await Promise.all([
+        getLikedByList(postId, { excludeUserId: result.ok ? userId : null }),
+    ]);
+
+    const likesCount = result.count ?? await ensureLikesCount(postId, -1);
+
+    return res.status(200).json(new ApiResponse(200, {
+        likedBy,
+        hasMore,
+        isLikedBy: false,
+        likesCount,
+    }, "Post unliked successfully"));
+});
+
+/**
+ * GET /post/liked-by?postId=&page=&limit=
+ *
+ * Paginated list of users who liked a post, fetched from DB.
+ * The current user is excluded from the result set so the client can prepend
+ * them at position 0 when isLikedByCurrentUser is true — avoids duplication
+ * if their like has already been synced to DB.
+ *
+ * Auth: optional — unauthenticated callers receive the full list.
+ */
+export const getLikedByUsers = asyncHandler(async (req, res) => {
+    const { postId, page = '1', limit = '20' } = req.query;
+    if (!postId) throw new ApiError(400, "postId is required");
+
+    const currentUserId = req.user?._id?.toString();
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1);
+    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 20));
+
+    // Page 1 reads from Redis hash (includes unsynced likes); page 2+ falls back to DB
+    const { users, hasMore } = await getLikedByList(postId, {
+        excludeUserId: currentUserId || null,
+        page: parsedPage,
+        limit: parsedLimit,
+    });
+
+    return res.status(200).json(new ApiResponse(200, { users, hasMore, page: parsedPage }, "Liked by users fetched successfully"));
 });
 
 // Like a comment

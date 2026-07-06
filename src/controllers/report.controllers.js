@@ -1,6 +1,6 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Report from "../models/report.models.js";
 import Post from "../models/userPost.models.js";
 import Story from "../models/story.models.js";
@@ -106,17 +106,13 @@ export const reportContent = asyncHandler(async (req, res) => {
             try {
                 if (type === 'post' || type === 'reel') {
                     await Post.findByIdAndDelete(contentId);
-                    console.log(`Post ${contentId} automatically deleted after ${reportCount} reports`);
                 } else if (type === 'story') {
                     await Story.findByIdAndDelete(contentId);
-                    console.log(`Story ${contentId} automatically deleted after ${reportCount} reports`);
                 } else if (type === 'comment') {
                     await Comment.findByIdAndDelete(contentId);
-                    console.log(`Comment ${contentId} automatically deleted after ${reportCount} reports`);
                 } else if (type === 'user') {
                     // For users, you might want to suspend/ban instead of delete
                     // await User.findByIdAndUpdate(contentId, { status: 'suspended' });
-                    console.log(`User ${contentId} has ${reportCount} reports - consider suspension`);
                 }
 
                 // Update all reports for this content to 'resolved' status

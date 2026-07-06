@@ -1,7 +1,7 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
 import PostInteraction from "../models/postInteraction.models.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 
 export const trackPostInteraction = asyncHandler(async (req, res) => {
     const { postId, interactionType, viewDuration = 0 } = req.body;

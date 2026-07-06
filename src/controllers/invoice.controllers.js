@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Order from "../models/order.models.js";
 
 // Get invoice data for an order (both buyer and seller can access)
@@ -149,8 +149,10 @@ function buildInvoiceData(order) {
         ],
 
         // Financial Summary
-        subtotal: order.amount,
-        shipping: 0,
+        shippingCharges: order.shippingCharges || 0,
+        gstAmount: order.gstAmount || 0,
+        subtotal: parseFloat(((order.amount || 0) - (order.shippingCharges || 0) - (order.gstAmount || 0)).toFixed(2)),
+        shipping: order.shippingCharges || 0,
         platformFee: order.platformFee,
         total: order.amount,
         sellerAmount: order.sellerAmount,

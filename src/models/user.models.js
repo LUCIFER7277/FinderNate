@@ -11,7 +11,7 @@ const UserSchema = new mongoose.Schema({
     fullNameLower: { type: String, index: true },
     phoneNumber: String,
     dateOfBirth: String,
-    gender: { type: String, enum: ['male', 'female', 'other'] },
+    gender: { type: String, enum: ['male', 'female', 'other', 'prefer-not-to-say'], default: 'prefer-not-to-say' },
     bio: String,
     profileImageUrl: String,
     location: String,
@@ -62,6 +62,10 @@ const UserSchema = new mongoose.Schema({
         enum: ['active', 'deactivated', 'banned'],
         default: 'active'
     },
+    isDeleted: { type: Boolean, default: false },
+    
+    deletedAt: { type: Date, default: null },
+    adminActionReason: { type: String, default: null },
     // Service post preferences
     servicePostPreferences: {
         enableAutoFill: { type: Boolean, default: true }
@@ -78,6 +82,23 @@ const UserSchema = new mongoose.Schema({
     fcmTokenUpdatedAt: {
         type: Date,
         default: null
+    },
+    // Legal acceptance tracking
+    legalAcceptance: {
+        termsAccepted:         { type: Boolean, default: false },
+        termsAcceptedAt:       { type: Date,    default: null },
+        termsVersion:          { type: String,  default: null },
+        privacyAccepted:       { type: Boolean, default: false },
+        privacyAcceptedAt:     { type: Date,    default: null },
+        privacyVersion:        { type: String,  default: null },
+        sellerTermsAccepted:   { type: Boolean, default: false },
+        sellerTermsAcceptedAt: { type: Date,    default: null },
+        sellerTermsVersion:    { type: String,  default: null },
+        communityAccepted:     { type: Boolean, default: false },
+        communityAcceptedAt:   { type: Date,    default: null },
+        communityVersion:      { type: String,  default: null },
+        acceptanceIP:          { type: String,  default: null },
+        acceptanceUserAgent:   { type: String,  default: null },
     }
 }, { timestamps: true });
 
@@ -107,7 +128,8 @@ UserSchema.methods.generateAccessToken = function () {
             _id: this._id,
             email: this.email,
             username: this.username,
-            fullName: this.fullName
+            fullName: this.fullName,
+            phoneNumber: this.phoneNumber
         },
         process.env.ACCESS_TOKEN_SECRET,
         {

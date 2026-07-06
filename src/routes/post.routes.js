@@ -6,9 +6,11 @@ import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blo
 import { cacheUserFeed } from "../middlewares/cache.middleware.js";
 import {
     createNormalPost,
+    createTweetPost,
     createProductPost,
     createServicePost,
     createBusinessPost,
+    createBatchPosts,
     getUserProfilePosts,
     getMyPosts,
     getPostById,
@@ -17,13 +19,14 @@ import {
     togglePostPrivacy,
 } from "../controllers/post.controllers.js";
 import { getHomeFeed } from "../controllers/homeFeed.controllers.js";
-import { likePost, unlikePost, likeComment, unlikeComment } from "../controllers/like.controllers.js";
+import { likePost, unlikePost, likeComment, unlikeComment, getLikedByUsers } from "../controllers/like.controllers.js";
 import { createComment, getCommentsByPost, getCommentById, updateComment, deleteComment } from "../controllers/comment.controllers.js";
 import { getNotifications, markNotificationAsRead, markAllNotificationsAsRead, deleteNotification } from "../controllers/notification.controllers.js";
 import { getProfileTabContent } from "../controllers/switch.controllers.js";
 import { savePost, unsavePost, getSavedPosts, checkPostSaved } from "../controllers/savePost.controllers.js";
 import { reportContent, getReports, updateReportStatus } from "../controllers/report.controllers.js";
 import { trackPostInteraction, hidePost, batchTrackInteractions, getUserInteractionHistory } from "../controllers/postInteraction.controllers.js";
+import { getOnlineStoreProducts } from "../controllers/onlineStoreProducts.controllers.js";
 
 
 const router = Router();
@@ -38,12 +41,23 @@ const mediaUpload = upload.fields([
 ]);
 
 router.route("/create/normal").post(mediaUpload, verifyJWT, createNormalPost);
+router.route("/create/tweet").post(mediaUpload, verifyJWT, createTweetPost);
 router.route("/create/service").post(mediaUpload, verifyJWT, createServicePost);
 router.route("/create/product").post(mediaUpload, verifyJWT, createProductPost);
 router.route("/create/business").post(mediaUpload, verifyJWT, createBusinessPost);
+
+// Batch post creation - up to 6 posts at once with mixed content types
+const batchMediaUpload = upload.fields(
+    Array.from({ length: 6 }, (_, i) => [
+        { name: `post_${i}_image`, maxCount: 10 },
+        { name: `post_${i}_video`, maxCount: 10 },
+        { name: `post_${i}_thumbnail`, maxCount: 1 },
+    ]).flat()
+);
+router.route("/create/batch").post(batchMediaUpload, verifyJWT, createBatchPosts);
 router.route("/user/:userId/profile").get(verifyJWT, getUserProfilePosts);
 router.route("/switch/profile/:userId").get(verifyJWT, getProfileTabContent);
-router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, cacheUserFeed, getHomeFeed);
+router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, getHomeFeed);
 router.route("/myPosts").get(verifyJWT, getMyPosts);
 router.route("/notifications").get(verifyJWT, getNotifications);
 
@@ -85,6 +99,12 @@ router.route("/edit/:postId").put(verifyJWT, editPost);
 
 // Toggle post privacy route
 router.route("/:postId/privacy").put(verifyJWT, togglePostPrivacy);
+
+// Online store — public, no auth required (must be before /:postId catch-all)
+router.route("/online-store/products").get(getOnlineStoreProducts);
+
+// Liked-by users list (must be before /:postId catch-all)
+router.route("/liked-by").get(optionalVerifyJWT, getLikedByUsers);
 
 // Common API - handles get and delete for posts, stories, and reels
 router.route("/:postId").get(verifyJWT, getPostById).delete(verifyJWT, deleteContent);

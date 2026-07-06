@@ -1,11 +1,11 @@
 import crypto from 'crypto';
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import Business from '../models/business.models.js';
 import { User } from '../models/user.models.js';
-import { FeedCacheManager } from '../utlis/cache.utils.js';
+import { FeedCacheManager } from '../utils/cache.utils.js';
 import { redisClient } from '../config/redis.config.js';
 
 /**
@@ -70,7 +70,6 @@ export const handleRazorpayWebhook = asyncHandler(async (req, res) => {
         const event = req.body.event;
         const payload = req.body.payload;
 
-        console.log(`📥 Received Razorpay webhook: ${event}`);
 
         // Route to appropriate handler based on event type
         switch (event) {
@@ -95,7 +94,6 @@ export const handleRazorpayWebhook = asyncHandler(async (req, res) => {
                 break;
 
             default:
-                console.log(`ℹ️ Unhandled webhook event: ${event}`);
         }
 
         // Always return 200 to acknowledge receipt
@@ -122,7 +120,6 @@ const handlePaymentCaptured = async (payload) => {
         const amount = payment.amount; // Amount in paise
         const notes = payment.notes || {};
 
-        console.log(`✅ Payment captured: ${paymentId} for order: ${orderId}`);
 
         // Extract user and plan information from notes
         const userId = notes.userId;
@@ -136,7 +133,6 @@ const handlePaymentCaptured = async (payload) => {
         // Check if this payment has already been processed
         const existingSubscription = await Subscription.findOne({ paymentId });
         if (existingSubscription) {
-            console.log(`ℹ️ Payment ${paymentId} already processed, skipping...`);
             return;
         }
 
@@ -177,13 +173,11 @@ const handlePaymentCaptured = async (payload) => {
             business.plan = planMapping[plan];
             business.subscriptionStatus = 'active';
             await business.save();
-            console.log(`✅ Business profile updated via webhook: plan=${business.plan}`);
         }
 
         // Invalidate cache
         await invalidateUserCache(userId);
 
-        console.log(`✅ Subscription activated via webhook for user ${userId}`);
 
     } catch (error) {
         console.error('❌ Error handling payment.captured:', error);
@@ -201,8 +195,6 @@ const handlePaymentFailed = async (payload) => {
         const errorCode = payment.error_code;
         const errorDescription = payment.error_description;
 
-        console.log(`❌ Payment failed: ${paymentId} for order: ${orderId}`);
-        console.log(`   Error: ${errorCode} - ${errorDescription}`);
 
         // Log failed payment for monitoring
         // TODO: Send notification to user about payment failure
@@ -222,7 +214,6 @@ const handleOrderPaid = async (payload) => {
         const orderId = order.id;
         const notes = order.notes || {};
 
-        console.log(`✅ Order paid: ${orderId}`);
 
         // This event is similar to payment.captured
         // You can add additional order-level logic here if needed
@@ -241,7 +232,6 @@ const handlePaymentAuthorized = async (payload) => {
         const payment = payload.payment.entity;
         const paymentId = payment.id;
 
-        console.log(`ℹ️ Payment authorized: ${paymentId} (waiting for capture)`);
 
         // Payment is authorized but not yet captured
         // No action needed, wait for payment.captured event
@@ -261,7 +251,6 @@ const handleSubscriptionCancelled = async (payload) => {
         const subscriptionId = subscription.id;
         const notes = subscription.notes || {};
 
-        console.log(`⚠️ Subscription cancelled: ${subscriptionId}`);
 
         const userId = notes.userId;
         if (!userId) {
@@ -276,7 +265,6 @@ const handleSubscriptionCancelled = async (payload) => {
             userSubscription.autoRenew = false;
             await userSubscription.save();
 
-            console.log(`✅ Subscription cancelled for user ${userId}`);
         }
 
         // Downgrade business profile
@@ -311,7 +299,6 @@ const invalidateUserCache = async (userId) => {
             await redisClient.del(...feedKeys);
         }
 
-        console.log(`✅ Cache invalidated for user ${userId} via webhook`);
     } catch (error) {
         console.error('⚠️ Cache invalidation failed:', error.message);
     }

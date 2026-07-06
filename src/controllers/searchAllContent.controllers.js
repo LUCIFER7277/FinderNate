@@ -3,11 +3,13 @@ import Reel from '../models/reels.models.js';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
 import SearchSuggestion from '../models/searchSuggestion.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { getCoordinates } from '../utlis/getCoordinates.js';
-import { filterBusinessPostsByPaymentPlan } from '../utlis/businessPlan.utils.js';
-import { addBadgesToNestedUsers, addBadgesToUsers } from '../utlis/userBadge.utils.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
+import { getCoordinates } from '../utils/getCoordinates.js';
+import { filterBusinessPostsByPaymentPlan } from '../utils/businessPlan.utils.js';
+import { addBadgesToNestedUsers, addBadgesToUsers } from '../utils/userBadge.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount } from '../utils/postEngagement.utils.js';
+import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {
@@ -121,7 +123,8 @@ export const searchAllContent = async (req, res) => {
                 { 'customization.business.location.state': searchRegex },
                 { 'customization.business.location.country': searchRegex },
             ],
-            contentType: { $in: ['normal', 'service', 'product', 'business'] }
+            contentType: { $in: ['normal', 'service', 'product', 'business'] },
+            'settings.privacy': { $ne: 'private' }  // Never show private posts in search results
         };
 
         // Filter by contentType
@@ -357,7 +360,8 @@ export const searchAllContent = async (req, res) => {
                     { 'location.state': searchRegex },
                     { 'location.country': searchRegex }
                 ],
-                userId: { $nin: blockedUsers }
+                userId: { $nin: blockedUsers },
+                isPublic: true  // Never show private reels in search results
             };
 
             // Add username search to reel filters
@@ -507,21 +511,49 @@ export const searchAllContent = async (req, res) => {
             };
         }));
 
+        // Stitch isLikedBy + likedBy (max 20 from Redis Hash) into search results
+        const currentUserId = req.user?._id?.toString() ?? null;
+        const contentIds = paginatedContent.map(item => item._id);
+        const [likedSet, likedByMap, searchLikeCountMap, sharedCountMap] = await Promise.all([
+            currentUserId ? batchIsLikedByUser(req.user._id, contentIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(contentIds),
+            batchGetLikesCount(paginatedContent),
+            batchSharedCount(paginatedContent)
+        ]);
+
+        const stitchedContent = paginatedContent.map(item => {
+            const idStr = item._id.toString();
+            const likedByUsers = likedByMap.get(idStr) || [];
+            const preview = getLikedByPreview(likedByUsers, currentUserId);
+            return {
+                ...item,
+                engagement: {
+                    ...item.engagement,
+                    likes: searchLikeCountMap.get(idStr) ?? item.engagement?.likes ?? 0,
+                    shares: sharedCountMap.get(idStr) ?? item.engagement?.shares ?? 0
+
+                },
+                isLikedBy: likedSet.has(idStr),
+                likedBy: likedByUsers,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+            };
+        });
+
         // Add badges to posts/reels in search results
-        const contentWithBadges = await addBadgesToNestedUsers(paginatedContent);
+        const contentWithBadges = await addBadgesToNestedUsers(stitchedContent);
 
         // Add badges to user search results
-        console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({
+        {/* console.log('[BADGE DEBUG searchAllContent] Before addBadgesToUsers:', usersWithPosts.map(u => ({
             username: u.username,
             _id: u._id,
             hasSubscriptionBadge: !!u.subscriptionBadge
-        })));
+        }))); */}
         const usersWithBadges = await addBadgesToUsers(usersWithPosts);
-        console.log('[BADGE DEBUG searchAllContent] After addBadgesToUsers:', usersWithBadges.map(u => ({
+       {/* console.log('[BADGE DEBUG searchAllContent] After addBadgesToUsers:', usersWithBadges.map(u => ({
             username: u.username,
             _id: u._id,
             subscriptionBadge: u.subscriptionBadge
-        })));
+        }))); */}
 
         return res.status(200).json(
             new ApiResponse(200, {

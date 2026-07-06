@@ -1,28 +1,31 @@
 import Post from '../models/userPost.models.js';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Comment from '../models/comment.models.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import Like from '../models/like.models.js';
 import PostInteraction from '../models/postInteraction.models.js';
 import { setCache } from '../middlewares/cache.middleware.js';
-import { redisClient } from '../config/redis.config.js';
+import { redisClient, RedisKeys, RedisTTL } from '../config/redis.config.js';
 import { getViewableUserIds } from '../middlewares/privacy.middleware.js';
-import { bulkCheckActivePaymentPlans } from '../utlis/businessPlan.utils.js';
+import { bulkCheckActivePaymentPlans } from '../utils/businessPlan.utils.js';
 import mongoose from 'mongoose';
-import { enrichWithRatings } from '../utlis/reviewUtils.js';
-import { addBadgesToNestedUsers } from '../utlis/userBadge.utils.js';
+import { enrichWithRatings } from '../utils/reviewUtils.js';
+import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
+import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount} from '../utils/postEngagement.utils.js';
 
 /**
- * ✅ HOME FEED WITH BUSINESS POST PRIORITY SYSTEM
+ * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
  *
- * Priority Rules:
- * 1. Business accounts with ACTIVE payment plans (plan2/plan3/plan4) get HIGHEST priority (score: 1000)
- * 2. Their posts appear at the TOP of the feed (even above followed users)
- * 3. Business posts WITHOUT active plans are HIDDEN from ALL users (including followers)
- * 4. Non-business posts follow normal priority (followed users > recent > engagement)
+ * Sorting Rules:
+ * 1. Paid business posts (plan2/plan3/plan4) appear at the TOP, sorted by newest first
+ * 2. All other posts appear below, sorted by newest first (date descending)
+ * 3. Only business/product/service CONTENT TYPE posts from unpaid business accounts are HIDDEN
+ * 4. Normal content (photos, tweets, videos) from ALL accounts always shows
+ * 5. Reels from ALL accounts always show regardless of content type or payment status
  *
  * Payment Plan Criteria:
  * - subscriptionStatus must be 'active'
@@ -44,21 +47,43 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const limit = Math.min(requestedLimit, MAX_LIMIT);
         const skip = (page - 1) * limit;
 
-        console.log('🔍 Feed Debug - userId:', userId);
-        console.log('🔍 Feed Debug - blockedUsers count:', blockedUsers.length);
 
-        // Check cache first
-        if (res.locals.cacheKey) {
-            const cachedData = await redisClient.get(res.locals.cacheKey);
-            if (cachedData) {
-                console.log('📦 Returning cached feed');
-                return res.status(200).json(JSON.parse(cachedData));
+        // Check cache first — isLikedBy is never stored in cache, always computed fresh
+        const FEED_CACHE_KEY = RedisKeys.userFeed(userId, page);
+        const cachedRaw = await redisClient.get(FEED_CACHE_KEY);
+        if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            if (cached?.data?.feed?.length) {
+                const cachedPosts = cached.data.feed;
+                const cachedPostIds = cachedPosts.map(p => p._id);
+                const [likedSet, likeCountMap, likedByUsersMap, sharedCountMap] = await Promise.all([
+                    userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
+                    batchGetLikesCount(cachedPosts),
+                    batchGetLikedByUsers(cachedPostIds),
+                    batchSharedCount(cachedPosts)
+                ]);
+
+                cached.data.feed = cachedPosts.map(post => {
+                    const idStr = post._id.toString();
+                    const likedByUsers = likedByUsersMap.get(idStr) || [];
+                    const preview = getLikedByPreview(likedByUsers, userId);
+                    return {
+                        ...post,
+                        engagement: {
+                            ...post.engagement,
+                            likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
+                            shares: sharedCountMap.get(idStr) ?? post.engagement?.shares ?? 0
+                        },
+                        isLikedBy: likedSet.has(idStr),
+                        likedBy: likedByUsers,
+                        likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+                    };
+                });
             }
+            return res.status(200).json(cached);
         }
 
         const FEED_LIMIT = 50; // Reduced from 100
-        const now = new Date();
-        const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
         // ✅ 1. Get viewable user IDs based on privacy settings and following relationships
         // For logged-out users (userId is null), this returns only users with public privacy
@@ -68,24 +93,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const viewableUserIds = viewableUserIdsRaw.map(id =>
             typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
         );
-        console.log('🔍 Feed Debug - viewableUserIds count:', viewableUserIds.length);
-
-        // ✅ 2. Get following and followers for prioritization (only if user is authenticated)
-        let feedUserIds = [];
-        if (userId) {
-            const user = await User.findById(userId)
-                .select('following followers')
-                .lean(); // Use lean() for better performance
-            const following = user?.following || [];
-            const followers = user?.followers || [];
-
-            // ✅ FIXED: Convert to ObjectIds for aggregation
-            feedUserIds = [...new Set([
-                ...following.map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id),
-                ...followers.map(id => typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id)
-            ])];
-            console.log('🔍 Feed Debug - feedUserIds count:', feedUserIds.length);
-        }
 
         // ✅ BUSINESS POST PRIORITY SYSTEM
         // Get business users with active payment plans (plan2, plan3, plan4 - NOT plan1 which is free)
@@ -99,19 +106,19 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const activePlanUserIdsStrings = activePlanUserIds.map(id => id.toString());
         const activePlanUserIdsSet = new Set(activePlanUserIdsStrings);
 
-        console.log('💼 Business Debug - Active paid plans count:', activePlanUserIds.length);
-        console.log('💼 Business Debug - Active plan user IDs:', activePlanUserIdsStrings);
 
         // Get all business user IDs
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
 
-        console.log('💼 Business Debug - Total business users:', businessUsers.length);
 
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
         const matchQuery = {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
+            postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
             userId: { $in: viewableUserIds, $nin: blockedUsers },
+            // Never show private posts in any public feed
+            'settings.privacy': { $ne: 'private' },
             // For logged-out users, only show posts with public visibility
             ...(userId ? {} : {
                 $or: [
@@ -122,7 +129,6 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             })
         };
 
-        console.log('🔍 Feed Debug - Match query:', JSON.stringify(matchQuery, null, 2));
 
         const aggregationPipeline = [
             {
@@ -153,18 +159,25 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 }
             },
             {
-                // ✅ CRITICAL: Filter out business posts without active payment plans
-                // Rule: Business posts WITHOUT active plan are hidden from ALL users (including followers)
+                // ✅ CRITICAL: Filter out business-type content from unpaid business accounts
+                // Rule: Only business/product/service CONTENT TYPE posts from unpaid business accounts are hidden
+                // All other posts (normal posts, reels, tweets, videos) from ANY account are always shown
+                // Reels are ALWAYS shown regardless of content type or business payment status
                 $match: {
                     $expr: {
                         $or: [
-                            // Keep ALL non-business posts
+                            // Keep ALL posts from users with active paid plans (no need to check isBusinessProfile)
+                            { $in: ['$userIdString', activePlanUserIdsStrings] },
+                            // Keep ALL posts from non-business accounts
                             { $eq: ['$isBusinessAccount', false] },
-                            // Keep business posts ONLY if user has active payment plan
+                            // Keep ALL reels regardless of content type or business status
+                            { $eq: ['$postType', 'reel'] },
+                            // For unpaid business accounts: only keep normal content type posts
                             {
                                 $and: [
                                     { $eq: ['$isBusinessAccount', true] },
-                                    { $in: ['$userIdString', activePlanUserIdsStrings] }
+                                    { $not: { $in: ['$userIdString', activePlanUserIdsStrings] } },
+                                    { $eq: ['$contentType', 'normal'] }
                                 ]
                             }
                         ]
@@ -173,52 +186,21 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             },
             {
                 $addFields: {
-                    // ✅ BUSINESS POST PRIORITY SCORING SYSTEM
-                    // Priority order: Paid Business Posts > Followed Users > Recent Posts > Engagement
-                    feedScore: {
-                        $add: [
-                            // ✅ HIGHEST PRIORITY: Paid business posts get score of 1000 (even higher than followed users)
-                            // This ensures business accounts with active paid plans ALWAYS appear at the top
-                            {
-                                $cond: [
-                                    {
-                                        $and: [
-                                            { $eq: ['$isBusinessAccount', true] },
-                                            { $in: ['$userIdString', activePlanUserIdsStrings] }
-                                        ]
-                                    },
-                                    1000, // HIGHEST priority for paid business posts (increased from 200)
-                                    0
-                                ]
-                            },
-                            // Followed users get high priority (but lower than paid business)
-                            { $cond: [{ $in: ['$userId', feedUserIds] }, 100, 0] },
-                            // Recent posts get boost (last 24 hours)
-                            { $cond: [{ $gte: ['$createdAt', yesterday] }, 20, 0] },
-                            // Engagement boost (capped at 30)
-                            { $min: [
-                                { $add: [
-                                    { $multiply: [{ $ifNull: ['$engagement.likes', 0] }, 1] },
-                                    { $multiply: [{ $ifNull: ['$engagement.comments', 0] }, 2] },
-                                    { $multiply: [{ $ifNull: ['$engagement.shares', 0] }, 3] }
-                                ]},
-                                30
-                            ]},
-                            // Content type boost
-                            { $switch: {
-                                branches: [
-                                    { case: { $eq: ['$contentType', 'product'] }, then: 15 },
-                                    { case: { $eq: ['$contentType', 'service'] }, then: 12 },
-                                    { case: { $eq: ['$contentType', 'business'] }, then: 10 }
-                                ],
-                                default: 8
-                            }}
+                    // ✅ SIMPLE PRIORITY: Paid business posts on top, then everything sorted by date
+                    // 1 = paid business post (appears on top), 0 = normal post (appears below)
+                    // Only checks activePlanUserIdsStrings - no dependency on isBusinessProfile
+                    isPaidBusiness: {
+                        $cond: [
+                            { $in: ['$userIdString', activePlanUserIdsStrings] },
+                            1,
+                            0
                         ]
                     }
                 }
             },
             {
-                $sort: { feedScore: -1, createdAt: -1 }
+                // Sort: paid business posts first, then by newest date
+                $sort: { isPaidBusiness: -1, createdAt: -1 }
             },
             {
                 $skip: skip
@@ -244,6 +226,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 // Remove temporary fields used for filtering
                 $project: {
                     isBusinessAccount: 0,
+                    isPaidBusiness: 0,
                     userIdString: 0,
                     userInfo: 0
                 }
@@ -254,7 +237,9 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     _id: 1,
                     userId: 1,
                     contentType: 1,
+                    postType: 1,
                     caption: 1,
+                    description: 1,
                     media: 1,
                     'settings.privacy': 1,
                     'settings.visibility': 1,
@@ -281,17 +266,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         const posts = await Post.aggregate(aggregationPipeline);
 
-        console.log('🔍 Feed Debug - Posts found:', posts.length);
 
         if (posts.length === 0) {
             // Debug: Check if there are ANY posts in the database
             const totalPosts = await Post.countDocuments({});
             const publicPosts = await Post.countDocuments({ 'settings.privacy': 'public' });
-            console.log('⚠️ No posts in feed. Debug info:');
-            console.log('   - Total posts in DB:', totalPosts);
-            console.log('   - Public posts in DB:', publicPosts);
-            console.log('   - Viewable users count:', viewableUserIds.length);
-            console.log('   - Blocked users count:', blockedUsers.length);
 
             const emptyResponse = new ApiResponse(200, {
                 feed: [],
@@ -305,16 +284,14 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             return res.status(200).json(emptyResponse);
         }
 
-        // ✅ 3. Get user likes in a single optimized query
+        // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        let likedPostIds = new Set();
-        if (userId) {
-            const userLikes = await Like.find({
-                userId: userId,
-                postId: { $in: postIds }
-            }).select('postId').lean();
-            likedPostIds = new Set(userLikes.map(like => like.postId.toString()));
-        }
+        const [likedPostIds, likesByPost, likeCountMap, sharedCountMap] = await Promise.all([
+            userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
+            batchGetLikedByUsers(postIds),
+            batchGetLikesCount(posts),
+            batchSharedCount(posts)
+        ]);
 
         // ✅ 4. Get top comments efficiently (no nested queries)
         const allComments = await Comment.find({
@@ -353,11 +330,24 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         });
 
         // ✅ 5. Format final response
-        const feedData = posts.map(post => ({
-            ...post,
-            comments: commentsByPost.get(post._id.toString()) || [],
-            isLikedBy: likedPostIds.has(post._id.toString())
-        }));
+        const feedData = posts.map(post => {
+            const postIdStr = post._id.toString();
+            const likedByUsers = likesByPost.get(postIdStr) || [];
+            const preview = getLikedByPreview(likedByUsers, userId);
+
+            return {
+                ...post,
+                engagement: {
+                    ...post.engagement,
+                    likes: likeCountMap.get(postIdStr) ?? post.engagement?.likes ?? 0,
+                    shares: sharedCountMap.get(postIdStr) ?? post.engagement?.shares ?? 0
+                },
+                comments: commentsByPost.get(postIdStr) || [],
+                isLikedBy: likedPostIds.has(postIdStr),
+                likedBy: likedByUsers,
+                likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+            };
+        });
         // Enrich posts with review/rating data
         const enrichedFeedData = await enrichWithRatings(feedData, 'userId');
         
@@ -370,20 +360,29 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         if (page === 1 && posts.length === limit) {
             // Only do count query for first page if it's full
             try {
-                // Count all posts, then filter out unpaid business posts
+                // Count all posts, filtering out business content from unpaid business accounts and private posts
                 const allPostsForCount = await Post.find({
                     contentType: { $in: ['normal', 'service', 'product', 'business'] },
-                    userId: { $nin: blockedUsers, $in: viewableUserIds }
-                }).select('userId').lean();
-                
-                // Filter out unpaid business posts
+                    postType: { $in: ['photo', 'reel', 'video', 'tweet'] },
+                    userId: { $nin: blockedUsers, $in: viewableUserIds },
+                    'settings.privacy': { $ne: 'private' }
+                }).select('userId contentType postType').lean();
+
+                // Filter: keep all posts from paid plans, all from non-business,
+                // all reels, and only normal contentType from unpaid business accounts
                 const filteredPosts = allPostsForCount.filter(post => {
                     const userIdStr = post.userId.toString();
+                    // Keep all posts from users with active paid plans
+                    if (activePlanUserIdsSet.has(userIdStr)) return true;
+                    // Keep all posts from non-business accounts
                     const isBusiness = businessUserIdsSet.has(userIdStr);
-                    if (!isBusiness) return true; // Keep non-business posts
-                    return activePlanUserIdsSet.has(userIdStr); // Keep only paid business posts
+                    if (!isBusiness) return true;
+                    // Always keep reels regardless of content type or business status
+                    if (post.postType === 'reel') return true;
+                    // For unpaid business accounts, only keep normal content type
+                    return post.contentType === 'normal';
                 });
-                
+
                 totalCount = filteredPosts.length;
             } catch (error) {
                 totalCount = posts.length; // Fallback
@@ -400,10 +399,13 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             }
         }, "Home feed generated successfully");
 
-        // Cache the response
-        if (res.locals.cacheKey && res.locals.cacheTTL) {
-            await setCache(res.locals.cacheKey, response, res.locals.cacheTTL);
-        }
+        // Cache WITHOUT isLikedBy — it's always computed fresh to avoid stale heart state
+        const feedToCache = feedDataWithBadges.map(({ isLikedBy, ...rest }) => rest);
+        const responseToCache = new ApiResponse(200, {
+            feed: feedToCache,
+            pagination: { page, limit, total: totalCount, totalPages: Math.ceil(totalCount / limit) }
+        }, "Home feed generated successfully");
+        await setCache(FEED_CACHE_KEY, responseToCache, RedisTTL.USER_FEED);
 
         return res.status(200).json(response);
 

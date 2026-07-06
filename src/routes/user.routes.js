@@ -3,7 +3,7 @@ import { upload } from "../middlewares/multerConfig.js";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blocking.middleware.js";
 import { cacheSearchResults } from "../middlewares/cache.middleware.js";
-import { loginUser, logOutUser, registerUser, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, uploadProfileImage, sendVerificationOTPForEmail, sendPasswordResetOTP, resetPasswordWithOTP, getOtherUserProfile, checkTokenExpiry, togglePhoneNumberVisibility, toggleAddressVisibility, trackSearch, getPopularSearches, blockUser, unblockUser, getBlockedUsers, checkIfUserBlocked, getUsernameSuggestions, checkUsernameAvailability, toggleFullPrivateAccount, toggleServiceAutoFill, getPreviousServicePostData, toggleProductAutoFill, getPreviousProductPostData, saveFCMToken, testFCMNotification, checkFirebaseStatus, updateMessagingPrivacy, getMessagingPrivacy } from "../controllers/user.controllers.js";
+import { loginUser, logOutUser, registerUser, verifyRegistrationOTP, resendRegistrationOTP, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, uploadProfileImage, sendVerificationOTPForEmail, sendPasswordResetOTP, resetPasswordWithOTP, getOtherUserProfile, checkTokenExpiry, togglePhoneNumberVisibility, toggleAddressVisibility, trackSearch, getPopularSearches, blockUser, unblockUser, getBlockedUsers, checkIfUserBlocked, getUsernameSuggestions, checkUsernameAvailability, toggleFullPrivateAccount, toggleServiceAutoFill, getPreviousServicePostData, toggleProductAutoFill, getPreviousProductPostData, saveFCMToken, testFCMNotification, checkFirebaseStatus, updateMessagingPrivacy, getMessagingPrivacy, sendPhoneVerificationOtp, verifyAndUpdatePhone, getOtpStatus } from "../controllers/user.controllers.js";
 import { searchAllContent } from "../controllers/searchAllContent.controllers.js";
 import { followUser, unfollowUser, getFollowers, getFollowing, approveFollowRequest, rejectFollowRequest, getPendingFollowRequests, getSentFollowRequests } from "../controllers/follower.controllers.js";
 import { getSearchSuggestions } from "../controllers/searchSuggestion.controllers.js";
@@ -12,6 +12,8 @@ import { instantSearch, searchProfiles, searchProducts } from "../controllers/se
 const router = Router();
 
 router.route("/register").post(registerUser);
+router.route("/register/verify").post(verifyRegistrationOTP);
+router.route("/register/resend-otp").post(resendRegistrationOTP);
 router.route("/login").post(loginUser);
 router.route("/logout").post(verifyJWT, logOutUser);
 router.route("/profile").get(verifyJWT, getUserProfile);
@@ -21,9 +23,13 @@ router.route("/profile").delete(verifyJWT, deleteAccount);
 router.route("/profile/search").get(verifyJWT, getBlockedUsersMiddleware, searchUsers);
 router.route("/verify-email-otp").post(verifyEmailWithOTP);
 router.route("/send-verification-otp").post(sendVerificationOTPForEmail);
+router.route("/send-phone-verification-otp").post(verifyJWT, sendPhoneVerificationOtp);
+router.route("/verify-update-phone").post(verifyJWT, verifyAndUpdatePhone);
 router.route("/profile/upload-image").post(verifyJWT, upload.single("profileImage"), uploadProfileImage);
 router.route("/send-reset-otp").post(sendPasswordResetOTP);
 router.route("/reset-password").post(resetPasswordWithOTP);
+// Public — fetch OTP cooldown & expiry remaining (query: identifier, type, purpose)
+router.route("/otp-status").get(getOtpStatus);
 router.route("/check-token").post(checkTokenExpiry);
 router.route("/searchAllContent").get(optionalVerifyJWT, getBlockedUsersMiddleware, cacheSearchResults, searchAllContent);
 router.route("/profile/other").get(verifyJWT, getBlockedUsersMiddleware, getOtherUserProfile);

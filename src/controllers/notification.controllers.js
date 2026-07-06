@@ -1,10 +1,10 @@
 import Notification from "../models/notification.models.js";
 import Message from "../models/message.models.js";
 import Chat from "../models/chat.models.js";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
-import { ApiError } from "../utlis/ApiError.js";
-import notificationCache from "../utlis/notificationCache.utils.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { ApiError } from "../utils/ApiError.js";
+import notificationCache from "../utils/notificationCache.utils.js";
 
 const sendRealTimeNotification = async (recipientId, notification) => {
     // Use Socket.IO Redis adapter to emit to user across all processes
@@ -14,32 +14,21 @@ const sendRealTimeNotification = async (recipientId, notification) => {
 };
 
 // 🟢 Like Notification
-export const createLikeNotification = asyncHandler(async ({ recipientId, sourceUserId, postId, commentId }) => {
-    if (!recipientId || !sourceUserId) {
-        throw new ApiError(400, "recipientId and sourceUserId are required");
-    }
-
-    const type = "like";
-    const message = commentId ? "liked your comment" : "liked your post";
-
-    if (!postId && !commentId) {
-        throw new ApiError(400, "Either postId or commentId is required");
-    }
+export const createLikeNotification = async ({ recipientId, sourceUserId, postId, commentId }) => {
+    if (!recipientId || !sourceUserId || (!postId && !commentId)) return;
 
     const notification = await Notification.create({
         receiverId: recipientId,
-        type,
+        type: "like",
         senderId: sourceUserId,
         postId,
         commentId,
-        message
+        message: commentId ? "liked your comment" : "liked your post"
     });
 
     sendRealTimeNotification(recipientId, notification);
-    
-    // Invalidate cache and emit real-time count update
     await notificationCache.invalidateNotificationCache(recipientId);
-});
+};
 
 // 🟡 Comment Notification
 export const createCommentNotification = asyncHandler(async ({ recipientId, sourceUserId, postId, commentId, isReply = false }) => {
@@ -66,54 +55,36 @@ export const createCommentNotification = asyncHandler(async ({ recipientId, sour
 });
 
 //  Follow Notification
-export const createFollowNotification = asyncHandler(async ({ recipientId, sourceUserId }) => {
-    if (!recipientId || !sourceUserId) {
-        throw new ApiError(400, "recipientId and sourceUserId are required");
-    }
-
-    const type = "follow";
-    const message = "started following you";
+export const createFollowNotification = async ({ recipientId, sourceUserId }) => {
+    if (!recipientId || !sourceUserId) return;
 
     const notification = await Notification.create({
         receiverId: recipientId,
-        type,
+        type: "follow",
         senderId: sourceUserId,
-        message
+        message: "started following you"
     });
 
     sendRealTimeNotification(recipientId, notification);
-    
-    // Invalidate cache and emit real-time count update
     await notificationCache.invalidateNotificationCache(recipientId);
-});
+};
 
 // 🔴 Unlike Notification
-export const createUnlikeNotification = asyncHandler(async ({ recipientId, sourceUserId, postId, commentId }) => {
-    if (!recipientId || !sourceUserId) {
-        throw new ApiError(400, "recipientId and sourceUserId are required");
-    }
-
-    const type = "unlike";
-    const message = commentId ? "unliked your comment" : "unliked your post";
-
-    if (!postId && !commentId) {
-        throw new ApiError(400, "Either postId or commentId is required");
-    }
+export const createUnlikeNotification = async ({ recipientId, sourceUserId, postId, commentId }) => {
+    if (!recipientId || !sourceUserId || (!postId && !commentId)) return;
 
     const notification = await Notification.create({
         receiverId: recipientId,
-        type,
+        type: "unlike",
         senderId: sourceUserId,
         postId,
         commentId,
-        message
+        message: commentId ? "unliked your comment" : "unliked your post"
     });
 
     sendRealTimeNotification(recipientId, notification);
-    
-    // Invalidate cache and emit real-time count update
     await notificationCache.invalidateNotificationCache(recipientId);
-});
+};
 
 //  Get Logged-in User's Notifications
 export const getNotifications = asyncHandler(async (req, res) => {

@@ -6,27 +6,27 @@ import {
     uploadMultipleMedia,
     deleteMedia,
     deleteMultipleMedia,
-    getMediaInfo
+    getMediaInfo,
 } from "../controllers/uploadMedia.controllers.js";
 
 const router = express.Router();
 
-// Apply authentication middleware to all routes
 router.use(verifyJWT);
 
-// Upload single media file
+// Upload single file — image / video / audio / document
+// Limits: image 10 MB · video 50 MB · audio 6 MB · file 7 MB
 router.post("/upload-single", upload.single("media"), uploadSingleMedia);
 
-// Upload multiple media files
+// Upload multiple files
 router.post("/upload-multiple", upload.array("media", 10), uploadMultipleMedia);
 
-// Delete single media file
+// Delete single file
 router.delete("/delete", deleteMedia);
 
-// Delete multiple media files
+// Delete multiple files
 router.delete("/delete-multiple", deleteMultipleMedia);
 
-// Get media information
+// Get file info
 router.get("/info", getMediaInfo);
 
 export default router; 

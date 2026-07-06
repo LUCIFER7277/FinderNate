@@ -6,8 +6,9 @@ import {
     getAvailablePlans,
     createSubscriptionOrder,
     verifySubscriptionPayment,
+    subscriptionWebhook,
     testUpgradeSubscription
-} from '../controllers/subscription.controllers.js';
+} from '../controllers/subscription/index.js';
 import {
     getPaymentLogs,
     getSubscriptionLogs,
@@ -20,7 +21,10 @@ import { verifyJWT } from '../middlewares/auth.middleware.js';
 
 const router = Router();
 
-// Apply authentication middleware to all routes
+// Public route — Cashfree webhook (no JWT)
+router.post('/webhook', subscriptionWebhook);                    // POST /api/v1/subscription/webhook
+
+// Apply authentication middleware to all routes below
 router.use(verifyJWT);
 
 // Subscription information routes
@@ -29,7 +33,7 @@ router.get('/upgrade-prompt', getUpgradePrompt);                 // GET /api/v1/
 router.get('/feature/:feature/access', checkFeatureAccess);      // GET /api/v1/subscription/feature/calling/access
 router.get('/plans', getAvailablePlans);                         // GET /api/v1/subscription/plans
 
-// Razorpay payment routes for subscription upgrade
+// Cashfree payment routes for subscription upgrade
 router.post('/create-order', createSubscriptionOrder);           // POST /api/v1/subscription/create-order
 router.post('/verify-payment', verifySubscriptionPayment);       // POST /api/v1/subscription/verify-payment
 

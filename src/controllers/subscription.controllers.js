@@ -1,16 +1,22 @@
-import { asyncHandler } from '../utlis/asyncHandler.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { ApiError } from '../utlis/ApiError.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { ApiError } from '../utils/ApiError.js';
 import Subscription from '../models/subscription.models.js';
 import { User } from '../models/user.models.js';
-import razorpay from '../config/razorpay.config.js';
-import crypto from 'crypto';
+import {
+    generateCashfreeOrderId,
+    createCashfreeOrder,
+    getCashfreeOrderStatus,
+    getCashfreePayments,
+    buildCashfreeCheckoutUrl,
+    verifyCashfreeWebhook,
+} from '../config/cashfree.config.js';
 import {
     PaymentLogger,
     SubscriptionLogger,
     ErrorLogger,
     MetricsCollector
-} from '../utlis/monitoring.utils.js';
+} from '../utils/monitoring.utils.js';
 
 // Subscription pricing configuration (in INR)
 const SUBSCRIPTION_PLANS = {
@@ -23,7 +29,7 @@ const SUBSCRIPTION_PLANS = {
     small_business: {
         id: 'small_business',
         name: 'Small Business',
-        price: 999, // ₹999 per month
+        price: 1, // ₹999 per month
         duration: 'monthly'
     },
     corporate: {
@@ -33,9 +39,6 @@ const SUBSCRIPTION_PLANS = {
         duration: 'monthly'
     }
 };
-
-// Helper function to convert rupees to paise (Razorpay requires amount in paise: 1 INR = 100 paise)
-const convertToPaise = (rupees) => rupees * 100;
 
 /**
  * Get current user's subscription status
@@ -127,7 +130,7 @@ export const getUpgradePrompt = asyncHandler(async (req, res) => {
             {
                 id: 'small_business',
                 name: 'Small Business',
-                price: '₹999/month',
+                price: '₹1/month',
                 features: [
                     'Enhanced business profile',
                     'Unlimited posts',
@@ -260,7 +263,7 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
         {
             id: 'small_business',
             name: 'Small Business',
-            price: '₹999',
+            price: '₹1',
             period: 'per month',
             features: [
                 'Enhanced business profile',
@@ -297,7 +300,7 @@ export const getAvailablePlans = asyncHandler(async (req, res) => {
 });
 
 /**
- * Create Razorpay order for subscription upgrade
+ * Create Cashfree order for subscription upgrade
  * This initiates the payment flow for upgrading to a paid plan
  */
 export const createSubscriptionOrder = asyncHandler(async (req, res) => {
@@ -316,12 +319,17 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'User not found');
     }
 
-    // Check if user already has an active subscription
-    const existingSubscription = await Subscription.findOne({
-        userId: userId,
-        status: 'active',
-        endDate: { $gt: new Date() }
-    });
+    // Only business profile users can purchase a subscription
+    if (!user.isBusinessProfile) {
+        throw new ApiError(403, 'Only business accounts can purchase a subscription. Please create a business profile first.');
+    }
+
+    // Ensure the Business document exists
+    const Business = (await import('../models/business.models.js')).default;
+    const businessProfile = await Business.findOne({ userId });
+    if (!businessProfile) {
+        throw new ApiError(403, 'Business profile not found. Please complete your business profile setup before subscribing.');
+    }
 
     // Get plan details
     const planDetails = SUBSCRIPTION_PLANS[plan];
@@ -329,84 +337,64 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
-    // Verify Razorpay configuration
-    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-        console.error('❌ Razorpay credentials missing!');
-        throw new ApiError(500, 'Payment gateway not configured. Please contact support.');
-    }
+    const cashfreeOrderId = generateCashfreeOrderId();
+    const FRONTEND_URL = process.env.FRONTEND_URL || 'https://findernate.com';
+    const BACKEND_URL = process.env.BACKEND_URL || 'https://api.findernate.com';
 
     try {
-        // Create Razorpay order
-        // Generate a short receipt ID (max 40 chars for Razorpay)
-        const shortReceipt = `sub_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`.substring(0, 40);
-
-        const razorpayOrder = await razorpay.orders.create({
-            amount: convertToPaise(planDetails.price), // Convert ₹999 to 99900 paise
-            currency: 'INR',
-            receipt: shortReceipt,
-            notes: {
-                userId: userId.toString(),
-                plan: plan,
-                planName: planDetails.name,
-                type: 'subscription_upgrade',
-                existingPlan: existingSubscription?.plan || 'free'
-            }
+        const cfOrder = await createCashfreeOrder({
+            orderId:       cashfreeOrderId,
+            amount:        planDetails.price,
+            customerId:    userId.toString(),
+            customerName:  user.fullName || user.username || 'Customer',
+            customerEmail: user.email || 'noreply@findernate.com',
+            customerPhone: user.phoneNumber || '9999999999',
+            orderNote:     `FinderNate ${planDetails.name} Subscription`,
+            returnUrl:     `${FRONTEND_URL}/subscription/success?txnId=${cashfreeOrderId}&plan=${plan}`,
+            notifyUrl:     `${BACKEND_URL}/api/v1/subscription/webhook`,
+            expiryMinutes: 20
         });
 
-        // Log payment initiation
-        PaymentLogger.logPaymentInitiated(userId.toString(), razorpayOrder.id, plan, planDetails.price);
+        const paymentSessionId = cfOrder?.payment_session_id;
+        if (!paymentSessionId) {
+            throw new Error('Failed to get payment session from Cashfree');
+        }
+
+        const checkoutUrl = buildCashfreeCheckoutUrl(paymentSessionId);
+
+        PaymentLogger.logPaymentInitiated(userId.toString(), cashfreeOrderId, plan, planDetails.price);
         MetricsCollector.recordPaymentAttempt();
+
+        const cashfreeMode = process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox';
 
         res.status(200).json(
             new ApiResponse(200, {
-                razorpayOrderId: razorpayOrder.id,
-                razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-                amount: razorpayOrder.amount,
-                currency: razorpayOrder.currency,
-                plan: plan,
+                cashfreeOrderId,
+                checkoutUrl,
+                paymentSessionId,
+                cashfreeMode,
+                plan,
                 planName: planDetails.name,
                 planPrice: planDetails.price
-            }, 'Razorpay order created for subscription')
+            }, 'Cashfree payment initiated for subscription')
         );
-    } catch (razorpayError) {
-        console.error('❌ Razorpay order creation failed:', razorpayError);
-        console.error('Error details:', razorpayError.error || razorpayError.message);
-
-        // Log error
-        ErrorLogger.logRazorpayError(userId.toString(), null, razorpayError);
-
-        throw new ApiError(500, `Payment gateway error: ${razorpayError.error?.description || razorpayError.message}`);
+    } catch (error) {
+        console.error('❌ Cashfree subscription order creation failed:', error);
+        ErrorLogger.logRazorpayError(userId.toString(), null, error);
+        throw new ApiError(500, `Payment gateway error: ${error.message}`);
     }
 });
 
 /**
- * Verify Razorpay payment and activate subscription
- * Called after successful payment on frontend
+ * Verify Cashfree payment and activate subscription
+ * Called from /subscription/success page after Cashfree redirect
  */
 export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
     const userId = req.user._id;
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, plan } = req.body;
+    const { cashfreeOrderId, plan } = req.body;
 
-    // Validate required fields
-    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !plan) {
-        throw new ApiError(400, 'Missing required payment verification fields');
-    }
-
-    // Verify Razorpay signature
-    const body = razorpay_order_id + "|" + razorpay_payment_id;
-    const expectedSignature = crypto
-        .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
-        .update(body.toString())
-        .digest("hex");
-
-    const isValid = expectedSignature === razorpay_signature;
-
-    // Log verification attempt
-    PaymentLogger.logPaymentVerification(userId.toString(), razorpay_payment_id, razorpay_order_id, isValid);
-
-    if (!isValid) {
-        MetricsCollector.recordPaymentFailure();
-        throw new ApiError(400, "Invalid payment signature");
+    if (!cashfreeOrderId || !plan) {
+        throw new ApiError(400, 'Missing required fields: cashfreeOrderId and plan');
     }
 
     // Validate plan
@@ -415,90 +403,109 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Invalid subscription plan');
     }
 
+    // Verify with Cashfree status API
+    let cfOrder;
+    try {
+        cfOrder = await getCashfreeOrderStatus(cashfreeOrderId);
+    } catch (error) {
+        throw new ApiError(400, 'Failed to verify payment status with Cashfree');
+    }
+
+    const isSuccess = cfOrder?.order_status === 'PAID';
+
+    // Fetch Cashfree payment ID
+    let cfPaymentId = cashfreeOrderId;
+    if (isSuccess) {
+        try {
+            const payments = await getCashfreePayments(cashfreeOrderId);
+            const paid = payments?.find?.(p => p.payment_status === 'SUCCESS');
+            if (paid?.cf_payment_id) {
+                cfPaymentId = paid.cf_payment_id.toString();
+            }
+        } catch { /* non-critical */ }
+    }
+
+    PaymentLogger.logPaymentVerification(userId.toString(), cfPaymentId, cashfreeOrderId, isSuccess);
+
+    if (!isSuccess) {
+        MetricsCollector.recordPaymentFailure();
+        throw new ApiError(400, `Payment not completed. Status: ${cfOrder?.order_status || 'unknown'}`);
+    }
+
     // Get user
     const user = await User.findById(userId);
     if (!user) {
         throw new ApiError(404, 'User not found');
     }
 
-    // Map subscription plan names to business plan names
+    if (!user.isBusinessProfile) {
+        throw new ApiError(403, 'Only business accounts can activate a subscription.');
+    }
+
     const planMapping = {
         'small_business': 'plan2',
         'corporate': 'plan3'
     };
 
-    // Calculate subscription dates
     const now = new Date();
     const endDate = new Date();
-    endDate.setMonth(endDate.getMonth() + 1); // 1 month from now
+    endDate.setMonth(endDate.getMonth() + 1);
 
-    // Find existing subscription or create new one
+    // Upsert subscription
     let subscription = await Subscription.findOne({ userId });
 
     if (subscription) {
-        // Update existing subscription
         subscription.plan = plan;
         subscription.status = 'active';
         subscription.startDate = now;
         subscription.endDate = endDate;
-        subscription.paymentId = razorpay_payment_id;
+        subscription.paymentId = cfPaymentId;
         await subscription.save();
     } else {
-        // Create new subscription
         subscription = await Subscription.create({
-            userId: userId,
-            plan: plan,
+            userId,
+            plan,
             status: 'active',
             startDate: now,
             endDate: endDate,
-            paymentId: razorpay_payment_id
+            paymentId: cfPaymentId
         });
     }
 
-    // Update Business model if user has a business profile
+    // Update Business model — upsert ensures users who subscribed before creating their profile are also covered
     const Business = (await import('../models/business.models.js')).default;
-    const business = await Business.findOne({ userId });
+    const business = await Business.findOneAndUpdate(
+        { userId },
+        { $set: { plan: planMapping[plan], subscriptionStatus: 'active', isVerified: true } },
+        { upsert: true, new: true }
+    );
 
-    if (business) {
-        business.plan = planMapping[plan];
-        business.subscriptionStatus = 'active';
-        await business.save();
-        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
-    }
-
-    // Invalidate all feed caches when subscription changes
+    // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
-
+        const { FeedCacheManager, UserCacheManager } = await import('../utils/cache.utils.js');
         await Promise.allSettled([
+            UserCacheManager.invalidateUserProfile(userId.toString()),
             FeedCacheManager.invalidateUserFeed(userId),
             FeedCacheManager.invalidateExploreFeed(),
             FeedCacheManager.invalidateTrendingFeed()
         ]);
-
         const { redisClient } = await import('../config/redis.config.js');
         const feedKeys = await redisClient.keys('fn:user:*:feed:*');
-        if (feedKeys.length > 0) {
-            await redisClient.del(...feedKeys);
-        }
-
-        console.log(`✅ Cache invalidated for user ${userId} after subscription upgrade`);
+        if (feedKeys.length > 0) await redisClient.del(...feedKeys);
     } catch (cacheError) {
         console.error('Cache invalidation error:', cacheError);
     }
 
-    // Get subscription status with features
     const hasCallingAccess = ['small_business', 'corporate'].includes(plan);
 
-    // Log successful payment and subscription creation
-    PaymentLogger.logPaymentSuccess(userId.toString(), razorpay_payment_id, razorpay_order_id, plan, SUBSCRIPTION_PLANS[plan].price);
+    PaymentLogger.logPaymentSuccess(userId.toString(), cfPaymentId, cashfreeOrderId, plan, SUBSCRIPTION_PLANS[plan].price);
     SubscriptionLogger.logSubscriptionCreated(userId.toString(), plan, subscription.startDate, subscription.endDate);
     MetricsCollector.recordPaymentSuccess(SUBSCRIPTION_PLANS[plan].price, plan);
 
     res.status(200).json(
         new ApiResponse(200, {
-            subscription: subscription,
-            business: business ? { plan: business.plan, subscriptionStatus: business.subscriptionStatus } : null,
+            subscription,
+            business: { plan: business.plan, subscriptionStatus: business.subscriptionStatus },
             tier: plan,
             features: {
                 calling: {
@@ -509,9 +516,43 @@ export const verifySubscriptionPayment = asyncHandler(async (req, res) => {
                 }
             },
             message: `Successfully upgraded to ${SUBSCRIPTION_PLANS[plan].name} plan!`,
-            paymentId: razorpay_payment_id
+            paymentId: cfPaymentId
         }, 'Subscription activated successfully')
     );
+});
+
+/**
+ * Cashfree webhook for subscription payments
+ * Called asynchronously by Cashfree after payment completion
+ */
+export const subscriptionWebhook = asyncHandler(async (req, res) => {
+    const timestamp = req.headers['x-webhook-timestamp'] || '';
+    const signature = req.headers['x-webhook-signature'] || '';
+    const rawBody   = req.rawBody || JSON.stringify(req.body);
+
+    if (timestamp && signature) {
+        const isValid = verifyCashfreeWebhook(timestamp, signature, rawBody);
+        if (!isValid) {
+            console.error('❌ Invalid Cashfree subscription webhook signature');
+            return res.status(200).json({ success: true }); // always 200 to Cashfree
+        }
+    }
+
+    const payload       = req.body;
+    const cfOrderId     = payload?.data?.order?.order_id;
+    const orderStatus   = payload?.data?.order?.order_status;
+    const cfPaymentId   = payload?.data?.payment?.cf_payment_id?.toString();
+    const paymentStatus = payload?.data?.payment?.payment_status;
+
+    if (orderStatus !== 'PAID' || paymentStatus !== 'SUCCESS' || !cfOrderId) {
+        return res.status(200).json({ success: true });
+    }
+
+    // Subscription activation is handled by verifySubscriptionPayment on the success page.
+    // Webhook just logs for audit.
+    PaymentLogger.logPaymentSuccess('webhook', cfPaymentId || '', cfOrderId, 'subscription', payload?.data?.order?.order_amount || 0);
+
+    return res.status(200).json({ success: true });
 });
 
 /**
@@ -524,11 +565,6 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
     const { plan } = req.body;
 
     // Debug logging
-    console.log('=== TEST UPGRADE DEBUG ===');
-    console.log('Request body:', req.body);
-    console.log('Plan received:', plan);
-    console.log('Plan type:', typeof plan);
-    console.log('========================');
 
     // Valid plan options for testing
     const validPlans = ['free', 'small_business', 'corporate'];
@@ -586,38 +622,34 @@ export const testUpgradeSubscription = asyncHandler(async (req, res) => {
         }
     }
 
-    // IMPORTANT: Also update Business model if user has a business profile
-    // The home feed checks Business model for post visibility
+    // Update Business model — upsert ensures users who subscribed before creating their profile are also covered
     const Business = (await import('../models/business.models.js')).default;
-    const business = await Business.findOne({ userId });
+    const updateFields = plan === 'free'
+        ? { plan: planMapping[plan], subscriptionStatus: 'pending' }
+        : { plan: planMapping[plan], subscriptionStatus: 'active', isVerified: true };
+    const business = await Business.findOneAndUpdate(
+        { userId },
+        { $set: updateFields },
+        { upsert: true, new: true }
+    );
 
-    if (business) {
-        business.plan = planMapping[plan];
-        business.subscriptionStatus = plan === 'free' ? 'pending' : 'active';
-        await business.save();
-        console.log(`✅ Updated Business model: plan=${business.plan}, status=${business.subscriptionStatus}`);
-    }
-
-    // ✅ CRITICAL: Invalidate all feed caches when subscription changes
-    // This ensures business posts appear/disappear immediately based on payment status
+    // Invalidate feed and profile caches (subscription badge/visibility changed)
     try {
-        const { FeedCacheManager } = await import('../utlis/cache.utils.js');
+        const { FeedCacheManager, UserCacheManager } = await import('../utils/cache.utils.js');
 
-        // Invalidate all feed types since business post visibility affects them all
         await Promise.allSettled([
+            UserCacheManager.invalidateUserProfile(userId.toString()),
             FeedCacheManager.invalidateUserFeed(userId),
             FeedCacheManager.invalidateExploreFeed(),
             FeedCacheManager.invalidateTrendingFeed()
         ]);
 
-        // Also invalidate Redis cache patterns for home feeds
         const { redisClient } = await import('../config/redis.config.js');
         const feedKeys = await redisClient.keys('fn:user:*:feed:*');
         if (feedKeys.length > 0) {
             await redisClient.del(...feedKeys);
         }
 
-        console.log(`✅ Cache invalidated for user ${userId} after subscription change`);
     } catch (cacheError) {
         console.error('Cache invalidation error:', cacheError);
         // Don't throw - cache invalidation failure shouldn't block subscription update

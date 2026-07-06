@@ -64,13 +64,6 @@ router.route("/live-location").patch(verifyJWT, updateLiveLocation);
 router.route("/toggle-live-location").post(verifyJWT, toggleLiveLocation);
 router.route("/nearby").get(getNearbyBusinesses);
 
-// Get business by ID (public access)
-router.route("/:id").get(getBusinessById);
-
-// 📊 Business Rating Routes
-router.route("/:businessId/rate").post(verifyJWT, rateBusiness);
-router.route("/:businessId/rating-summary").get(getBusinessRatingSummary);
-
 // 📝 Post Settings Routes
 router.route("/toggle-product-posts").post(verifyJWT, toggleProductPosts);
 router.route("/toggle-service-posts").post(verifyJWT, toggleServicePosts);
@@ -80,9 +73,16 @@ router.route("/toggle-service-posts").post(verifyJWT, toggleServicePosts);
 router.route("/upload-document").post(verifyJWT, upload.single("document"), uploadVerificationDocument);
 
 // 🏦 Bank Details Routes
-router.route("/bank-details").post(verifyJWT, addOrUpdateBankDetails);
+router.route("/bank-details").post(verifyJWT, upload.single("paymentQRCode"), addOrUpdateBankDetails);
 router.route("/bank-details").get(verifyJWT, getBankDetails);
 router.route("/bank-details").delete(verifyJWT, deleteBankDetails);
+
+// Get business by ID (public access) - MUST be after all static routes to avoid catching them as :id
+router.route("/:id").get(getBusinessById);
+
+// 📊 Business Rating Routes
+router.route("/:businessId/rate").post(verifyJWT, rateBusiness);
+router.route("/:businessId/rating-summary").get(getBusinessRatingSummary);
 
 // Helper route to update existing businesses with active subscriptions (admin only)
 router.route("/admin/update-active-businesses").post(optionalVerifyJWT, updateExistingActiveBusinesses);

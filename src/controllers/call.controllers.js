@@ -2,9 +2,9 @@ import Call from '../models/call.models.js';
 import Chat from '../models/chat.models.js';
 import Message from '../models/message.models.js';
 import { User } from '../models/user.models.js';
-import { ApiError } from '../utlis/ApiError.js';
-import { ApiResponse } from '../utlis/ApiResponse.js';
-import { asyncHandler } from '../utlis/asyncHandler.js';
+import { ApiError } from '../utils/ApiError.js';
+import { ApiResponse } from '../utils/ApiResponse.js';
+import { asyncHandler } from '../utils/asyncHandler.js';
 import socketManager from '../config/socket.js';
 import mongoose from 'mongoose';
 import { sendNotification } from '../config/firebase-admin.config.js';
@@ -39,7 +39,6 @@ const cleanupStaleCalls = async () => {
         });
 
         for (const call of staleCalls) {
-            console.log(`🧹 Cleaning up stale call: ${call._id}`);
 
             // Update call status
             call.status = 'missed';
@@ -58,7 +57,6 @@ const cleanupStaleCalls = async () => {
         }
 
         if (staleCalls.length > 0) {
-            console.log(`🧹 Cleaned up ${staleCalls.length} stale calls`);
         }
     } catch (error) {
         console.error('❌ Error during call cleanup:', error);
@@ -103,7 +101,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { receiverId, chatId, callType } = req.body;
 
-    console.log('🚀 Call initiation request:', { currentUserId, receiverId, chatId, callType });
 
     // Validate input
     if (!receiverId || !chatId || !callType) {
@@ -118,7 +115,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
 
     try {
         // Validate chat permissions and fetch receiver in parallel (optimize)
-        console.log('🔍 Validating chat and fetching receiver (parallel)...');
         const [chat, receiver] = await Promise.all([
             validateChatPermissions(chatId, currentUserId, receiverId),
             User.findById(receiverId).lean() // Use lean() for faster query
@@ -136,7 +132,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
         }
 
         // Use transaction to prevent race conditions
-        console.log('💾 Creating call record with transaction...');
         const session = await mongoose.startSession();
         let newCall;
 
@@ -176,7 +171,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
                 });
 
                 await newCall.save({ session });
-                console.log('✅ Call record created successfully:', { callId: newCall._id });
             });
         } finally {
             await session.endSession();
@@ -186,14 +180,12 @@ export const initiateCall = asyncHandler(async (req, res) => {
         // This indicates the call is actively ringing for the receiver
         try {
             await Call.findByIdAndUpdate(newCall._id, { status: 'ringing' });
-            console.log('📞 Call status updated to ringing for receiver notification');
         } catch (statusError) {
             console.error('❌ Error updating call status to ringing:', statusError);
             // Don't fail the entire call initiation if status update fails
         }
 
         // Populate the call with user details (optimized with lean)
-        console.log('📋 Populating call details...');
         const populatedCall = await Call.findById(newCall._id)
             .populate('participants', 'username fullName profileImageUrl')
             .populate('initiator', 'username fullName profileImageUrl')
@@ -205,7 +197,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
             const streamService = (await import('../config/stream.config.js')).default;
 
             if (streamService.isConfigured()) {
-                console.log('📞 Creating Stream.io call...');
 
                 // Register users in Stream.io
                 await streamService.upsertUsers([
@@ -246,7 +237,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
                     expiresAt: callerToken.expiresAt
                 };
 
-                console.log('✅ Stream.io call created and tokens generated');
             } else {
                 console.warn('⚠️ Stream.io not configured - calls will not work properly');
             }
@@ -256,20 +246,14 @@ export const initiateCall = asyncHandler(async (req, res) => {
         }
 
         // Send FCM push notification to receiver (fire-and-forget, non-blocking)
-        console.log('🔔 Preparing FCM notification...');
-        console.log('📱 Receiver FCM token present:', !!receiver.fcmToken);
-        console.log('🔥 Firebase Admin initialized:', !!sendNotification);
 
         let fcmSent = false;
 
         if (receiver.fcmToken) {
-            console.log('📤 FCM token found, initiating send...');
-            console.log('📤 Token preview:', receiver.fcmToken.substring(0, 20) + '...');
 
             // Don't await - fire and forget to avoid blocking the response
             (async () => {
                 try {
-                    console.log('🚀 FCM: Starting async send operation...');
 
                     const notification = {
                         title: `Incoming ${callType} call`,
@@ -287,23 +271,9 @@ export const initiateCall = asyncHandler(async (req, res) => {
                         status: 'ringing' // Include status so receiver knows call is ringing
                     };
 
-                    console.log('📦 FCM payload:', {
-                        title: notification.title,
-                        body: notification.body,
-                        dataKeys: Object.keys(data)
-                    });
-
                     const fcmResult = await sendNotification(receiver.fcmToken, notification, data);
 
-                    console.log('📬 FCM send completed, result:', {
-                        success: fcmResult.success,
-                        invalidToken: fcmResult.invalidToken,
-                        hasMessageId: !!fcmResult.messageId,
-                        hasError: !!fcmResult.error
-                    });
-
                     if (fcmResult.success) {
-                        console.log('✅ FCM notification sent successfully! MessageId:', fcmResult.messageId);
                     } else {
                         console.error('❌ FCM notification failed!');
                         console.error('❌ Error message:', fcmResult.error);
@@ -312,7 +282,6 @@ export const initiateCall = asyncHandler(async (req, res) => {
 
                         // If token is invalid, remove it from user
                         if (fcmResult.invalidToken) {
-                            console.log('🗑️ Removing invalid FCM token from user:', receiverId);
                             await User.findByIdAndUpdate(receiverId, {
                                 fcmToken: null,
                                 fcmTokenUpdatedAt: null
@@ -336,11 +305,9 @@ export const initiateCall = asyncHandler(async (req, res) => {
                 receiverUsername: receiver.username,
                 fcmTokenExists: !!receiver.fcmToken
             });
-            console.log('⚠️ Will rely on Socket.IO for notification delivery');
         }
 
         // Emit call initiation via socket (as backup or if FCM failed)
-        console.log('📡 Emitting socket events...');
         if (socketManager.isReady()) {
             const callData = {
                 callId: newCall._id,
@@ -362,14 +329,10 @@ export const initiateCall = asyncHandler(async (req, res) => {
                 timestamp: new Date()
             };
 
-            console.log('📡 Emitting incoming_call to receiver:', receiverId, 'for call:', newCall._id);
-            console.log('   Receiver ID type:', typeof receiverId);
-            console.log('   Call data:', JSON.stringify(callData).substring(0, 300));
 
             // Ensure receiverId is string
             const receiverIdStr = receiverId.toString();
             socketManager.emitToUser(receiverIdStr, 'incoming_call', callData);
-            console.log('✅ incoming_call event emitted successfully');
         } else {
             console.error('❌ Socket manager not ready - cannot emit incoming_call event');
 
@@ -382,21 +345,18 @@ export const initiateCall = asyncHandler(async (req, res) => {
         // Create a call message in the chat (non-blocking, fire-and-forget)
         (async () => {
             try {
-                console.log('💬 Creating call message...');
                 const callMessage = new Message({
                     chatId,
                     sender: currentUserId,
                     message: `${callType} call ${callType === 'voice' ? '📞' : '📹'}`,
-                    messageType: 'text'
+                    messageType: 'call'
                 });
                 await callMessage.save();
-                console.log('✅ Call message created');
             } catch (messageError) {
                 console.warn('⚠️ Failed to create call message (non-critical):', messageError.message);
             }
         })();
 
-        console.log('🎉 Call initiated successfully:', { callId: newCall._id });
         res.status(201).json(
             new ApiResponse(201, {
                 ...populatedCall,
@@ -421,7 +381,6 @@ export const acceptCall = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { callId } = req.params;
 
-    console.log('📞 Call acceptance request:', { callId, currentUserId });
 
     // Validate call ID format
     if (!isValidObjectId(callId)) {
@@ -442,13 +401,6 @@ export const acceptCall = asyncHandler(async (req, res) => {
                 console.error('❌ Call not found:', callId);
                 throw new ApiError(404, 'Call not found');
             }
-
-            console.log('📋 Call found:', {
-                callId: call._id,
-                status: call.status,
-                initiatedAt: call.initiatedAt,
-                endedAt: call.endedAt
-            });
 
             // Check if user is a participant
             const participantIds = call.participants.map(p => p.toString());
@@ -488,7 +440,6 @@ export const acceptCall = asyncHandler(async (req, res) => {
             await call.save({ session });
 
             updatedCall = call;
-            console.log('✅ Call status updated to connecting');
         });
     } catch (error) {
         console.error('❌ Transaction failed:', error);
@@ -516,7 +467,6 @@ export const acceptCall = asyncHandler(async (req, res) => {
                 token: receiverToken.token,
                 expiresAt: receiverToken.expiresAt
             };
-            console.log('✅ Generated Stream.io token for receiver');
         }
     } catch (streamError) {
         console.error('❌ Error generating Stream.io token for receiver:', streamError);
@@ -548,7 +498,6 @@ export const acceptCall = asyncHandler(async (req, res) => {
 
     // CRITICAL FIX: Emit to receiver FIRST with Stream.io connection details (prevents loading state)
     // This ensures the phone app gets immediate feedback and can connect to Stream.io
-    console.log('📡 Emitting call acceptance confirmation to receiver:', currentUserId.toString());
     safeEmitToUser(currentUserId.toString(), 'call_accepted', {
         ...callAcceptedData,
         isReceiver: true, // Flag to indicate this is confirmation for the receiver
@@ -557,12 +506,10 @@ export const acceptCall = asyncHandler(async (req, res) => {
     });
 
     // Then emit to other participants (caller)
-    console.log('📡 Emitting call acceptance to other participants:', otherParticipants);
     otherParticipants.forEach(participantId => {
         safeEmitToUser(participantId, 'call_accepted', callAcceptedData);
     });
 
-    console.log('🎉 Call accepted successfully:', { callId });
 
     // Include Stream.io connection details in HTTP response as fallback
     // This ensures phone app has connection details even if socket event is missed
@@ -581,7 +528,6 @@ export const declineCall = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { callId } = req.params;
 
-    console.log('🚫 Call decline request:', { callId, currentUserId });
 
     // Validate call ID format
     if (!isValidObjectId(callId)) {
@@ -602,12 +548,6 @@ export const declineCall = asyncHandler(async (req, res) => {
                 console.error('❌ Call not found:', callId);
                 throw new ApiError(404, 'Call not found');
             }
-
-            console.log('📋 Call found:', {
-                callId: call._id,
-                status: call.status,
-                initiator: call.initiator
-            });
 
             // Check if user is a participant
             const participantIds = call.participants.map(p => p.toString());
@@ -632,7 +572,6 @@ export const declineCall = asyncHandler(async (req, res) => {
 
             await call.save({ session });
             updatedCall = call;
-            console.log('✅ Call status updated to declined');
         });
     } catch (error) {
         console.error('❌ Transaction failed:', error);
@@ -650,7 +589,6 @@ export const declineCall = asyncHandler(async (req, res) => {
     const participantIds = populatedCall.participants.map(p => p._id.toString());
     const otherParticipants = participantIds.filter(id => id !== currentUserId.toString());
 
-    console.log('📡 Emitting call decline to participants:', otherParticipants);
     otherParticipants.forEach(participantId => {
         safeEmitToUser(participantId, 'call_declined', {
             callId,
@@ -664,7 +602,6 @@ export const declineCall = asyncHandler(async (req, res) => {
         });
     });
 
-    console.log('🎉 Call declined successfully:', { callId });
     res.status(200).json(
         new ApiResponse(200, populatedCall, 'Call declined successfully')
     );
@@ -676,7 +613,6 @@ export const endCall = asyncHandler(async (req, res) => {
     const { callId } = req.params;
     const { endReason = 'normal' } = req.body;
 
-    console.log('📵 Call end request:', { callId, currentUserId, endReason });
 
     // Validate call ID format
     if (!isValidObjectId(callId)) {
@@ -704,16 +640,6 @@ export const endCall = asyncHandler(async (req, res) => {
                 console.error('❌ Call not found:', callId);
                 throw new ApiError(404, 'Call not found');
             }
-
-            console.log('📋 Call found for ending:', {
-                callId: call._id,
-                status: call.status,
-                hasStarted: !!call.startedAt,
-                initiatedAt: call.initiatedAt,
-                ageInSeconds: Math.floor((Date.now() - call.initiatedAt) / 1000),
-                requestedBy: currentUserId,
-                requestedReason: endReason
-            });
 
             // Check if user is a participant
             const participantIds = call.participants.map(p => p.toString());
@@ -743,12 +669,10 @@ export const endCall = asyncHandler(async (req, res) => {
             // If call was never started (e.g., ended during ringing), set startedAt to now for duration calculation
             if (!call.startedAt) {
                 call.startedAt = call.endedAt;
-                console.log('⏱️ Call ended before being started, setting startedAt = endedAt');
             }
 
             await call.save({ session });
             updatedCall = call;
-            console.log('✅ Call status updated to ended');
         });
     } catch (error) {
         console.error('❌ Transaction failed:', error);
@@ -816,13 +740,6 @@ export const endCall = asyncHandler(async (req, res) => {
         timestamp: new Date()
     };
 
-    console.log('📡 Emitting call end to participants:', {
-        allParticipants: participantIds,
-        otherParticipants: otherParticipants,
-        currentUserId: currentUserId.toString(),
-        callStatus: populatedCall.status
-    });
-
     // CRITICAL FIX: Emit to ALL participants including the one who ended the call
     // This ensures the phone app gets immediate notification and updates UI
     // Emit synchronously to all participants to ensure immediate delivery
@@ -832,21 +749,13 @@ export const endCall = asyncHandler(async (req, res) => {
             isInitiator: participantId === currentUserId.toString(), // Flag to indicate who ended
             shouldDismiss: true // Explicit flag to dismiss incoming call UI on phone app
         });
-        console.log(`✅ Emitted 'call_ended' to participant: ${participantId} with dismiss flag`);
     });
 
     // Also emit to other participants specifically (for backwards compatibility)
     if (otherParticipants.length > 0) {
-        console.log(`📡 Also notifying ${otherParticipants.length} other participant(s)`);
     } else {
         console.warn('⚠️ No other participants found to notify about call end');
     }
-
-    console.log('🎉 Call ended successfully:', {
-        callId,
-        duration: populatedCall.duration,
-        formattedDuration: populatedCall.formattedDuration
-    });
 
     res.status(200).json(
         new ApiResponse(200, populatedCall, 'Call ended successfully')
@@ -859,7 +768,6 @@ export const updateCallStatus = asyncHandler(async (req, res) => {
     const { callId } = req.params;
     const { status, metadata } = req.body;
 
-    console.log('📊 Call status update request:', { callId, currentUserId, status, metadata });
 
     // Validate call ID format
     if (!isValidObjectId(callId)) {
@@ -893,12 +801,6 @@ export const updateCallStatus = asyncHandler(async (req, res) => {
                 throw new ApiError(404, 'Call not found');
             }
 
-            console.log('📋 Call found:', {
-                callId: call._id,
-                currentStatus: call.status,
-                newStatus: status
-            });
-
             // Check if user is a participant
             const participantIds = call.participants.map(p => p.toString());
             if (!participantIds.includes(currentUserId.toString())) {
@@ -919,18 +821,15 @@ export const updateCallStatus = asyncHandler(async (req, res) => {
             call.status = status;
             if (metadata) {
                 call.metadata = { ...call.metadata, ...metadata };
-                console.log('📝 Updated call metadata:', metadata);
             }
 
             // Set startedAt when call becomes active
             if (status === 'active' && !call.startedAt) {
                 call.startedAt = new Date();
-                console.log('⏱️ Setting call startedAt timestamp');
             }
 
             await call.save({ session });
             updatedCall = call;
-            console.log('✅ Call status updated successfully');
         });
     } catch (error) {
         console.error('❌ Transaction failed:', error);
@@ -948,7 +847,6 @@ export const updateCallStatus = asyncHandler(async (req, res) => {
     const participantIds = populatedCall.participants.map(p => p._id.toString());
     const otherParticipants = participantIds.filter(id => id !== currentUserId.toString());
 
-    console.log('📡 Emitting status update to participants:', otherParticipants);
     otherParticipants.forEach(participantId => {
         safeEmitToUser(participantId, 'call_status_update', {
             callId,
@@ -959,7 +857,6 @@ export const updateCallStatus = asyncHandler(async (req, res) => {
         });
     });
 
-    console.log('🎉 Call status updated:', { callId, status });
     res.status(200).json(
         new ApiResponse(200, populatedCall, 'Call status updated successfully')
     );
@@ -1018,7 +915,6 @@ export const getCallStats = asyncHandler(async (req, res) => {
 export const forceEndActiveCalls = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
 
-    console.log('🧹 Force ending active calls for user:', currentUserId);
 
     // Find all active calls for this user
     const activeCalls = await Call.find({
@@ -1032,7 +928,6 @@ export const forceEndActiveCalls = asyncHandler(async (req, res) => {
         );
     }
 
-    console.log(`🧹 Found ${activeCalls.length} active call(s) to end`);
 
     const endedCalls = [];
 
@@ -1072,7 +967,6 @@ export const forceEndActiveCalls = asyncHandler(async (req, res) => {
                 duration: call.duration
             });
 
-            console.log(`✅ Force ended call: ${call._id}`);
         } catch (error) {
             console.error(`❌ Error ending call ${call._id}:`, error);
         }

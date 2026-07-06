@@ -126,26 +126,32 @@ export const getViewableUserIds = async (viewerId) => {
 
     let viewableUserIds;
 
+    // Base filter: exclude banned and deleted users from all feeds
+    // Use $nin instead of exact 'active' match so users without the field set (legacy records) are included
+    const activeUserFilter = { accountStatus: { $nin: ['deactivated', 'banned'] }, isDeleted: { $ne: true } };
+
     if (!viewerId) {
         // Anonymous users can only see public content
-        const publicUsers = await User.find({ privacy: 'public' }).select('_id').lean();
-        viewableUserIds = publicUsers.map(u => u._id.toString()); // ✅ Convert to string
+        const publicUsers = await User.find({ ...activeUserFilter, privacy: 'public' }).select('_id').lean();
+        viewableUserIds = publicUsers.map(u => u._id.toString());
     } else {
         // Get users the viewer follows
         const following = await Follower.find({ followerId: viewerId }).select('userId').lean();
-        const followingIds = following.map(f => f.userId.toString()); // ✅ Convert to string
+        const followingIds = following.map(f => f.userId.toString());
 
         // Add viewer's own ID
-        followingIds.push(viewerId.toString()); // ✅ Convert to string
+        followingIds.push(viewerId.toString());
 
-        // Get all public users not already in the following list
+        // Get all public active users not already in the following list
         const publicUsers = await User.find({
+            ...activeUserFilter,
             privacy: 'public',
             _id: { $nin: followingIds }
         }).select('_id').lean();
 
         // Combine following + own + public users
-        viewableUserIds = [...followingIds, ...publicUsers.map(u => u._id.toString())]; // ✅ Convert to string
+        // Note: viewer's own ID is always included even if they're somehow restricted
+        viewableUserIds = [...followingIds, ...publicUsers.map(u => u._id.toString())];
     }
 
     // Cache for 5 minutes

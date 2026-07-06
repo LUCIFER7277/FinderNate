@@ -27,7 +27,6 @@ const REDIS_CONFIG = {
 
     // Connection pooling to limit connections
     enableAutoPipelining: true,
-    maxRetriesPerRequest: 3,
 
     // Error handling
     enableOfflineQueue: true,
@@ -82,51 +81,55 @@ export const redisPublisher = new Redis(PUBLISHER_CONFIG);
 
 // Redis connection event handlers
 redisClient.on('connect', () => {
-    console.log(' Redis Client: Connected');
+    console.log('🔄 Redis Client connecting...');
 });
 
 redisClient.on('ready', () => {
-    console.log('=� Redis Client: Ready for operations');
+    console.log('✅ Redis Client ready');
+    // Enable expired-key events so the cache warmer can react on key expiry.
+    // 'E' = keyevent channel, 'x' = expired events only.
+    redisClient.config('SET', 'notify-keyspace-events', 'Ex').catch((err) => {
+        console.warn('⚠️ Could not set notify-keyspace-events:', err.message, '— set it manually in Redis config/dashboard');
+    });
 });
 
 redisClient.on('error', (err) => {
-    console.error('L Redis Client Error:', err);
+    console.error('❌ Redis Client Error:', err);
 });
 
 redisClient.on('close', () => {
-    console.log('� Redis Client: Connection closed');
+    console.warn('⚠️ Redis Client connection closed');
 });
 
 // PubSub Redis event handlers
 redisPubSub.on('connect', () => {
-    console.log(' Redis PubSub: Connected');
+    console.log('🔄 Redis PubSub connecting...');
 });
 
 redisPubSub.on('ready', () => {
-    console.log('🔄 Redis PubSub: Ready');
+    console.log('✅ Redis PubSub ready');
 });
 
 redisPubSub.on('error', (err) => {
-    console.error('L Redis PubSub Error:', err);
+    console.error('❌ Redis PubSub Error:', err);
 });
 
 // Publisher Redis event handlers
 redisPublisher.on('connect', () => {
-    console.log(' Redis Publisher: Connected');
+    console.log('🔄 Redis Publisher connecting...');
 });
 
 redisPublisher.on('ready', () => {
-    console.log('🔄 Redis Publisher: Ready');
+    console.log('✅ Redis Publisher ready');
 });
 
 redisPublisher.on('error', (err) => {
-    console.error('L Redis Publisher Error:', err);
+    console.error('❌ Redis Publisher Error:', err);
 });
 
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    console.log('=� Closing Redis connections...');
     await redisClient.quit();
     await redisPubSub.quit();
     await redisPublisher.quit();
@@ -143,6 +146,9 @@ export const redisHealthCheck = async () => {
         return false;
     }
 };
+
+// Max entries kept in the followers/following Redis LIST per user
+export const FOLLOW_LIST_MAX = 15;
 
 // Key generation utilities
 export const RedisKeys = {
@@ -177,13 +183,36 @@ export const RedisKeys = {
     tokenBlacklist: (jti) => `fn:auth:blacklist:${jti}`,
     authRateLimit: (ip) => `fn:auth:rate:${ip}`,
     
+    // Follow counts (real-time counters, updated on every follow/unfollow)
+    userFollowersCount: (userId) => `fn:user:${userId}:followers:count`,
+    userFollowingCount: (userId) => `fn:user:${userId}:following:count`,
+
+    // Post engagement counters
+    postLikesCount: (postId) => `fn:post:${postId}:likes:count`,
+    postCommentsCount: (postId) => `fn:post:${postId}:comments:count`,
+    postShareCount: (postId) => `fn:post:${postId}:shares:count`,
+
+    // Universal default search page (no query — browse mode)
+    defaultResults: () => 'fn:default:results',
+    defaultNewPosts: () => 'fn:default:new_posts', // Redis LIST of recently published postIds
+
+    userFollowingStatus: (userId) => `fn:user:${userId}:following:status`,
+
+    postLikedBy: (postId) => `fn:post:${postId}:likedby`,
+
+    userLikedSet: (userId) => `fn:user:${userId}:liked`,
     // Real-time features
     chatMessages: (chatId, page = 1) => `fn:chat:${chatId}:messages:p${page}`,
     onlineUsers: () => 'fn:live:online_users',
     tempUpload: (userId) => `fn:temp:upload:${userId}`,
+
+    // IP-based share rate limit: max 5 shares per IP per postId per day
+    shareIpLimit: (ip, postId) => {
+        const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        return `fn:share:ip:${ip}:${postId}:${date}`;
+    },
 };
 
-// TTL constants (in seconds)
 export const RedisTTL = {
     // Real-time data (short TTL)
     USER_FEED: 5 * 60,              // 5 minutes
@@ -207,9 +236,29 @@ export const RedisTTL = {
     TOKEN_BLACKLIST: 24 * 60 * 60,   // 24 hours
     RATE_LIMIT: 15 * 60,             // 15 minutes
     
+    // Follow counters (long-lived, updated in-place on follow/unfollow)
+    FOLLOW_COUNT: 7 * 24 * 60 * 60,  // 7 days
+    //  store the share count for post to avoid expensive recounting on every feed request and  reordering of the feed based on share count.
+    SHARE_COUNT: 7 * 24 * 60 * 60,   // 7 days
+    // Followers/following LISTs (top-15 newest IDs, rebuilt by cron or on expiry)
+    FOLLOW_LIST: 12 * 24 * 60 * 60,  // 12 days
+
+    // Post engagement counters + per-user like status Set
+    POST_ENGAGEMENT: 12 * 24 * 60 * 60,  // 7 days
+    POST_LIKE_STATUS: 12 * 24 * 60 * 60, // 7 days
+
+    // Per-user follow status Set
+    FOLLOW_STATUS: 7 * 24 * 60 * 60, // 7 days
+
+    // Universal default search snapshot (safety TTL; explicit invalidation preferred)
+    DEFAULT_RESULTS: 24 * 60 * 60, // 24 hours
+
     // Temporary data
     TEMP_UPLOAD: 10 * 60,            // 10 minutes
     PASSWORD_RESET: 15 * 60,         // 15 minutes
+
+    // IP-based share rate-limit window
+    SHARE_IP_LIMIT: 24 * 60 * 60,   // 24 hours
 };
 
 export default redisClient;

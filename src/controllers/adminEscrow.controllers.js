@@ -1,8 +1,17 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import mongoose from "mongoose";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Order from "../models/order.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
+import { getFeeRates } from "../utils/fees.utils.js";
+import {
+    generateCashfreeRefundId,
+    getCashfreeOrderStatus,
+    getCashfreeRefund,
+    createCashfreeRefund,
+} from "../config/cashfree.config.js";
+
 
 // Get escrow wallet dashboard (Admin only)
 export const getEscrowDashboard = asyncHandler(async (req, res) => {
@@ -19,6 +28,7 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
 
     const pendingOrders = await Order.countDocuments({ paymentStatus: 'held' });
     const disputedOrders = await Order.countDocuments({ orderStatus: 'disputed' });
+    const rejectedOrders = await Order.countDocuments({ orderStatus: 'seller_rejected' });
     const completedOrders = await Order.countDocuments({ paymentStatus: 'released' });
 
     return res.status(200).json(
@@ -27,6 +37,7 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
             orderStats: {
                 pendingRelease: pendingOrders,
                 disputed: disputedOrders,
+                sellerRejected: rejectedOrders,
                 completed: completedOrders
             }
         }, "Escrow dashboard fetched")
@@ -65,13 +76,14 @@ export const getEscrowTransactions = asyncHandler(async (req, res) => {
 export const getAllOrders = asyncHandler(async (req, res) => {
     const { status, paymentStatus, page = 1, limit = 20 } = req.query;
 
-    const query = {};
+    const query = { paymentStatus: { $ne: 'pending' } };
     if (status) query.orderStatus = status;
     if (paymentStatus) query.paymentStatus = paymentStatus;
 
     const orders = await Order.find(query)
         .populate('buyerId', 'fullName username profileImageUrl')
         .populate('sellerId', 'fullName username profileImageUrl')
+        .populate('postId', 'customization contentType')
         .sort({ createdAt: -1 })
         .skip((page - 1) * limit)
         .limit(parseInt(limit));
@@ -95,6 +107,7 @@ export const getDisputedOrders = asyncHandler(async (req, res) => {
     const orders = await Order.find({ orderStatus: 'disputed' })
         .populate('buyerId', 'fullName username profileImageUrl phoneNumber')
         .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'customization contentType')
         .sort({ 'dispute.createdAt': -1 })
         .skip((page - 1) * limit)
         .limit(parseInt(limit));
@@ -111,34 +124,89 @@ export const getDisputedOrders = asyncHandler(async (req, res) => {
     );
 });
 
+// Get seller-rejected orders pending admin refund (Admin only)
+export const getRejectedOrders = asyncHandler(async (req, res) => {
+    const { page = 1, limit = 20 } = req.query;
+
+    const orders = await Order.find({ orderStatus: 'seller_rejected' })
+        .populate('buyerId', 'fullName username profileImageUrl phoneNumber email')
+        .populate('sellerId', 'fullName username profileImageUrl phoneNumber')
+        .populate('postId', 'customization contentType')
+        .sort({ updatedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(parseInt(limit));
+
+    const total = await Order.countDocuments({ orderStatus: 'seller_rejected' });
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            orders,
+            total,
+            page: parseInt(page),
+            totalPages: Math.ceil(total / limit)
+        }, "Seller-rejected orders fetched")
+    );
+});
+
+// Helper: Calculate fee breakdown for an order
+const calculateFeeBreakdown = async (order) => {
+    const productPrice = order.productDetails.price || 0;
+
+    // Get shipping charges from the post
+    let shippingCharges = 0;
+    if (order.postId) {
+        const Post = (await import('../models/userPost.models.js')).default;
+        const post = await Post.findById(order.postId);
+        if (post) {
+            if (post.customization?.product) {
+                shippingCharges = post.customization.product.shippingCharges || 0;
+            } else if (post.customization?.service) {
+                shippingCharges = post.customization.service.shippingCharges || 0;
+            }
+        }
+    }
+
+    const { gatewayFeeRate, platformFeeRate } = await getFeeRates();
+    const gatewayFee = Number((productPrice * gatewayFeeRate).toFixed(2));
+    const platformFee = Number((productPrice * platformFeeRate).toFixed(2));
+    const totalDeductions = shippingCharges + gatewayFee + platformFee;
+    const buyerRefund = Math.max(0, order.amount - totalDeductions);
+    const sellerSettlement = shippingCharges;
+    const finerateEarnings = gatewayFee + platformFee;
+
+    return {
+        productPrice,
+        shippingCharges,
+        gatewayFee,
+        platformFee,
+        totalDeductions,
+        buyerRefund,
+        sellerSettlement,
+        finerateEarnings
+    };
+};
+
 // Resolve dispute (Admin only)
 export const resolveDispute = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
-    const { resolution, action, refundPercentage = 100 } = req.body;
+    const { resolution, action, forceResolve = false } = req.body;
 
     const order = await Order.findById(orderId);
-    if (!order) {
-        throw new ApiError(404, "Order not found");
-    }
+    if (!order) throw new ApiError(404, "Order not found");
 
     if (order.orderStatus !== 'disputed') {
         throw new ApiError(400, "Order is not in disputed status");
     }
 
-    // Handle edge case: payment already released or refunded
-    // In this case, just resolve the dispute without moving funds
+    // Edge case: already released or refunded — just close the dispute record
     if (order.paymentStatus === 'released' || order.paymentStatus === 'refunded') {
-        // Payment already processed, just update dispute status
         if (order.dispute) {
             order.dispute.status = 'resolved';
             order.dispute.resolution = resolution || `Dispute resolved - payment was already ${order.paymentStatus}`;
             order.dispute.resolvedAt = new Date();
         }
-
-        // Update order status based on current payment status
         order.orderStatus = order.paymentStatus === 'released' ? 'confirmed' : 'refunded';
         await order.save();
-
         return res.status(200).json(
             new ApiResponse(200, { order }, `Dispute resolved - payment was already ${order.paymentStatus}`)
         );
@@ -148,77 +216,146 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Payment is not in held status - cannot resolve");
     }
 
+    if (action !== 'refund_buyer' && action !== 'release_seller') {
+        throw new ApiError(400, "Invalid action. Use: refund_buyer or release_seller");
+    }
+
     const escrowWallet = await EscrowWallet.getWallet();
-    const { forceResolve = false } = req.body;
+    const insufficientBalance = escrowWallet.heldBalance < order.amount;
 
-    // Check for insufficient balance and handle accordingly
-    const requiredAmount = action === 'partial_refund'
-        ? Math.round(order.amount * (refundPercentage / 100))
-        : order.amount;
-
-    if (escrowWallet.heldBalance < requiredAmount) {
-        if (!forceResolve) {
-            throw new ApiError(400, `Insufficient escrow balance. Wallet has ${escrowWallet.heldBalance} held, but order requires ${requiredAmount}. Use forceResolve: true to resolve without fund movement.`);
-        }
-
-        // Force resolve - just update statuses without moving funds
-        if (order.dispute) {
-            order.dispute.status = 'resolved';
-            order.dispute.resolution = resolution || `Force resolved due to insufficient escrow balance`;
-            order.dispute.resolvedAt = new Date();
-        }
-
-        // Update order status based on action
-        if (action === 'refund_buyer' || action === 'partial_refund') {
-            order.paymentStatus = 'refunded';
-            order.orderStatus = 'refunded';
-        } else {
-            order.paymentStatus = 'released';
-            order.orderStatus = 'confirmed';
-        }
-
-        await order.save();
-
-        return res.status(200).json(
-            new ApiResponse(200, { order, warning: 'Force resolved without fund movement due to insufficient escrow balance' }, "Dispute force resolved")
+    if (insufficientBalance && !forceResolve) {
+        throw new ApiError(400,
+            `Insufficient escrow balance. Wallet has ₹${escrowWallet.heldBalance} held but order requires ₹${order.amount}. Use forceResolve: true to proceed without escrow movement.`
         );
     }
 
+    let feeBreakdown = null;
+    let refundStatus = null;
+    let refundId = null;
+
     if (action === 'refund_buyer') {
-        const refundAmount = Math.round(order.amount * (refundPercentage / 100));
-        await escrowWallet.refundFunds(order, refundAmount, `Refund for dispute resolution - Order ${order.orderNumber}`);
-        order.paymentStatus = 'refunded';
-        order.orderStatus = 'refunded';
-    } else if (action === 'release_seller') {
-        // No platform fee - release full amount to seller
-        await escrowWallet.releaseFunds(order, order.amount, 0, `Payment released after dispute resolution - Order ${order.orderNumber}`);
-        order.paymentStatus = 'released';
-        order.orderStatus = 'confirmed';
-    } else if (action === 'partial_refund') {
-        const refundAmount = Math.round(order.amount * (refundPercentage / 100));
-        const releaseAmount = order.amount - refundAmount;
-        await escrowWallet.refundFunds(order, refundAmount, `Partial refund - Order ${order.orderNumber}`);
-        if (releaseAmount > 0) {
-            await escrowWallet.releaseFunds(order, releaseAmount, 0, `Partial release - Order ${order.orderNumber}`);
+        if (!order.cashfreeOrderId) {
+            throw new ApiError(400, "No Cashfree order ID on this order - cannot initiate refund");
         }
-        order.paymentStatus = 'refunded';
-        order.orderStatus = 'refunded';
-    } else {
-        throw new ApiError(400, "Invalid action. Use: refund_buyer, release_seller, or partial_refund");
+
+        feeBreakdown = await calculateFeeBreakdown(order);
+
+        if (feeBreakdown.buyerRefund < 2) {
+            throw new ApiError(400, `Invalid refund value for the order: calculated refund ₹${feeBreakdown.buyerRefund} is below the minimum allowed (₹2)`);
+        }
+
+        refundId = order.refundId || generateCashfreeRefundId();
+
+        let cashfreeOrder;
+        try {
+            cashfreeOrder = await getCashfreeOrderStatus(order.cashfreeOrderId);
+        } catch (err) {
+            throw new ApiError(502, `Failed to fetch Cashfree order status: ${err.message}`);
+        }
+
+        if (cashfreeOrder.order_status !== 'PAID') {
+            throw new ApiError(400, `Cashfree order is not PAID (status: ${cashfreeOrder.order_status})`);
+        }
+
+        if (order
+            .refundId) {
+            try {
+                const existing = await getCashfreeRefund(order.cashfreeOrderId, order.refundId);
+                refundStatus = existing.refund_status;
+            } catch (error) {
+            }
+        }
+
+        if (refundStatus !== 'SUCCESS') {
+            let cfRefund;
+            try {
+                cfRefund = await createCashfreeRefund(
+                    order.cashfreeOrderId,
+                    refundId,
+                    feeBreakdown.buyerRefund,
+                    `Dispute resolution refund - Order ${order.orderNumber}`
+                );
+            } catch (err) {
+                 
+                throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
+            }
+            refundStatus = cfRefund.refund_status;
+        }
+
+        if (refundStatus !== 'SUCCESS' && refundStatus !== 'PENDING') {
+            throw new ApiError(502, `Cashfree refund in unexpected state: ${refundStatus}`);
+        }
     }
 
-    // Update dispute object if it exists
-    if (order.dispute) {
-        order.dispute.status = 'resolved';
-        order.dispute.resolution = resolution;
-        order.dispute.resolvedAt = new Date();
+    const session = await mongoose.startSession();
+    try {
+        await session.withTransaction(async () => {
+            if (action === 'refund_buyer') {
+                if (!insufficientBalance) {
+                    // Fetch wallet inside transaction for a consistent view
+                    const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+
+                    if (feeBreakdown.buyerRefund > 0) {
+                        await wallet.refundFunds(
+                            order,
+                            feeBreakdown.buyerRefund,
+                            `Dispute refund: ${resolution || 'resolved'} - Order ${order.orderNumber}`,
+                            { session }
+                        );
+                    }
+                    const remaining = order.amount - feeBreakdown.buyerRefund;
+                    if (remaining > 0) {
+                        await wallet.releaseFunds(
+                            order,
+                            remaining,
+                            feeBreakdown.finerateEarnings,
+                            `Fees & shipping settlement - Order ${order.orderNumber}`,
+                            { session }
+                        );
+                    }
+                }
+
+                order.refundId = refundId;
+                order.paymentStatus = 'refunded';
+                order.orderStatus = 'refunded';
+                order.platformFee = feeBreakdown.finerateEarnings;
+                order.sellerAmount = feeBreakdown.sellerSettlement;
+
+            } else {
+                // release_seller
+                const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+                await wallet.releaseFunds(
+                    order,
+                    order.amount,
+                    0,
+                    `Payment released after dispute resolution - Order ${order.orderNumber}`,
+                    { session }
+                );
+                order.paymentStatus = 'released';
+                order.orderStatus = 'confirmed';
+            }
+
+            if (order.dispute) {
+                order.dispute.status = 'resolved';
+                order.dispute.resolution = resolution || (insufficientBalance ? 'Force resolved - insufficient escrow balance' : 'Resolved by admin');
+                order.dispute.resolvedAt = new Date();
+            }
+            order.paymentReleasedAt = new Date();
+            await order.save({ session });
+        });
+    } finally {
+        await session.endSession();
     }
 
-    order.paymentReleasedAt = new Date();
-    await order.save();
+    const warning = insufficientBalance
+        ? 'Force resolved - escrow balance was insufficient; no escrow movement recorded'
+        : undefined;
 
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Dispute resolved successfully")
+        new ApiResponse(200,
+            { order, feeBreakdown, refundStatus, ...(warning && { warning }) },
+            "Dispute resolved successfully"
+        )
     );
 });
 
@@ -227,13 +364,33 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
     const { reason } = req.body;
 
-    const order = await Order.findById(orderId);
+    const order = await Order.findById(orderId)
+        .populate('sellerId', 'fullName username profileImageUrl businessProfileId');
+
     if (!order) {
         throw new ApiError(404, "Order not found");
     }
 
     if (order.paymentStatus !== 'held') {
         throw new ApiError(400, "Payment is not in held status");
+    }
+
+    // Get seller's bank details including QR code
+    let sellerBankDetails = null;
+    if (order.sellerId?.businessProfileId) {
+        const Business = (await import('../models/business.models.js')).default;
+        const business = await Business.findById(order.sellerId.businessProfileId).select('bankDetails');
+
+        if (business?.bankDetails) {
+            sellerBankDetails = {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: business.bankDetails.accountNumber,
+                ifscCode: business.bankDetails.ifscCode,
+                upiId: business.bankDetails.upiId,
+                paymentQRCode: business.bankDetails.paymentQRCode
+            };
+        }
     }
 
     const escrowWallet = await EscrowWallet.getWallet();
@@ -246,35 +403,170 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
     await order.save();
 
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Payment released manually")
+        new ApiResponse(200, {
+            order,
+            sellerBankDetails
+        }, "Payment released manually")
     );
 });
 
 // Manual refund payment (Admin only)
 export const manualRefundPayment = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
-    const { reason, refundPercentage = 100 } = req.body;
+    const { reason } = req.body;
 
     const order = await Order.findById(orderId);
-    if (!order) {
-        throw new ApiError(404, "Order not found");
-    }
+    if (!order) throw new ApiError(404, "Order not found");
 
     if (order.paymentStatus !== 'held') {
         throw new ApiError(400, "Payment is not in held status");
     }
 
-    const refundAmount = Math.round(order.amount * (refundPercentage / 100));
+    if (!order.cashfreeOrderId) {
+        throw new ApiError(400, "No Cashfree order ID on this order - cannot initiate refund");
+    }
 
-    const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.refundFunds(order, refundAmount, `Manual refund by admin: ${reason || 'Admin action'}`);
+    const feeBreakdown = await calculateFeeBreakdown(order);
 
-    order.paymentStatus = 'refunded';
-    order.orderStatus = 'refunded';
-    await order.save();
+    if (feeBreakdown.buyerRefund < 2) {
+        throw new ApiError(400, `Invalid refund value for the order: calculated refund ₹${feeBreakdown.buyerRefund} is below the minimum allowed (₹2)`);
+    }
+
+    const refundId = order.refundId || generateCashfreeRefundId();
+
+    // ── 1. Verify Cashfree order is PAID ──────────────────────────────────────
+    let cashfreeOrder;
+    try {
+        cashfreeOrder = await getCashfreeOrderStatus(order.cashfreeOrderId);
+    } catch (err) {
+        throw new ApiError(502, `Failed to fetch Cashfree order status: ${err.message}`);
+    }
+
+    if (cashfreeOrder.order_status !== 'PAID') {
+        throw new ApiError(400, `Cashfree order is not PAID (status: ${cashfreeOrder.order_status})`);
+    }
+
+    // ── 2. Check if a refund already exists ───────────────────────────────────
+    let refundStatus = null;
+
+    if (order.refundId) {
+        try {
+            const existing = await getCashfreeRefund(order.cashfreeOrderId, order.refundId);
+            refundStatus = existing.refund_status;
+        } catch (_) {
+            // Refund not found on Cashfree — will create below
+        }
+    }
+
+    // ── 3. Create refund on Cashfree if not already SUCCESS ───────────────────
+    if (refundStatus !== 'SUCCESS') {
+        let cfRefund;
+         
+        try {
+            cfRefund = await createCashfreeRefund(
+                order.cashfreeOrderId,
+                refundId,
+                feeBreakdown.buyerRefund,
+                `Admin manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`
+            );
+        } catch (err) {
+            console.log(err)
+            throw new ApiError(502, `Cashfree refund creation failed: ${err.message}`);
+        }
+        refundStatus = cfRefund.refund_status;
+    }
+
+    if (refundStatus !== 'SUCCESS' && refundStatus !== 'PENDING') {
+        throw new ApiError(502, `Cashfree refund in unexpected state: ${refundStatus}`);
+    }
+
+    // ── 4. Atomic DB update ───────────────────────────────────────────────────
+    const session = await mongoose.startSession();
+    try {
+        await session.withTransaction(async () => {
+            const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+
+            if (feeBreakdown.buyerRefund > 0) {
+                await wallet.refundFunds(
+                    order,
+                    feeBreakdown.buyerRefund,
+                    `Manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`,
+                    { session }
+                );
+            }
+
+            const remaining = order.amount - feeBreakdown.buyerRefund;
+            if (remaining > 0) {
+                await wallet.releaseFunds(
+                    order,
+                    remaining,
+                    feeBreakdown.finerateEarnings,
+                    `Fees & shipping settlement - Order ${order.orderNumber}`,
+                    { session }
+                );
+            }
+
+            order.refundId = refundId;
+            order.paymentStatus = 'refunded';
+            order.orderStatus = 'refunded';
+            order.platformFee = feeBreakdown.finerateEarnings;
+            order.sellerAmount = feeBreakdown.sellerSettlement;
+            await order.save({ session });
+        });
+    } finally {
+        await session.endSession();
+    }
 
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Payment refunded manually")
+        new ApiResponse(200, { order, feeBreakdown, refundStatus }, "Payment refunded manually")
+    );
+});
+
+// Get seller bank details by order ID (Admin only)
+export const getSellerBankDetailsByOrder = asyncHandler(async (req, res) => {
+    const { orderId } = req.params;
+
+    const order = await Order.findById(orderId)
+        .populate('sellerId', 'fullName username businessProfileId');
+
+    if (!order) {
+        throw new ApiError(404, "Order not found");
+    }
+
+    if (!order.sellerId) {
+        throw new ApiError(404, "Seller not found for this order");
+    }
+
+    // Get seller's bank details including QR code
+    let bankDetails = null;
+    if (order.sellerId.businessProfileId) {
+        const Business = (await import('../models/business.models.js')).default;
+        const business = await Business.findById(order.sellerId.businessProfileId).select('bankDetails');
+
+        if (business?.bankDetails) {
+            bankDetails = {
+                accountHolderName: business.bankDetails.accountHolderName,
+                bankName: business.bankDetails.bankName,
+                accountNumber: business.bankDetails.accountNumber,
+                ifscCode: business.bankDetails.ifscCode,
+                accountType: business.bankDetails.accountType,
+                upiId: business.bankDetails.upiId,
+                branchName: business.bankDetails.branchName,
+                paymentQRCode: business.bankDetails.paymentQRCode,
+                isVerified: business.bankDetails.isVerified
+            };
+        }
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            sellerInfo: {
+                fullName: order.sellerId.fullName,
+                username: order.sellerId.username
+            },
+            bankDetails,
+            hasBankDetails: !!bankDetails
+        }, "Seller bank details fetched successfully")
     );
 });
 
@@ -286,7 +578,10 @@ export const getOrderAnalytics = asyncHandler(async (req, res) => {
     if (startDate) dateFilter.$gte = new Date(startDate);
     if (endDate) dateFilter.$lte = new Date(endDate);
 
-    const matchStage = Object.keys(dateFilter).length ? { createdAt: dateFilter } : {};
+    const matchStage = {
+        paymentStatus: { $ne: 'pending' },
+        ...(Object.keys(dateFilter).length ? { createdAt: dateFilter } : {})
+    };
 
     const analytics = await Order.aggregate([
         { $match: matchStage },

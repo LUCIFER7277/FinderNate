@@ -1,20 +1,20 @@
 import mongoose from "mongoose";
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
-import Comment from "../models/comment.models.js";
 import PostInteraction from "../models/postInteraction.models.js";
 import Follower from "../models/follower.models.js";
-import { canViewPost } from "../utlis/postPrivacy.js";
+import { canViewPost } from "../utils/postPrivacy.js";
 import {
   canSharePost,
   generatePreviewHTML,
   sanitizePostForGuest,
   generateErrorHTML,
-} from "../utlis/shareUtils.js";
-import { redisClient } from "../config/redis.config.js";
+} from "../utils/shareUtils.js";
+import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
+import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 
 /**
  * Generate shareable link for a post
@@ -53,7 +53,7 @@ export const generatePostShareLink = asyncHandler(async (req, res) => {
   }
 
   // Generate shareable link
-  const shareLink = `https://findernate.com/p/${postId}`;
+  const shareLink = `https://findernate.com/r/${postId}`;
 
   // Prepare preview data
   const previewData = {
@@ -172,11 +172,9 @@ export const getSharedPost = asyncHandler(async (req, res) => {
 
   if (cachedData) {
     const parsed = JSON.parse(cachedData);
-    // If viewer exists, we need to recalculate isLikedBy
     if (viewer) {
-      const likes = await Like.find({ postId }).lean();
-      const likedByUserIds = likes.map((like) => like.userId.toString());
-      parsed.post.isLikedBy = likedByUserIds.includes(viewer._id.toString());
+      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+      parsed.post.isLikedBy = likedSet.has(postId.toString());
     }
     return res
       .status(200)
@@ -245,13 +243,9 @@ export const getSharedPost = asyncHandler(async (req, res) => {
     }
   }
 
-  // Fetch engagement data
-  const likes = await Like.find({ postId }).lean();
-  const comments = await Comment.find({ postId }).lean();
-
-  const likedByUserIds = likes.map((like) => like.userId.toString());
   if (viewer) {
-    post.isLikedBy = likedByUserIds.includes(viewer._id.toString());
+    const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+    post.isLikedBy = likedSet.has(postId.toString());
   }
 
   // Get top 3 users who liked
@@ -267,7 +261,7 @@ export const getSharedPost = asyncHandler(async (req, res) => {
   const responseData = {
     post: sanitizedPost,
     shareMetadata: {
-      shareUrl: `https://findernate.com/p/${postId}`,
+      shareUrl: `https://findernate.com/r/${postId}`,
       canShare: true,
       viewerCanInteract: !!viewer,
     },
@@ -278,7 +272,7 @@ export const getSharedPost = asyncHandler(async (req, res) => {
   const cacheData = {
     post: sanitizePostForGuest(post, null),
     shareMetadata: {
-      shareUrl: `https://findernate.com/p/${postId}`,
+      shareUrl: `https://findernate.com/r/${postId}`,
       canShare: true,
       viewerCanInteract: false,
     },
@@ -310,11 +304,9 @@ export const getSharedReel = asyncHandler(async (req, res) => {
 
   if (cachedData) {
     const parsed = JSON.parse(cachedData);
-    // If viewer exists, we need to recalculate isLikedBy
     if (viewer) {
-      const likes = await Like.find({ postId }).lean();
-      const likedByUserIds = likes.map((like) => like.userId.toString());
-      parsed.post.isLikedBy = likedByUserIds.includes(viewer._id.toString());
+      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+      parsed.post.isLikedBy = likedSet.has(postId.toString());
     }
     return res
       .status(200)
@@ -388,13 +380,9 @@ export const getSharedReel = asyncHandler(async (req, res) => {
     }
   }
 
-  // Fetch engagement data
-  const likes = await Like.find({ postId }).lean();
-  const comments = await Comment.find({ postId }).lean();
-
-  const likedByUserIds = likes.map((like) => like.userId.toString());
   if (viewer) {
-    post.isLikedBy = likedByUserIds.includes(viewer._id.toString());
+    const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+    post.isLikedBy = likedSet.has(postId.toString());
   }
 
   // Get top 3 users who liked
@@ -546,6 +534,17 @@ export const trackShare = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid post ID");
   }
 
+  // IP-based rate limit: max 5 shares per IP per postId per day
+  const ip = req.ip || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 'unknown';
+  const ipLimitKey = RedisKeys.shareIpLimit(ip, postId);
+  const ipShareCount = await redisClient.incr(ipLimitKey);
+  if (ipShareCount === 1) {
+    await redisClient.expire(ipLimitKey, RedisTTL.SHARE_IP_LIMIT);
+  }
+  if (ipShareCount > 5) {
+    throw new ApiError(429, "Share limit reached. You can share this post up to 5 times per day.");
+  }
+
   // Find post
   const post = await Post.findById(postId);
 
@@ -558,11 +557,26 @@ export const trackShare = asyncHandler(async (req, res) => {
   if (!shareCheck.canShare) {
     throw new ApiError(403, shareCheck.reason);
   }
+  let shareCount;
+  try {
+    const results = await redisClient
+      .multi()
+      .incr(RedisKeys.postShareCount(postId))
+      .expire(RedisKeys.postShareCount(postId), RedisTTL.SHARE_COUNT)
+      .exec();
+    shareCount = results?.[0] ?? null;
+  } catch (_) {
+    
+  }
 
-  // Increment engagement counter
-  await Post.findByIdAndUpdate(postId, {
-    $inc: { "engagement.shares": 1 },
-  });
+  if (shareCount == null) {
+    const updated = await Post.findByIdAndUpdate(
+      postId,
+      { $inc: { "engagement.shares": 1 } },
+      { new: true }
+    ).select("engagement.shares");
+    shareCount = updated?.engagement?.shares ?? 0;
+  }
 
   // Create PostInteraction record
   await PostInteraction.create({
@@ -586,16 +600,13 @@ export const trackShare = asyncHandler(async (req, res) => {
               userAgent: req.get("user-agent"),
             },
           ],
-          $slice: -100, // Keep only last 100 share events
+          $slice: -100,
         },
       },
     });
   }
 
-  // Get updated share count
-  const updatedPost = await Post.findById(postId).select("engagement.shares");
-
-  // Invalidate cache
+  // Invalidate share-page cache
   await redisClient.del(`fn:share:post:${postId}`);
   await redisClient.del(`fn:share:reel:${postId}`);
 
@@ -603,8 +614,8 @@ export const trackShare = asyncHandler(async (req, res) => {
     new ApiResponse(
       200,
       {
-        shareCount: updatedPost.engagement.shares,
-        shareUrl: `https://findernate.com/${post.postType === "reel" || post.postType === "video" ? "r" : "p"}/${postId}`,
+        shareCount,
+        shareUrl: `https://findernate.com/r/${postId}`,
       },
       "Share tracked successfully"
     )

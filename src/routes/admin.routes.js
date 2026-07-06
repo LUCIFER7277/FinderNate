@@ -18,6 +18,7 @@ import {
     getAllUsers,
     updateUserStatus,
     verifyBlueTick,
+    deleteUser,
 
     // Business Management
     getAllBusinesses,
@@ -42,11 +43,13 @@ import {
     getEscrowTransactions,
     getAllOrders,
     getDisputedOrders,
+    getRejectedOrders,
     resolveDispute,
     manualReleasePayment,
     manualRefundPayment,
     getOrderAnalytics,
-    manualConfirmPayment
+    manualConfirmPayment,
+    getSellerBankDetailsByOrder
 } from "../controllers/adminEscrow.controllers.js";
 
 import {
@@ -57,6 +60,18 @@ import {
     testExpiryJob,
     getDashboard as getMonitoringDashboard
 } from "../controllers/monitoring.controllers.js";
+
+import {
+    debugUserChats,
+    cleanupProblematicChats
+} from "../controllers/admin/chat.controllers.js";
+
+import {
+    addSetting,
+    getSetting,
+    getAllSettings,
+    updateSetting
+} from "../controllers/admin/settings.controllers.js";
 
 import {
     verifyAdminJWT,
@@ -131,6 +146,11 @@ router.route("/users/:userId/status").put(
     updateUserStatus
 );
 
+router.route("/users/:userId").delete(
+    requirePermission('manageUsers'),
+    deleteUser
+);
+
 router.route("/users/:userId/blue-tick").put(
     requirePermission('manageUsers'),
     verifyBlueTick
@@ -183,10 +203,24 @@ router.route("/escrow/dashboard").get(getEscrowDashboard);
 router.route("/escrow/transactions").get(getEscrowTransactions);
 router.route("/escrow/orders").get(getAllOrders);
 router.route("/escrow/disputes").get(getDisputedOrders);
+router.route("/escrow/rejected").get(getRejectedOrders);
 router.route("/escrow/disputes/:orderId/resolve").post(resolveDispute);
 router.route("/escrow/orders/:orderId/release").post(manualReleasePayment);
 router.route("/escrow/orders/:orderId/refund").post(manualRefundPayment);
 router.route("/escrow/orders/:orderId/confirm").post(manualConfirmPayment);
+router.route("/escrow/orders/:orderId/seller-bank-details").get(getSellerBankDetailsByOrder);
 router.route("/escrow/analytics").get(getOrderAnalytics);
+
+// ===============================
+// SETTINGS ROUTES (admin-only)
+// ===============================
+router.route("/settings").post(addSetting).get(getAllSettings);
+router.route("/settings/:key").get(getSetting).put(updateSetting);
+
+// ===============================
+// CHAT MANAGEMENT ROUTES
+// ===============================
+router.route("/chats/debug").get(requirePermission('manageUsers'), debugUserChats);
+router.route("/chats/cleanup").post(requirePermission('manageUsers'), cleanupProblematicChats);
 
 export default router;

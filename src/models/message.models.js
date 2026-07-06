@@ -19,7 +19,7 @@ const MessageSchema = new mongoose.Schema({
     },
     messageType: {
         type: String,
-        enum: ['text', 'image', 'video', 'file', 'audio', 'location'],
+        enum: ['text', 'image', 'video', 'file', 'audio', 'location', 'payment_link', 'checkout', 'order_update', 'call', 'contact_seller'],
         default: 'text'
     },
     mediaUrl: String,
@@ -91,7 +91,129 @@ const MessageSchema = new mongoose.Schema({
             type: Date,
             default: Date.now
         }
-    }]
+    }],
+    // 🏷️ Product/Business reference for contact-initiated chats
+    productReference: {
+        postId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Post'
+        },
+        businessId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Business'
+        },
+        productName: String,
+        productImage: String,
+        productVideos: [{ url: String, thumbnailUrl: String }],
+        productPrice: Number,
+        productType: {
+            type: String,
+            enum: ['product', 'service', 'business']
+        },
+        productDescription: String,
+        location: String
+    },
+    // 📤 Forwarding support
+    forwardedFrom: {
+        messageId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Message'
+        },
+        chatId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Chat'
+        },
+        originalSender: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        }
+    },
+    isForwarded: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    // 📌 Pinning support
+    isPinned: {
+        type: Boolean,
+        default: false,
+        index: true
+    },
+    pinnedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    },
+    pinnedAt: Date,
+    // ✏️ Editing support
+    isEdited: {
+        type: Boolean,
+        default: false
+    },
+    originalContent: String, // Original content before edit
+    // 🎤 Voice message metadata
+    waveform: [Number], // For voice message visualization
+    // 🔗 Link preview cache
+    linkPreview: {
+        url: String,
+        title: String,
+        description: String,
+        image: String,
+        siteName: String,
+        fetchedAt: Date
+    },
+    // 🛒 Checkout details for in-chat checkout messages
+    checkoutDetails: {
+        postId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Post'
+        },
+        productName: String,
+        productDescription: String,
+        productImages: [String],
+        productCategory: String,
+        productType: {
+            type: String,
+            enum: ['product', 'service']
+        },
+        specifications: [{
+            key: String,
+            value: String
+        }],
+        variants: [{
+            name: String,
+            options: [String]
+        }],
+        deliveryOptions: String,
+        sellerLocation: String,
+        // Price breakdown
+        basePrice: Number,
+        shippingCharges: Number,
+        gstPercent: Number,
+        gstAmount: Number,
+        totalPrice: Number,
+        currency: {
+            type: String,
+            default: 'INR'
+        },
+        // Seller info
+        sellerId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User'
+        },
+        sellerName: String,
+        sellerUsername: String,
+        sellerAvatar: String,
+        // Payment link reference
+        paymentLinkId: String,
+        paymentUrl: String,
+        // Status tracking
+        checkoutStatus: {
+            type: String,
+            enum: ['pending', 'paid', 'expired'],
+            default: 'pending'
+        },
+        expiresAt: Date
+    }
 }, {
     timestamps: true,
     toJSON: { virtuals: true },
@@ -105,6 +227,8 @@ MessageSchema.index({ chatId: 1, isDeleted: 1, readBy: 1 }); // For unread count
 MessageSchema.index({ sender: 1, timestamp: -1 }); // For user's sent messages
 MessageSchema.index({ chatId: 1, 'deliveryStatus.userId': 1, 'deliveryStatus.status': 1 }); // For delivery status queries
 MessageSchema.index({ chatId: 1, deletedForEveryone: 1 }); // For deleted messages filtering
+MessageSchema.index({ chatId: 1, isPinned: 1, pinnedAt: -1 }); // For pinned messages queries
+MessageSchema.index({ chatId: 1, isForwarded: 1 }); // For forwarded messages queries
 
 // Virtual for unread status (per user)
 MessageSchema.virtual('isUnread').get(function () {

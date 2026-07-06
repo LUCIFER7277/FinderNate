@@ -1,11 +1,11 @@
-import { asyncHandler } from "../utlis/asyncHandler.js";
-import { ApiError } from "../utlis/ApiError.js";
-import { ApiResponse } from "../utlis/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
 import Comment from "../models/comment.models.js";
 import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
 import { createCommentNotification } from "./notification.controllers.js";
-import { addBadgesToNestedUsers } from "../utlis/userBadge.utils.js";
+import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 
 // Create a new comment (or reply)
 export const createComment = asyncHandler(async (req, res) => {
@@ -73,7 +73,7 @@ export const createComment = asyncHandler(async (req, res) => {
 
     // Populate user and replyToUser before returning
     const populatedComment = await Comment.findById(comment._id)
-        .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+        .populate('userId', 'username fullName profileImageUrl isBusinessProfile')
         .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
         .lean();
 
@@ -97,7 +97,11 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     // ✅ OPTIMIZED: Only fetch top-level comments (parentCommentId: null)
     const [comments, total] = await Promise.all([
         Comment.find({ postId, parentCommentId: null, isDeleted: false })
-            .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+            .populate({
+                path: 'userId',
+                select: 'username fullName profileImageUrl isBusinessProfile',
+                match: { accountStatus: 'active', isDeleted: { $ne: true } }
+            })
             .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
             .sort({ createdAt: 1 })
             .skip(skip)
@@ -106,8 +110,11 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
         Comment.countDocuments({ postId, parentCommentId: null, isDeleted: false })
     ]);
 
+    // Filter out comments from banned/deleted users (populate returns null userId when match fails)
+    const visibleComments = comments.filter(c => c.userId != null);
+
     // Populate likes from Like collection for each comment
-    const commentIds = comments.map(c => c._id);
+    const commentIds = visibleComments.map(c => c._id);
     const [likes, replyCounts] = await Promise.all([
         Like.find({ commentId: { $in: commentIds } })
             .populate('userId', 'username profileImageUrl fullName')
@@ -153,7 +160,7 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     });
 
     // Add likes and isLikedBy to each comment
-    const enrichedComments = comments.map(comment => {
+    const enrichedComments = visibleComments.map(comment => {
         const commentLikes = likesByComment[comment._id.toString()] || [];
         const isLikedBy = userId ? commentLikes.some(u => u._id.toString() === userId) : false;
 
@@ -208,7 +215,7 @@ export const getCommentById = asyncHandler(async (req, res) => {
     const skip = (pageNum - 1) * pageLimit;
 
     const comment = await Comment.findById(commentId)
-        .populate('userId', 'username fullName profileImageUrl bio location')
+        .populate('userId', 'username fullName profileImageUrl')
         .populate('replyToUserId', 'username fullName profileImageUrl')
         .lean();
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
@@ -230,7 +237,7 @@ export const getCommentById = asyncHandler(async (req, res) => {
                 ],
                 isDeleted: false
             })
-                .populate('userId', 'username fullName profileImageUrl bio location')
+                .populate('userId', 'username fullName profileImageUrl')
                 .populate('replyToUserId', 'username fullName profileImageUrl')
                 .sort({ createdAt: 1 })
                 .skip(skip)
@@ -254,7 +261,7 @@ export const getCommentById = asyncHandler(async (req, res) => {
 
         // Fetch and sort all descendants, then paginate
         replies = await Comment.find({ _id: { $in: allDescendantIds } })
-            .populate('userId', 'username fullName profileImageUrl bio location')
+            .populate('userId', 'username fullName profileImageUrl')
             .populate('replyToUserId', 'username fullName profileImageUrl')
             .sort({ createdAt: 1 })
             .skip(skip)
@@ -381,7 +388,7 @@ export const updateComment = asyncHandler(async (req, res) => {
         { content, isEdited: true },
         { new: true }
     )
-        .populate('userId', 'username fullName profileImageUrl bio location isBusinessProfile')
+        .populate('userId', 'username fullName profileImageUrl isBusinessProfile')
         .populate('replyToUserId', 'username fullName profileImageUrl isBusinessProfile')
         .lean();
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
