@@ -163,6 +163,7 @@ class SocketManager {
                         status: { $in: ['active', 'requested'] }
                     })
                         .select('_id')
+                        .sort({ updatedAt: -1 }) // most recently active first — unsorted, the 50 cap dropped users' newest chats
                         .limit(50) // Limit to prevent overload
                         .lean();
 
