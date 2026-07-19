@@ -225,6 +225,7 @@ import paymentRouter from "./routes/payment.routes.js";
 import orderRouter from "./routes/order.routes.js";
 import invoiceRouter from "./routes/invoice.routes.js";
 import legalRouter from "./routes/legal.routes.js";
+import diagnosticsRouter from "./routes/diagnostics.routes.js"; // DIAGNOSTICS HOOK (removable)
 
 
 
@@ -236,6 +237,7 @@ app.use("/api/v1/explore", exploreRouter);
 app.use("/api/v1/business", businessRouter);
 app.use("/api/v1/chats", chatRouter);
 app.use("/api/v1/media", mediaRouter);
+app.use("/api/v1/diagnostics", diagnosticsRouter); // DIAGNOSTICS HOOK (removable)
 app.use("/api/v1/suggestions", suggestedForYouRouter);
 app.use("/api/v1/business-owners", trendingBusinessOwnersRouter);
 app.use("/api/v1/contact-requests", contactRequestRouter);
