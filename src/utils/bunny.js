@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import axios from 'axios';
+import sharp from 'sharp';
 import { v4 as uuidv4 } from 'uuid';
 
 const BUNNY_CONFIG = {
@@ -22,6 +23,7 @@ const validateConfig = () => {
 // ── Original extension map (unchanged) ──────────────────────────────────────
 const MIME_TO_EXT = {
     'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp',
+    'image/avif': 'avif',
     'video/mp4': 'mp4', 'video/webm': 'webm', 'video/avi': 'avi',
     'video/quicktime': 'mov', 'video/x-ms-wmv': 'wmv', 'video/x-flv': 'flv',
     // Audio
@@ -57,6 +59,33 @@ const generateFilePath = (folder = "posts", originalName = null, fileType = null
 
 // ── ORIGINAL getFileType — unchanged for image/video detection ───────────────
 const getFileType = (buffer, originalName = null) => {
+    // AVIF is ISO-BMFF ('....ftypavif'), which would otherwise satisfy the
+    // video/mp4 signature below — so the brand check must come FIRST.
+    if (buffer.length >= 12 &&
+        buffer[4] === 0x66 && buffer[5] === 0x74 && buffer[6] === 0x79 && buffer[7] === 0x70) {
+        const brand = buffer.toString('ascii', 8, 12);
+        if (brand === 'avif' || brand === 'avis') {
+            return { mimeType: 'image/avif', isVideo: false, isImage: true, isAudio: false, isDocument: false };
+        }
+    }
+
+    // RIFF containers (WebP, WAV, AVI) share the same first four bytes — the
+    // subtype at offset 8 disambiguates them. Without this, WAV audio would
+    // match the image/webp signature below and be stored as an "image".
+    if (buffer.length >= 12 &&
+        buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+        const riffType = buffer.toString('ascii', 8, 12);
+        if (riffType === 'WEBP') {
+            return { mimeType: 'image/webp', isVideo: false, isImage: true, isAudio: false, isDocument: false };
+        }
+        if (riffType === 'WAVE') {
+            return { mimeType: 'audio/wav', isVideo: false, isImage: false, isAudio: true, isDocument: false };
+        }
+        if (riffType === 'AVI ') {
+            return { mimeType: 'video/avi', isVideo: true, isImage: false, isAudio: false, isDocument: false };
+        }
+    }
+
     // Original magic bytes (EXACTLY as they were before any changes)
     const signatures = {
         'image/jpeg': [0xFF, 0xD8, 0xFF],
@@ -85,7 +114,7 @@ const getFileType = (buffer, originalName = null) => {
         const ext = originalName.toLowerCase().split('.').pop();
         const extMap = {
             'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
-            'gif': 'image/gif', 'webp': 'image/webp',
+            'gif': 'image/gif', 'webp': 'image/webp', 'avif': 'image/avif',
             'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/avi',
             'mov': 'video/quicktime', 'wmv': 'video/x-ms-wmv', 'flv': 'video/x-flv',
         };
@@ -113,6 +142,48 @@ const getFileTypeFromHint = (mimeType) => ({
     isDocument: mimeType.startsWith('application/') || mimeType.startsWith('text/'),
 });
 
+// ── Web image optimization: convert to AVIF before storage ───────────────────
+// Source formats we re-encode. GIF is excluded (animation would be flattened),
+// AVIF is excluded (already converted), SVG never reaches here (no signature).
+const AVIF_CONVERTIBLE = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
+// Folders whose files must stay byte-identical originals (KYC/legal docs).
+const AVIF_SKIP_FOLDERS = new Set(['documents']);
+
+const AVIF_MAX_DIMENSION = 1920;   // longest edge cap for web delivery
+const AVIF_QUALITY = 55;           // visually transparent for photos at 1920px
+const AVIF_EFFORT = 4;             // encode-speed/size tradeoff (0-9)
+
+/**
+ * Re-encodes an image buffer as web-optimized AVIF: EXIF orientation baked in,
+ * metadata stripped, longest edge capped at AVIF_MAX_DIMENSION.
+ * Returns the AVIF buffer, or null when the input can't/shouldn't be converted
+ * (callers then store the original untouched).
+ */
+export const convertImageForWeb = async (buffer) => {
+    try {
+        const image = sharp(buffer, { failOn: 'none' });
+        // Animated inputs (animated WebP) would be flattened to their first
+        // frame — keep those as-is, same policy as GIF.
+        const metadata = await image.metadata();
+        if (metadata.pages && metadata.pages > 1) return null;
+
+        return await image
+            .rotate() // apply EXIF orientation, since metadata is stripped
+            .resize({
+                width: AVIF_MAX_DIMENSION,
+                height: AVIF_MAX_DIMENSION,
+                fit: 'inside',
+                withoutEnlargement: true,
+            })
+            .avif({ quality: AVIF_QUALITY, effort: AVIF_EFFORT })
+            .toBuffer();
+    } catch (error) {
+        console.error('AVIF conversion failed, storing original:', error.message);
+        return null;
+    }
+};
+
 // ── Upload buffer to Bunny.net ───────────────────────────────────────────────
 // mimeTypeHint: only pass for audio/doc types — images/videos use magic-byte detection
 export const uploadBufferToBunny = async (fileBuffer, folder = "posts", originalName = null, mimeTypeHint = null) => {
@@ -120,18 +191,41 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
         validateConfig();
 
         // Use hint only for audio/docs; fall back to original detection for images/videos
-        const fileType = mimeTypeHint
+        // Magic bytes win over the hint ONLY when they identify a convertible
+        // image — so a stale client mimetype (e.g. chat passing image/jpeg)
+        // can't bypass AVIF conversion, while audio/video/doc hints keep
+        // working exactly as before.
+        const detected = getFileType(fileBuffer, originalName);
+        const detectionWins = detected.isImage && AVIF_CONVERTIBLE.has(detected.mimeType);
+        const fileType = (mimeTypeHint && !detectionWins)
             ? getFileTypeFromHint(mimeTypeHint)
-            : getFileType(fileBuffer, originalName);
+            : detected;
 
-        const filePath = generateFilePath(folder, originalName, fileType);
+        // Web optimization: store user images as capped, metadata-stripped AVIF.
+        let uploadBuffer = fileBuffer;
+        let uploadFileType = fileType;
+        let uploadName = originalName;
+        if (fileType.isImage &&
+            AVIF_CONVERTIBLE.has(fileType.mimeType) &&
+            !AVIF_SKIP_FOLDERS.has(folder)) {
+            const avifBuffer = await convertImageForWeb(fileBuffer);
+            if (avifBuffer) {
+                uploadBuffer = avifBuffer;
+                uploadFileType = { mimeType: 'image/avif', isVideo: false, isImage: true, isAudio: false, isDocument: false };
+                // Null out originalName so the stored extension comes from the
+                // MIME map ('avif'), not the client filename (.jpg/.png).
+                uploadName = null;
+            }
+        }
+
+        const filePath = generateFilePath(folder, uploadName, uploadFileType);
         const uploadUrl = `${BUNNY_CONFIG.storageApiUrl}/${filePath}`;
 
-        const response = await axios.put(uploadUrl, fileBuffer, {
+        const response = await axios.put(uploadUrl, uploadBuffer, {
             headers: {
                 'AccessKey': BUNNY_CONFIG.accessKey,
-                'Content-Type': fileType.mimeType,
-                'Content-Length': fileBuffer.length,
+                'Content-Type': uploadFileType.mimeType,
+                'Content-Length': uploadBuffer.length,
             },
             maxContentLength: Infinity,
             maxBodyLength: Infinity,
@@ -144,16 +238,16 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
         const cdnUrl = `${BUNNY_CONFIG.cdnUrl}/${filePath}`;
 
         let thumbnailUrl = null;
-        if (fileType.isImage) {
+        if (uploadFileType.isImage) {
             thumbnailUrl = `${BUNNY_CONFIG.cdnUrl}/${filePath}?width=300&height=300&crop=fill`;
-        } else if (fileType.isVideo) {
+        } else if (uploadFileType.isVideo) {
             thumbnailUrl = `${BUNNY_CONFIG.cdnUrl}/${filePath}?thumbnail=1&width=300&height=300`;
         }
 
         let resourceType = 'image';
-        if (fileType.isVideo)    resourceType = 'video';
-        else if (fileType.isAudio)    resourceType = 'audio';
-        else if (fileType.isDocument) resourceType = 'raw';
+        if (uploadFileType.isVideo)    resourceType = 'video';
+        else if (uploadFileType.isAudio)    resourceType = 'audio';
+        else if (uploadFileType.isDocument) resourceType = 'raw';
 
         return {
             success: true,
@@ -161,8 +255,8 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
             public_id: filePath,
             resource_type: resourceType,
             thumbnailUrl,
-            format: originalName ? originalName.split('.').pop() : 'unknown',
-            bytes: fileBuffer.length,
+            format: filePath.split('.').pop(),
+            bytes: uploadBuffer.length,
             url: cdnUrl,
         };
 
@@ -225,4 +319,4 @@ export const generateOptimizedImageUrl = (url, options = {}) => {
     return qs ? `${url}?${qs}` : url;
 };
 
-export default { uploadBufferToBunny, deleteFromBunny, deleteMultipleFromBunny, isBunnyUrl, generateOptimizedImageUrl };
+export default { uploadBufferToBunny, deleteFromBunny, deleteMultipleFromBunny, isBunnyUrl, generateOptimizedImageUrl, convertImageForWeb };

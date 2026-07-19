@@ -4,7 +4,7 @@
   "main": "src/index.js",
   "type": "module",
   "engines": {
-    "node": ">=18.0.0",
+    "node": ">=18.17.0",
     "npm": ">=8.0.0"
   },
   "scripts": {
@@ -67,6 +67,7 @@
     "nodemailer": "^7.0.5",
     "qrcode": "^1.5.4",
     "razorpay": "^2.9.6",
+    "sharp": "^0.34.5",
     "socket.io": "^4.8.1",
     "typesense": "^3.0.6",
     "uuid": "^11.1.0",
