@@ -214,6 +214,17 @@ export const addMessage = asyncHandler(async (req, res) => {
         messageData.productReference = productReference;
     }
 
+    // Media sent by the mobile app is uploaded via /media/upload-single first
+    // and arrives here as a URL in `message` with no req.file, so accept the
+    // client-supplied metadata for those messages (validated/whitelisted).
+    const bodyDuration = Number(body.duration);
+    if (['audio', 'video'].includes(messageType) && Number.isFinite(bodyDuration) && bodyDuration > 0) {
+        messageData.duration = bodyDuration;
+    }
+    if (messageType === 'file' && typeof body.fileName === 'string' && body.fileName.trim()) {
+        messageData.fileName = body.fileName.trim();
+    }
+
     if (mediaFile) {
         // Per-type size limits
         const CHAT_MEDIA_LIMITS = {

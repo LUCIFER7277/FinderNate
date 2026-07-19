@@ -320,6 +320,7 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         followersCount,
         followingCount,
         postsCount,
+        isPrivate: targetUser.privacy === 'private',
         createdAt: targetUser.createdAt
     };
 

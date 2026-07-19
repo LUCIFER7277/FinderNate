@@ -131,8 +131,15 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
     const isOtpValid = await otpRecord.verifyOtp(otp);
     if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
 
-    await User.findOneAndUpdate({ email }, { $set: { isEmailVerified: true } });
+    const verifiedUser = await User.findOneAndUpdate({ email }, { $set: { isEmailVerified: true } });
     await AuthOtp.deleteOne({ _id: otpRecord._id });
+
+    // GET /users/profile serves a Redis-cached snapshot (1h TTL); without
+    // this, a profile refresh keeps returning isEmailVerified=false.
+    if (verifiedUser) {
+        const { UserCacheManager } = await import("../../utils/cache.utils.js");
+        await UserCacheManager.invalidateUserProfile(verifiedUser._id.toString());
+    }
 
     return res.status(200).json(new ApiResponse(200, { email, isEmailVerified: true }, "Email verified successfully"));
 });
@@ -295,6 +302,13 @@ const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
     });
 
     await AuthOtp.deleteOne({ _id: otpRecord._id });
+
+    // Invalidate the cached profile snapshot so the new phone/verified
+    // status is visible on the next profile fetch.
+    {
+        const { UserCacheManager } = await import("../../utils/cache.utils.js");
+        await UserCacheManager.invalidateUserProfile(userId.toString());
+    }
 
     return res.status(200).json(new ApiResponse(200, { phone, isPhoneVerified: true }, "Phone number verified and updated successfully"));
 });

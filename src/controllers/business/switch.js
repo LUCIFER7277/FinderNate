@@ -5,6 +5,14 @@ import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import mongoose from "mongoose";
 
+// GET /users/profile serves a Redis-cached snapshot (1h TTL); without this,
+// clients re-fetching the profile right after a switch read the old
+// isBusinessProfile and flip back.
+const invalidateProfileCache = async (userId) => {
+    const { UserCacheManager } = await import("../../utils/cache.utils.js");
+    await UserCacheManager.invalidateUserProfile(userId.toString());
+};
+
 // POST /api/v1/users/switch-to-business
 export const switchTobusinessprofile = asyncHandler(async (req, res) => {
     const userId = req.user._id;
@@ -19,6 +27,7 @@ export const switchTobusinessprofile = asyncHandler(async (req, res) => {
             user.isBusinessProfile = true;
             user.businessProfileId = business._id;
             await user.save();
+            await invalidateProfileCache(userId);
         }
 
         const businessObj = business.toObject();
@@ -45,6 +54,7 @@ export const switchTobusinessprofile = asyncHandler(async (req, res) => {
 
     user.isBusinessProfile = true;
     await user.save();
+    await invalidateProfileCache(userId);
 
     return res.status(200).json(
         new ApiResponse(200, {
@@ -69,6 +79,7 @@ export const switchToPersonalAccount = asyncHandler(async (req, res) => {
 
     user.isBusinessProfile = false;
     await user.save();
+    await invalidateProfileCache(userId);
 
     return res.status(200).json(
         new ApiResponse(200, {
