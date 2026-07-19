@@ -7,6 +7,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import { uploadBufferToBunny } from '../../utils/bunny.js';
 import socketManager from '../../config/socket.js';
 import { sendPushNotification } from '../pushNotification.controllers.js';
+import { sendNotification } from '../../config/firebase-admin.config.js';
 import notificationCache from '../../utils/notificationCache.utils.js';
 import { redisClient } from '../../config/redis.config.js';
 import { calculateMessageStatus } from '../../utils/messageStatus.utils.js';
@@ -337,7 +338,34 @@ export const addMessage = asyncHandler(async (req, res) => {
                     url: `/chats?chatId=${chatId}`
                 };
 
+                // Web-push (VAPID) for logged-in WEBSITE users.
                 await sendPushNotification(otherParticipants, notificationData);
+
+                // FCM push for MOBILE devices. The mobile app stores its device
+                // token on User.fcmToken (not in PushSubscription), so the
+                // web-push path above never reaches it — send FCM explicitly.
+                const recipients = await User.find({
+                    _id: { $in: otherParticipants },
+                    fcmToken: { $exists: true, $ne: null }
+                }).select('fcmToken');
+
+                for (const recipient of recipients) {
+                    try {
+                        await sendNotification(
+                            recipient.fcmToken,
+                            { title: notificationData.title, body: notificationData.body },
+                            {
+                                type: 'message',
+                                chatId: notificationData.chatId,
+                                messageId: notificationData.messageId,
+                                senderId: notificationData.senderId,
+                                url: notificationData.url
+                            }
+                        );
+                    } catch (fcmErr) {
+                        console.error('FCM send failed for a recipient:', fcmErr?.message || fcmErr);
+                    }
+                }
             }
         } catch (pushError) {
             console.error('Error sending push notification:', pushError);

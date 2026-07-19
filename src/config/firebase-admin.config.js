@@ -117,6 +117,11 @@ const sendNotification = async (fcmToken, notification, data = {}) => {
 
     const messaging = getMessaging();
 
+    // Route to the right Android channel: message pushes must NOT use the
+    // "calls" channel (call ringtone/heads-up). The app creates a "messages"
+    // channel for these.
+    const androidChannelId = data.type === 'message' ? 'messages' : 'calls';
+
     const message = {
       token: fcmToken,
       notification: {
@@ -134,7 +139,7 @@ const sendNotification = async (fcmToken, notification, data = {}) => {
       android: {
         priority: "high",
         notification: {
-          channelId: "calls",
+          channelId: androidChannelId,
           priority: "high",
           defaultVibrateTimings: true,
           sound: "default",
