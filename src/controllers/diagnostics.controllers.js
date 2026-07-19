@@ -29,6 +29,21 @@ const redact = (s) =>
         ? s.replace(BEARER_RX, '$1***').replace(JWT_RX, '***jwt***')
         : s;
 
+// Safely normalise one entry's `data` field. NEVER throws: an oversized or
+// unserialisable value can't fail the whole batch (which would 500 the request
+// and make the client retry the same poisoned batch forever). We drop `data`
+// rather than slice the JSON string mid-object (which would corrupt it).
+const safeData = (v) => {
+    try {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+        const raw = JSON.stringify(v);
+        if (raw.length > 4000) return { _truncated: raw.length };
+        return JSON.parse(redact(raw));
+    } catch {
+        return undefined;
+    }
+};
+
 // POST /api/v1/diagnostics
 // Body: { deviceId, sessionId?, source?, appVersion?, platform?, entries: [{ts, level, tag, message, data?}] }
 export const ingestDiagnostics = asyncHandler(async (req, res) => {
@@ -54,11 +69,9 @@ export const ingestDiagnostics = asyncHandler(async (req, res) => {
         level: String(e?.level || 'INFO').slice(0, 8),
         tag: String(e?.tag || '').slice(0, MAX_TAG_LEN),
         message: redact(String(e?.message || '').slice(0, MAX_MESSAGE_LEN)),
-        // Only keep small, plain-object context; anything else is dropped.
-        data:
-            e?.data && typeof e.data === 'object' && !Array.isArray(e.data)
-                ? JSON.parse(redact(JSON.stringify(e.data).slice(0, 4000)))
-                : undefined,
+        // Only keep small, plain-object context; oversized/unserialisable is
+        // dropped safely (never throws — see safeData).
+        data: safeData(e?.data),
     }));
 
     await DiagnosticLog.create({
