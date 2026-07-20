@@ -26,10 +26,26 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Password and confirm password do not match");
     }
 
+    // Usernames become part of a public URL (/userprofile/<username>), so they
+    // must be URL-safe. A username containing a space produced a %20 in the URL
+    // which no longer matched the stored value, and the profile 404'd with
+    // "Unable to load user profile". The model only does `trim`, which strips
+    // outer whitespace but happily stores "megha bhat".
+    // Validated here rather than on the schema on purpose: a schema-level
+    // `match` also runs when SAVING pre-existing users, and a few legacy
+    // accounts (e.g. "ravi@gmail.com") would then fail every future save.
+    const normalizedUsername = String(username).trim().toLowerCase();
+
+    if (!/^[a-z0-9._-]{3,30}$/.test(normalizedUsername)) {
+        throw new ApiError(400, "Username may only contain lowercase letters, numbers, dots, underscores and hyphens (3-30 characters), with no spaces", [
+            { field: "username", message: "Username may only contain letters, numbers, dots, underscores and hyphens — no spaces" }
+        ]);
+    }
+
     const [existingEmail, existingPhone, existingUsername] = await Promise.all([
         User.findOne({ email, isEmailVerified: true }),
         User.findOne({ phoneNumber: phoneNumber.trim() }),
-        User.findOne({ username: username.toLowerCase() })
+        User.findOne({ username: normalizedUsername })
     ]);
 
     const errors = [];
@@ -49,7 +65,7 @@ const registerUser = asyncHandler(async (req, res) => {
         {
             fullName,
             fullNameLower: fullName.toLowerCase(),
-            username: username.toLowerCase(),
+            username: normalizedUsername,
             email,
             password: hashedPassword,
             phoneNumber,
@@ -229,7 +245,9 @@ const loginUser = asyncHandler(async (req, res) => {
     if (email) {
         user = await User.findOne({ email });
     } else {
-        user = await User.findOne({ username: username.toLowerCase() });
+        // Trim as well as lowercase: a stray space from an autofilled login
+        // field would otherwise never match a stored username.
+        user = await User.findOne({ username: String(username).trim().toLowerCase() });
     }
 
     if (!user) {
