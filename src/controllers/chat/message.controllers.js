@@ -324,8 +324,14 @@ export const addMessage = asyncHandler(async (req, res) => {
             );
 
             if (otherParticipants.length > 0) {
-                const sender = await User.findById(currentUserId).select('username fullName');
+                const sender = await User.findById(currentUserId).select('username fullName profileImageUrl');
                 const senderName = sender?.fullName || sender?.username || 'Unknown User';
+                // Carried in the FCM data so tapping the notification can open
+                // the conversation with a populated header. The chat screen
+                // renders the name/avatar straight from its route arguments and
+                // does not fetch them, so without these the header would be
+                // blank on a notification-launched open.
+                const senderAvatar = sender?.profileImageUrl || '';
 
                 const notificationData = {
                     title: `New message from ${senderName}`,
@@ -359,6 +365,9 @@ export const addMessage = asyncHandler(async (req, res) => {
                                 chatId: notificationData.chatId,
                                 messageId: notificationData.messageId,
                                 senderId: notificationData.senderId,
+                                // FCM data values must be strings.
+                                senderName: String(senderName),
+                                senderAvatar: String(senderAvatar),
                                 url: notificationData.url
                             }
                         );
