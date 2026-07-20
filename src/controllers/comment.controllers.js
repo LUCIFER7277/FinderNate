@@ -6,6 +6,58 @@ import Post from "../models/userPost.models.js";
 import Like from "../models/like.models.js";
 import { createCommentNotification } from "./notification.controllers.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
+import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
+
+const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
+
+/**
+ * Keep post.engagement.comments and its Redis cache in step.
+ *
+ * Nothing used to maintain this counter: it was written as 0 when the post was
+ * created and never touched again, so every post reported 0 comments no matter
+ * how many existed. The website appeared to work only because it falls back to
+ * a localStorage cache it populates when the comments drawer is opened; the
+ * mobile app has no such cache and correctly displayed the 0 the API sent.
+ *
+ * REPLIES COUNT. A reply is an ordinary Comment document with parentCommentId
+ * set and it flows through createComment like any other, so a top-level comment
+ * with three replies totals four. This matches batchGetCommentsCount(), which
+ * counts every non-deleted comment for the post with no parent filter.
+ *
+ * Mirrors ensureLikesCount() in like.controllers.js. Best-effort on the cache:
+ * a Redis hiccup must never fail the user's comment, and the key carries a TTL
+ * so it self-heals from the database on the next read.
+ */
+async function adjustCommentsCount(postId, delta) {
+    try {
+        const updated = await Post.findByIdAndUpdate(
+            postId,
+            { $inc: { "engagement.comments": delta } },
+            { new: true, projection: { "engagement.comments": 1 } }
+        ).lean();
+
+        let count = updated?.engagement?.comments ?? 0;
+        // Historical data was never incremented, so a decrement can drive this
+        // negative. Clamp in the database rather than just in the response.
+        if (count < 0) {
+            await Post.findByIdAndUpdate(postId, {
+                $set: { "engagement.comments": 0 },
+            });
+            count = 0;
+        }
+
+        await redisClient.set(
+            RedisKeys.postCommentsCount(postId.toString()),
+            count,
+            "EX",
+            ENGAGEMENT_TTL
+        );
+        return count;
+    } catch (err) {
+        console.error("[Comments] failed to adjust comment count:", err?.message || err);
+        return null;
+    }
+}
 
 // Create a new comment (or reply)
 export const createComment = asyncHandler(async (req, res) => {
@@ -40,6 +92,9 @@ export const createComment = asyncHandler(async (req, res) => {
         rootCommentId,
         replyToUserId: finalReplyToUserId
     });
+
+    // Replies run through this same handler, so they are counted too.
+    await adjustCommentsCount(postId, 1);
 
     // Send notification to post owner (if not commenting on own post)
     try {
@@ -402,11 +457,20 @@ export const updateComment = asyncHandler(async (req, res) => {
 // Delete a comment (soft delete)
 export const deleteComment = asyncHandler(async (req, res) => {
     const { commentId } = req.params;
+    // Read first so an already-deleted comment cannot decrement the count twice
+    // (this is a soft delete, so the document survives and can be re-submitted).
+    const existing = await Comment.findById(commentId).select("postId isDeleted");
+    if (!existing) throw new ApiError(404, "Comment not found");
+
     const comment = await Comment.findByIdAndUpdate(
         commentId,
         { isDeleted: true },
         { new: true }
     );
-    if (!comment) throw new ApiError(404, "Comment not found");
+
+    if (!existing.isDeleted) {
+        await adjustCommentsCount(existing.postId, -1);
+    }
+
     return res.status(200).json(new ApiResponse(200, null, "Comment deleted successfully"));
 }); 

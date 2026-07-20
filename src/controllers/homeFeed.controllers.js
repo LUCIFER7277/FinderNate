@@ -15,7 +15,7 @@ import mongoose from 'mongoose';
 import { enrichWithRatings } from '../utils/reviewUtils.js';
 import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
 import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
-import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount} from '../utils/postEngagement.utils.js';
+import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount, batchSharedCount} from '../utils/postEngagement.utils.js';
 
 /**
  * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
@@ -56,9 +56,13 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             if (cached?.data?.feed?.length) {
                 const cachedPosts = cached.data.feed;
                 const cachedPostIds = cachedPosts.map(p => p._id);
-                const [likedSet, likeCountMap, likedByUsersMap, sharedCountMap] = await Promise.all([
+                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap] = await Promise.all([
                     userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
                     batchGetLikesCount(cachedPosts),
+                    // Comments were the one engagement metric NOT resolved live
+                    // here, so the feed served the stored engagement.comments —
+                    // which nothing maintained and was 0 on every post.
+                    batchGetCommentsCount(cachedPosts),
                     batchGetLikedByUsers(cachedPostIds),
                     batchSharedCount(cachedPosts)
                 ]);
@@ -72,6 +76,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                         engagement: {
                             ...post.engagement,
                             likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
+                            comments: commentCountMap.get(idStr) ?? post.engagement?.comments ?? 0,
                             shares: sharedCountMap.get(idStr) ?? post.engagement?.shares ?? 0
                         },
                         isLikedBy: likedSet.has(idStr),
@@ -286,10 +291,11 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        const [likedPostIds, likesByPost, likeCountMap, sharedCountMap] = await Promise.all([
+        const [likedPostIds, likesByPost, likeCountMap, commentCountMap, sharedCountMap] = await Promise.all([
             userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(postIds),
             batchGetLikesCount(posts),
+            batchGetCommentsCount(posts),
             batchSharedCount(posts)
         ]);
 
@@ -340,6 +346,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 engagement: {
                     ...post.engagement,
                     likes: likeCountMap.get(postIdStr) ?? post.engagement?.likes ?? 0,
+                    comments: commentCountMap.get(postIdStr) ?? post.engagement?.comments ?? 0,
                     shares: sharedCountMap.get(postIdStr) ?? post.engagement?.shares ?? 0
                 },
                 comments: commentsByPost.get(postIdStr) || [],
