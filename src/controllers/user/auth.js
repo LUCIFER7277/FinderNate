@@ -14,6 +14,8 @@ import {
     RESEND_COOLDOWN_MS,
 } from "./_helpers.js";
 
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const registerUser = asyncHandler(async (req, res) => {
     const { fullName, username, email, password, confirmPassword, phoneNumber, dateOfBirth, gender } = req.body;
     const request_type = 'phonenumber_verify';
@@ -133,12 +135,19 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
     }
 
     const uid = uuidv4();
+    //* This writes through User.collection — the RAW driver — so NONE of the
+    //* schema setters run. `email` is declared `trim: true, lowercase: true`,
+    //* but that only applies to Mongoose paths, so whatever case the user
+    //* typed was stored verbatim. Every later lookup goes through the model
+    //* (User.findOne({ email })), where Mongoose DOES lowercase the filter —
+    //* so a stored "Foo@Gmail.com" could never be matched and the account was
+    //* locked out of both email login and password reset. Normalise here.
     await User.collection.insertOne({
         uid,
         fullName: tempUser.fullName,
         fullNameLower: tempUser.fullNameLower,
-        username: tempUser.username,
-        email: tempUser.email,
+        username: String(tempUser.username).trim().toLowerCase(),
+        email: String(tempUser.email).trim().toLowerCase(),
         password: tempUser.password,
         phoneNumber: tempUser.phoneNumber,
         dateOfBirth: tempUser.dateOfBirth,
@@ -243,7 +252,14 @@ const loginUser = asyncHandler(async (req, res) => {
 
     let user;
     if (email) {
-        user = await User.findOne({ email });
+        // Normalise explicitly rather than relying on the schema's
+        // `lowercase: true`: registration used to insert through the raw
+        // driver, so historical documents hold mixed-case addresses. Matching
+        // case-insensitively here keeps those accounts reachable even before
+        // the stored values are migrated.
+        const normalisedEmail = String(email).trim().toLowerCase();
+        user = await User.findOne({ email: normalisedEmail })
+            || await User.findOne({ email: new RegExp(`^${escapeRegex(normalisedEmail)}$`, 'i') });
     } else {
         // Trim as well as lowercase: a stray space from an autofilled login
         // field would otherwise never match a stored username.

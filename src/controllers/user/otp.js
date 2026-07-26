@@ -11,6 +11,8 @@ import {
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
 
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const getOtpStatus = asyncHandler(async (req, res) => {
     const { identifier, type, purpose } = req.query;
 
@@ -156,9 +158,19 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     let type;
 
     if (email) {
-        user = await User.findOne({ email });
-        if (!user) throw new ApiError(404, "No account found with this email");
-        identifier = email;
+        //* Case-insensitive fallback: registration inserted through the raw
+        //* driver for a long time, so stored addresses can be mixed-case while
+        //* Mongoose lowercases this filter — those accounts got "No account
+        //* found with this email" even though they exist. Also accept a
+        //* username here, because the sign-in screen lets people log in with
+        //* either and they reasonably expect the same on password reset.
+        const normalised = String(email).trim().toLowerCase();
+        user = await User.findOne({ email: normalised })
+            || await User.findOne({ email: new RegExp(`^${escapeRegex(normalised)}$`, 'i') })
+            || await User.findOne({ username: normalised });
+        if (!user) throw new ApiError(404, "No account found with this email or username");
+        //* Send to the address on file, not the string that was typed.
+        identifier = user.email;
         type = "email";
     } else {
         user = await User.findOne({ phoneNumber: phone });
