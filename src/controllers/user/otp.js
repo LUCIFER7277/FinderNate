@@ -9,7 +9,9 @@ import {
     rateCheckAndUpsertOtp,
     generateAcessAndRefreshToken,
     resolveUserByIdentifier,
+    resolveAllUsersByIdentifier,
     canonicalIdentifier,
+    accountChoice,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
 
@@ -54,21 +56,15 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
     };
     const purpose = purposeMap[request_type] || "email_verification";
 
-    // Password-reset via phone
-    if (purpose === "password_reset" && phone) {
-        const user = await User.findOne({ phoneNumber: phone });
-        if (!user) throw new ApiError(404, "No account found with this phone number");
-
-        const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
-        const hashedOtp = await AuthOtp.hashOtp(plainOtp);
-        const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
-
-        await rateCheckAndUpsertOtp({ identifier: phone, type: "phone", purpose: "password_reset", hashedOtp, expiry });
-        await sendSms({ phone, otp: plainOtp, request_type: purpose });
-
-        return res.status(200).json(
-            new ApiResponse(200, { type: "phone", retryAfterSeconds: 60 }, "OTP sent to your phone successfully")
-        );
+    //* Password reset — email OR phone — is handled by sendPasswordResetOTP.
+    //* The web client posts here while the mobile app posts to
+    //* /users/send-reset-otp; they used to be two separate implementations and
+    //* only one of them got the identifier-matching fixes, so the same reset
+    //* worked in the app and failed on the web. Delegating keeps a single code
+    //* path: case-insensitive email, phone in any stored shape, username, and
+    //* the "which account?" step when a number is shared.
+    if (purpose === "password_reset") {
+        return sendPasswordResetOTP(req, res);
     }
 
     // Email-based OTP (verification or password-reset)
@@ -147,7 +143,7 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
 });
 
 const sendPasswordResetOTP = asyncHandler(async (req, res) => {
-    const { email, phone } = req.body;
+    const { email, phone, userId } = req.body;
 
     if (!email && !phone) {
         throw new ApiError(400, "Email or phone number is required");
@@ -157,9 +153,9 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     let identifier;
     let type;
 
-    //* resolveUserByIdentifier copes with the non-uniform stored data: emails
-    //* keep whatever case was typed at signup, and phone numbers exist both
-    //* bare ("9483122481") and prefixed ("+919483122481"). The web form always
+    //* The lookups cope with non-uniform stored data: emails keep whatever
+    //* case was typed at signup, and phone numbers exist both bare
+    //* ("9483122481") and prefixed ("+919483122481"). The web form always
     //* sends countryCode + number, so an exact match missed every bare one.
     //* Email also accepts a username, since sign-in takes either identifier.
     if (email) {
@@ -167,9 +163,28 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
         if (!user) throw new ApiError(404, "No account found with this email or username");
         type = "email";
     } else {
-        user = await resolveUserByIdentifier(phone);
-        if (!user) throw new ApiError(404, "No account found with this phone number");
         type = "phone";
+        //* One phone number can belong to several accounts. Picking the first
+        //* match would reset an arbitrary sibling's password, so when the
+        //* number is shared we return the candidates and let the user choose
+        //* instead of sending an OTP.
+        const matches = await resolveAllUsersByIdentifier(phone);
+        if (!matches.length) throw new ApiError(404, "No account found with this phone number");
+
+        if (userId) {
+            user = matches.find(u => String(u._id) === String(userId));
+            //* Only accounts on THIS number are selectable — an arbitrary id
+            //* must not be resettable by quoting someone else's number.
+            if (!user) throw new ApiError(400, "That account is not registered to this phone number");
+        } else if (matches.length > 1) {
+            return res.status(200).json(new ApiResponse(200, {
+                requiresAccountSelection: true,
+                type: "phone",
+                accounts: matches.map(accountChoice),
+            }, "Several accounts use this number. Choose which one to reset."));
+        } else {
+            user = matches[0];
+        }
     }
 
     //* File the OTP under the account's own identifier, never the typed
@@ -194,11 +209,21 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
                 <p>If you did not request this, please ignore this email.</p>`
         });
     } else {
-        await sendSms({ phone: identifier, otp: plainOtp, request_type: 'password_reset' });
+        //* The account's real number — `identifier` is scoped with the account
+        //* id for shared phones and is not a dialable number.
+        await sendSms({ phone: String(user.phoneNumber), otp: plainOtp, request_type: 'password_reset' });
     }
 
     return res.status(200).json(
-        new ApiResponse(200, { type, identifier, retryAfterSeconds: 60 }, `OTP sent to your ${type} successfully`)
+        new ApiResponse(200, {
+            type,
+            //* Echo this back to /reset-password. For a shared phone it is
+            //* scoped to the chosen account, so the right password is reset.
+            identifier,
+            userId: user._id,
+            username: user.username,
+            retryAfterSeconds: 60,
+        }, `OTP sent to your ${type} successfully`)
     );
 });
 
@@ -217,10 +242,17 @@ const resetPasswordWithOTP = asyncHandler(async (req, res) => {
     //* canonical identifier. The client echoes back whatever it typed, which
     //* need not match how the value is stored (case, or a "+91" the number was
     //* never saved with) — resolving first makes the two halves agree.
-    const user = await resolveUserByIdentifier(identifier);
+    //*
+    //* A phone identifier may arrive scoped as "<number>#<accountId>", which is
+    //* how a shared number picks out one account; that id is authoritative.
+    const raw = String(identifier);
+    const scopedAt = raw.indexOf('#');
+    const user = scopedAt > -1
+        ? await User.findById(raw.slice(scopedAt + 1))
+        : await resolveUserByIdentifier(raw);
     if (!user) throw new ApiError(404, "User not found");
 
-    const type = String(identifier).includes('@') ? "email" : "phone";
+    const type = raw.includes('@') ? "email" : "phone";
     const canonical = canonicalIdentifier(user, type);
 
     const otpRecord = await AuthOtp.findOne({ identifier: canonical, type, purpose: "password_reset" })

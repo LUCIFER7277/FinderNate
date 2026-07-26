@@ -52,9 +52,66 @@ export const resolveUserByIdentifier = async (identifier) => {
     return await User.findOne({ username: raw.toLowerCase() });
 };
 
-/** The stable identifier an OTP is filed under, so send and verify agree. */
+/**
+ * Every account reachable by this identifier.
+ *
+ * A phone number is NOT unique in this product — families and resellers share
+ * one, and some numbers are on a dozen accounts. Password reset therefore has
+ * to ask which account is meant rather than silently picking whichever
+ * document the database returned first.
+ */
+export const resolveAllUsersByIdentifier = async (identifier) => {
+    const raw = String(identifier || '').trim();
+    if (!raw) return [];
+
+    if (raw.includes('@')) {
+        const email = raw.toLowerCase();
+        const byEmail = await User.find({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') });
+        if (byEmail.length) return byEmail;
+        return await User.find({ username: email });
+    }
+
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length >= 7 && digits.length >= raw.replace(/[\s+\-()]/g, '').length) {
+        // Match on the last 10 digits so bare and +country-code storage
+        // (both exist in this data) resolve to the same set.
+        const last10 = digits.slice(-10);
+        return await User.find({ phoneNumber: new RegExp(`${escapeRegex(last10)}$`) });
+    }
+
+    return await User.find({ username: raw.toLowerCase() });
+};
+
+/**
+ * The stable identifier an OTP is filed under, so send and verify agree.
+ *
+ * Scoped by account id for phone, because one number can belong to several
+ * accounts — an OTP filed under the bare number alone would be overwritten by
+ * the next sibling account's request and reset the wrong password.
+ */
 export const canonicalIdentifier = (user, type) =>
-    type === 'email' ? user.email : String(user.phoneNumber);
+    type === 'email' ? user.email : `${String(user.phoneNumber)}#${user._id}`;
+
+/** Safe-to-return summary for the "which account?" chooser. */
+export const accountChoice = (user) => ({
+    id: user._id,
+    username: user.username,
+    fullName: user.fullName,
+    profileImageUrl: user.profileImageUrl || null,
+    // Masked: this list is returned for any phone number that is typed in, so
+    // it must not hand out full addresses to whoever guesses a number.
+    email: maskEmail(user.email),
+});
+
+export const maskEmail = (email) => {
+    const value = String(email || '');
+    const at = value.indexOf('@');
+    if (at < 1) return '';
+    const local = value.slice(0, at);
+    const domain = value.slice(at);
+    const shown = local.slice(0, Math.min(2, local.length));
+    return `${shown}${'*'.repeat(Math.max(local.length - shown.length, 1))}${domain}`;
+};
 
 export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry }) => {
     const existing = await AuthOtp.findOne({ identifier, type, purpose });
