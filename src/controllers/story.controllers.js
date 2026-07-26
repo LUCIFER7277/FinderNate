@@ -166,9 +166,13 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
         expiresAt: { $gt: now }
     }).sort({ createdAt: -1 });
 
-    // Filter out unpaid business stories (hide from ALL users including followers)
-    const filteredStories = stories.filter(story => {
-        // If it's a business account without active plan, hide the story
+    // Filter out unpaid business stories (hide from ALL users including
+    // followers) — but NEVER from their author. fetchStoriesFeed already
+    // exempts the owner ("Rule 1: Always show own stories"); this path did
+    // not, so an unpaid business account posted a status and then could not
+    // see it on its own profile, which reads as the upload having failed.
+    const filteredStories = stories.filter(() => {
+        if (isOwnStory) return true;
         if (isBusinessAccount && !hasActivePlan) {
             return false;
         }
