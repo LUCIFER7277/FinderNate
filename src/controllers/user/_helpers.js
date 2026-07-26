@@ -103,14 +103,28 @@ export const accountChoice = (user) => ({
     email: maskEmail(user.email),
 });
 
+/**
+ * Masks the local part but keeps BOTH ends visible — "me********30@gmail.com".
+ * Showing the tail as well as the head is what makes two of your own accounts
+ * on the same number tellable apart; the head alone often matches for both.
+ *
+ * Short local parts only get a head, because revealing both ends of a 4-letter
+ * name reveals the whole thing.
+ */
 export const maskEmail = (email) => {
     const value = String(email || '');
     const at = value.indexOf('@');
     if (at < 1) return '';
     const local = value.slice(0, at);
     const domain = value.slice(at);
-    const shown = local.slice(0, Math.min(2, local.length));
-    return `${shown}${'*'.repeat(Math.max(local.length - shown.length, 1))}${domain}`;
+
+    if (local.length <= 2) return `${local.slice(0, 1)}*${domain}`;
+    if (local.length <= 6) {
+        return `${local.slice(0, 1)}${'*'.repeat(local.length - 1)}${domain}`;
+    }
+    const head = local.slice(0, 2);
+    const tail = local.slice(-2);
+    return `${head}${'*'.repeat(local.length - 4)}${tail}${domain}`;
 };
 
 export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry }) => {
