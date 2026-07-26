@@ -49,45 +49,53 @@ export const resolveLocationCoordinates = async (parsedLocation) => {
     return resolvedLocation;
 };
 
+/**
+ * Uploads a post's media to Bunny.
+ *
+ * Uploads run in PARALLEL. The old sequential loop made an N-file post cost
+ * N x (AVIF re-encode + Bunny PUT), and since the client waits for this before
+ * it gets a response, a 6-post batch or a 10-image carousel routinely ran past
+ * the mobile client's request timeout — the app reported a failure for posts
+ * the server went on to create.
+ *
+ * `map` + `Promise.all` rather than push-as-you-go: media[0] is the cover, so
+ * the output order must match the input order.
+ *
+ * A custom video thumbnail is now uploaded ONCE rather than once per video.
+ */
 export const uploadPostMedia = async (files, customThumbnail) => {
-    const uploadedMedia = [];
-    for (const file of files) {
+    let videoThumbnailUrl = null;
+    if (customThumbnail) {
+        const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
+        videoThumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
+    }
+
+    const uploaded = await Promise.all(files.map(async (file) => {
+        let result;
         try {
-            const result = await uploadBufferToBunny(file.buffer, "posts");
-            if (result.resource_type === "image") {
-                const thumbnailUrl = generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' });
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: { width: result.width, height: result.height },
-                });
-            } else if (result.resource_type === "video") {
-                let thumbnailUrl;
-                if (customThumbnail) {
-                    const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
-                    thumbnailUrl = generateOptimizedImageUrl(thumbResult.secure_url, { width: 300, height: 300, crop: 'fill' });
-                } else {
-                    thumbnailUrl = `${result.secure_url}?thumbnail=1&width=300&height=300`;
-                }
-                uploadedMedia.push({
-                    type: result.resource_type,
-                    url: result.secure_url,
-                    thumbnailUrl,
-                    fileSize: result.bytes,
-                    format: result.format,
-                    duration: result.duration || null,
-                    dimensions: { width: result.width, height: result.height },
-                });
-            }
+            result = await uploadBufferToBunny(file.buffer, "posts");
         } catch {
             throw new ApiError(500, "Bunny.net upload failed");
         }
-    }
-    return uploadedMedia;
+
+        if (result.resource_type !== "image" && result.resource_type !== "video") return null;
+
+        const thumbnailUrl = result.resource_type === "image"
+            ? generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' })
+            : (videoThumbnailUrl || `${result.secure_url}?thumbnail=1&width=300&height=300`);
+
+        return {
+            type: result.resource_type,
+            url: result.secure_url,
+            thumbnailUrl,
+            fileSize: result.bytes,
+            format: result.format,
+            duration: result.duration || null,
+            dimensions: { width: result.width, height: result.height },
+        };
+    }));
+
+    return uploaded.filter(Boolean);
 };
 
 export const invalidatePostCaches = async (postId, userId) => {

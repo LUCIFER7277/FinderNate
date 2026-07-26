@@ -56,7 +56,26 @@ export const searchAllContent = async (req, res) => {
             }
         }
 
-        const searchRegex = new RegExp(q, 'i');
+        //* Tags are stored WITHOUT a leading '#' — the model's extractHashtags
+        //* strips it, and the composer writes bare words into
+        //* customization.*.tags. Building the regex from the raw query meant a
+        //* "#coffee" search could never match the tag "coffee", which is exactly
+        //* what the user sees on a post card ('#' there is a display prefix).
+        //* So: strip '#' once, up front, and keep a separate literal regex for
+        //* finding "#coffee" written inline in caption/description text.
+        //* Escaping also matters — the raw query used to go straight into
+        //* new RegExp(), so a query like "a(" threw and 500'd the search.
+        const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const rawQuery = String(q).trim();
+        const isHashtagQuery = rawQuery.startsWith('#');
+        const term = rawQuery.replace(/^#+/, '').trim();
+        if (!term) {
+            return res.status(400).json(new ApiResponse(400, null, "Search query 'q' is required"));
+        }
+        const safeTerm = escapeRegex(term);
+        const searchRegex = new RegExp(safeTerm, 'i');                 // '#'-free
+        const hashtagLiteralRegex = new RegExp(`#${safeTerm}`, 'i');   // "#foo" in prose
+        const tagExactRegex = new RegExp(`^${safeTerm}$`, 'i');        // whole tag
         const skip = (page - 1) * limit;
 
         // 🔍 Parse postType (can be comma-separated)
@@ -72,11 +91,10 @@ export const searchAllContent = async (req, res) => {
                 { caption: searchRegex },
                 { description: searchRegex },
 
-                // Hashtag search (both with and without # symbol)
+                // Hashtag search — hashtags are stored without the '#'
                 { hashtags: searchRegex },
-                { hashtags: new RegExp(q.replace(/^#/, ''), 'i') }, // Remove # if present
-                { caption: new RegExp(`#${q.replace(/^#/, '')}`, 'i') }, // Search for #hashtag in caption
-                { description: new RegExp(`#${q.replace(/^#/, '')}`, 'i') }, // Search for #hashtag in description
+                { caption: hashtagLiteralRegex },
+                { description: hashtagLiteralRegex },
 
                 // Business information search
                 { 'customization.business.businessName': searchRegex },
@@ -100,6 +118,10 @@ export const searchAllContent = async (req, res) => {
                 { 'customization.service.subcategory': searchRegex },
                 { 'customization.service.description': searchRegex },
                 { 'customization.service.tags': searchRegex },
+
+                // Normal/tweet post tags — omitted before, so tags added to an
+                // ordinary post were unsearchable by any query at all.
+                { 'customization.normal.tags': searchRegex },
 
                 // Location-based search
                 { 'customization.normal.location.name': searchRegex },
@@ -126,6 +148,22 @@ export const searchAllContent = async (req, res) => {
             contentType: { $in: ['normal', 'service', 'product', 'business'] },
             'settings.privacy': { $ne: 'private' }  // Never show private posts in search results
         };
+
+        //* An explicit '#' means the user wants a TAG search, not a keyword
+        //* search — "#coffee" should return posts tagged coffee, not every
+        //* caption that happens to mention coffee. Bare "coffee" keeps the
+        //* broad behaviour above.
+        if (isHashtagQuery) {
+            basePostFilters.$or = [
+                { hashtags: tagExactRegex },
+                { 'customization.normal.tags': tagExactRegex },
+                { 'customization.product.tags': tagExactRegex },
+                { 'customization.service.tags': tagExactRegex },
+                { 'customization.business.tags': tagExactRegex },
+                { caption: hashtagLiteralRegex },
+                { description: hashtagLiteralRegex },
+            ];
+        }
 
         // Filter by contentType
         if (contentType && contentType !== 'reel') {
@@ -221,14 +259,19 @@ export const searchAllContent = async (req, res) => {
 
         const businessUserIds = matchingBusinesses.map(business => business.userId);
 
-        // Add username search to post filters
-        if (matchingUserIds.length > 0) {
-            basePostFilters.$or.push({ userId: { $in: matchingUserIds } });
-        }
+        //* Author-based widening is deliberately skipped for a '#' query —
+        //* otherwise "#coffee" would drag in every post by a user named
+        //* "coffee_shop", which is not a hashtag result.
+        if (!isHashtagQuery) {
+            // Add username search to post filters
+            if (matchingUserIds.length > 0) {
+                basePostFilters.$or.push({ userId: { $in: matchingUserIds } });
+            }
 
-        // Add business category search to post filters
-        if (businessUserIds.length > 0) {
-            basePostFilters.$or.push({ userId: { $in: businessUserIds } });
+            // Add business category search to post filters
+            if (businessUserIds.length > 0) {
+                basePostFilters.$or.push({ userId: { $in: businessUserIds } });
+            }
         }
 
         // 📄 Fetch Posts (excluding blocked users)
@@ -344,11 +387,10 @@ export const searchAllContent = async (req, res) => {
                     { caption: searchRegex },
                     { description: searchRegex },
 
-                    // Enhanced hashtag search for reels
+                    // Hashtag search for reels — stored without the '#'
                     { hashtags: searchRegex },
-                    { hashtags: new RegExp(q.replace(/^#/, ''), 'i') }, // Remove # if present
-                    { caption: new RegExp(`#${q.replace(/^#/, '')}`, 'i') }, // Search for #hashtag in caption
-                    { description: new RegExp(`#${q.replace(/^#/, '')}`, 'i') }, // Search for #hashtag in description
+                    { caption: hashtagLiteralRegex },
+                    { description: hashtagLiteralRegex },
 
                     // Music and audio search
                     { 'audio.title': searchRegex },

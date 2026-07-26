@@ -129,14 +129,23 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             ];
         }
 
-        // Filter by tag if specified
+        // Filter by tag if specified.
+        // $in: [tag] was an exact, case-SENSITIVE match that never stripped a
+        // leading '#', so the "#Coffee" a user copies off a post card missed the
+        // stored tag "coffee" every time. Service tags were missing too.
         if (tag) {
+            const tagTerm = String(tag)
+                .replace(/^#+/, '')
+                .trim()
+                .replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const tagRegex = new RegExp(`^${tagTerm}$`, 'i');
             matchCriteria.$or = [
                 ...(matchCriteria.$or || []),
-                { "hashtags": { $in: [tag] } },
-                { "customization.normal.tags": { $in: [tag] } },
-                { "customization.product.tags": { $in: [tag] } },
-                { "customization.business.tags": { $in: [tag] } }
+                { "hashtags": tagRegex },
+                { "customization.normal.tags": tagRegex },
+                { "customization.product.tags": tagRegex },
+                { "customization.service.tags": tagRegex },
+                { "customization.business.tags": tagRegex }
             ];
         }
 

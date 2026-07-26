@@ -16,6 +16,17 @@ import { enrichWithRatings } from '../utils/reviewUtils.js';
 import { addBadgesToNestedUsers } from '../utils/userBadge.utils.js';
 import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
 import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount, batchSharedCount} from '../utils/postEngagement.utils.js';
+import { getFollowingIdSet, getPendingFollowRequestIdSet } from '../utils/followEngagement.utils.js';
+
+/**
+ * Author id of a feed post, whether userId is still a raw ObjectId (cache path)
+ * or has already been $lookup-ed into a populated object.
+ */
+const feedPostAuthorId = (post) => {
+    const author = post?.userId;
+    if (!author) return null;
+    return (author._id ?? author).toString();
+};
 
 /**
  * ✅ HOME FEED - DATE SORTED WITH PAID BUSINESS PRIORITY
@@ -56,7 +67,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             if (cached?.data?.feed?.length) {
                 const cachedPosts = cached.data.feed;
                 const cachedPostIds = cachedPosts.map(p => p._id);
-                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap] = await Promise.all([
+                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
                     userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
                     batchGetLikesCount(cachedPosts),
                     // Comments were the one engagement metric NOT resolved live
@@ -64,13 +75,19 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     // which nothing maintained and was 0 on every post.
                     batchGetCommentsCount(cachedPosts),
                     batchGetLikedByUsers(cachedPostIds),
-                    batchSharedCount(cachedPosts)
+                    batchSharedCount(cachedPosts),
+                    // Follow state is resolved live for the same reason isLikedBy
+                    // is: it is per-viewer and changes the moment they tap Follow,
+                    // so a cached value would show a stale "Follow" pill.
+                    getFollowingIdSet(userId),
+                    getPendingFollowRequestIdSet(userId)
                 ]);
 
                 cached.data.feed = cachedPosts.map(post => {
                     const idStr = post._id.toString();
                     const likedByUsers = likedByUsersMap.get(idStr) || [];
                     const preview = getLikedByPreview(likedByUsers, userId);
+                    const authorId = feedPostAuthorId(post);
                     return {
                         ...post,
                         engagement: {
@@ -82,6 +99,8 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                         isLikedBy: likedSet.has(idStr),
                         likedBy: likedByUsers,
                         likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+                        isFollowing: !!authorId && followingSet.has(authorId),
+                        isFollowRequested: !!authorId && requestedSet.has(authorId),
                     };
                 });
             }
@@ -291,12 +310,14 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        const [likedPostIds, likesByPost, likeCountMap, commentCountMap, sharedCountMap] = await Promise.all([
+        const [likedPostIds, likesByPost, likeCountMap, commentCountMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
             userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(postIds),
             batchGetLikesCount(posts),
             batchGetCommentsCount(posts),
-            batchSharedCount(posts)
+            batchSharedCount(posts),
+            getFollowingIdSet(userId),
+            getPendingFollowRequestIdSet(userId)
         ]);
 
         // ✅ 4. Get top comments efficiently (no nested queries)
@@ -340,6 +361,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             const postIdStr = post._id.toString();
             const likedByUsers = likesByPost.get(postIdStr) || [];
             const preview = getLikedByPreview(likedByUsers, userId);
+            const authorId = feedPostAuthorId(post);
 
             return {
                 ...post,
@@ -353,6 +375,8 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                 isLikedBy: likedPostIds.has(postIdStr),
                 likedBy: likedByUsers,
                 likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+                isFollowing: !!authorId && followingSet.has(authorId),
+                isFollowRequested: !!authorId && requestedSet.has(authorId),
             };
         });
         // Enrich posts with review/rating data
@@ -406,8 +430,10 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
             }
         }, "Home feed generated successfully");
 
-        // Cache WITHOUT isLikedBy — it's always computed fresh to avoid stale heart state
-        const feedToCache = feedDataWithBadges.map(({ isLikedBy, ...rest }) => rest);
+        // Cache WITHOUT the per-viewer state (isLikedBy, follow state) — all of it
+        // is computed fresh on the cache-hit path above to avoid a stale heart or
+        // a "Follow" pill on someone the viewer already follows.
+        const feedToCache = feedDataWithBadges.map(({ isLikedBy, isFollowing, isFollowRequested, ...rest }) => rest);
         const responseToCache = new ApiResponse(200, {
             feed: feedToCache,
             pagination: { page, limit, total: totalCount, totalPages: Math.ceil(totalCount / limit) }

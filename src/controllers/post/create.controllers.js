@@ -321,24 +321,35 @@ export const createBatchPosts = asyncHandler(async (req, res) => {
         });
     }
 
-    // Phase 2: Upload media for all posts + resolve locations
+    // Phase 2: Upload media for all posts + resolve locations.
+    // Run the posts concurrently. Sequentially, a 6-post batch cost 6 x the
+    // per-post upload time inside a single request the client is blocked on,
+    // which is what pushed batch creation past the mobile client's timeout.
+    // allSettled, not all: if one post fails we still need the URLs the posts
+    // that succeeded already put on Bunny, so cleanup can remove them.
     const allUploadedUrls = [];
-    const postMediaAndLocations = [];
 
-    try {
-        for (let i = 0; i < parsedPosts.length; i++) {
-            const p = parsedPosts[i];
-            const uploadedMedia = p.files.length ? await uploadPostMedia(p.files, p.thumbnail) : [];
-            allUploadedUrls.push(...uploadedMedia.map(m => m.url));
-            const resolvedLocation = await resolveLocationCoordinates(p.parsedLocation);
-            postMediaAndLocations.push({ uploadedMedia, resolvedLocation });
+    const settled = await Promise.allSettled(parsedPosts.map(async (p) => {
+        const uploadedMedia = p.files.length ? await uploadPostMedia(p.files, p.thumbnail) : [];
+        const resolvedLocation = await resolveLocationCoordinates(p.parsedLocation);
+        return { uploadedMedia, resolvedLocation };
+    }));
+
+    for (const outcome of settled) {
+        if (outcome.status === 'fulfilled') {
+            allUploadedUrls.push(...outcome.value.uploadedMedia.map(m => m.url));
         }
-    } catch (error) {
+    }
+
+    const failure = settled.find(outcome => outcome.status === 'rejected');
+    if (failure) {
         if (allUploadedUrls.length > 0) {
             await deleteMultipleFromBunny(allUploadedUrls).catch(err => console.error("Cleanup failed:", err));
         }
-        throw error;
+        throw failure.reason;
     }
+
+    const postMediaAndLocations = settled.map(outcome => outcome.value);
 
     // Phase 3: Create all posts in a transaction
     const session = await mongoose.startSession();

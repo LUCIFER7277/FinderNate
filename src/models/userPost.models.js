@@ -345,10 +345,30 @@ function extractHashtags(text) {
 }
 
 // 🪝 Pre-save hook for hashtags
+// Sources: '#word' typed inline in caption/description PLUS the tags entered in
+// the composer's "Add hashtags" field, which the create controllers store under
+// customization.<type>.tags. This hook used to take the caption/description
+// only and overwrite everything else, so `hashtags` was empty on virtually every
+// post and hashtag search had nothing to match.
 PostSchema.pre('save', function (next) {
     const captionHashtags = extractHashtags(this.caption || '');
     const descriptionHashtags = extractHashtags(this.description || '');
-    const combinedHashtags = new Set([...captionHashtags, ...descriptionHashtags]);
+
+    const customization = this.customization || {};
+    const explicitTags = [
+        ...(customization.normal?.tags || []),
+        ...(customization.product?.tags || []),
+        ...(customization.service?.tags || []),
+        ...(customization.business?.tags || []),
+    ]
+        .map(tag => String(tag).replace(/^#+/, '').trim().toLowerCase())
+        .filter(Boolean);
+
+    const combinedHashtags = new Set([
+        ...captionHashtags,
+        ...descriptionHashtags,
+        ...explicitTags,
+    ]);
     this.hashtags = [...combinedHashtags];
     next();
 });

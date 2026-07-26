@@ -1,5 +1,4 @@
 import Post from "../models/userPost.models.js";
-import Reel from "../models/reels.models.js";
 import Story from "../models/story.models.js";
 import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
@@ -14,7 +13,11 @@ import { getLikedByPreview } from "../utils/likedByPreview.utils.js";
 import mongoose from "mongoose";
 
 export const getExploreFeed = asyncHandler(async (req, res) => {
-    let { contentType = "all", sortBy = "time", page = 1, limit = 10 } = req.query;
+    let { contentType, types, postType, sortBy = "time", page = 1, limit = 10 } = req.query;
+    // `types` is the legacy name the mobile app sends. It was never read here,
+    // so contentType silently fell back to "all" on every app request — and the
+    // "all" branch used to strip every vibe out of the feed.
+    contentType = contentType || types || "all";
     page = parseInt(page, 10) || 1;
     limit = parseInt(limit, 10) || 10;
 
@@ -25,9 +28,6 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
     const viewerId = req.user?._id;
     const viewableUserIds = await getViewableUserIds(viewerId);
 
-    // Calculate how many reels and posts per page (default: 2 reels, rest posts)
-    const reelsPerPage = Math.min(2, limit);
-    const postsPerPage = limit - reelsPerPage;
 
     // If contentType=all, fetch all allowed types; otherwise, use the provided contentType
     const allowedTypes = ['normal', 'service', 'product', 'business'];
@@ -38,37 +38,28 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         postMatch.contentType = { $in: typeArray };
         // When filtering by specific contentType, include ALL postTypes (including reels)
     } else {
-        // When contentType=all, exclude reels to avoid duplication with separate reel query
-        postMatch.postType = { $ne: "reel" };
+        // Vibes (postType 'reel') used to be excluded here, on the assumption
+        // that the separate legacy-Reel query below covered them. It does not:
+        // real vibes are Post documents, and that collection is dead. The
+        // result was an explore/search browse feed with no vibes in it at all.
         postMatch.contentType = { $in: allowedTypes };
     }
 
-    // 1. Get reels (only when contentType=all, otherwise reels are included in posts query)
+    // Optional post-type narrowing (photo | reel | video | tweet). The app's
+    // filter sheet offers these chips; without this they had nowhere to go.
+    if (postType) {
+        const postTypeArray = postType.split(",").map(t => t.trim().toLowerCase()).filter(Boolean);
+        if (postTypeArray.length) postMatch.postType = { $in: postTypeArray };
+    }
+
+    // 1. Vibes now come from the posts query above (postType 'reel' on a Post
+    //    document). The old code sampled 2 documents from the legacy `Reel`
+    //    collection instead — that collection is dead, and its schema has no
+    //    media[]/postType/contentType, so the mobile client parsed those docs
+    //    into empty cards. Kept as an empty array because the enrichment and
+    //    response-shaping code below still reads it.
     let reels = [];
     let paidBusinessStories = []; // Initialize paid business stories array
-
-    if (contentType === "all") {
-        // For types=all, get reels separately to avoid duplication
-        const legacyReels = await Reel.aggregate([
-            { 
-                $match: { 
-                    isPublic: true,
-                    userId: { $in: viewableUserIds, $nin: blockedUsers }
-                } 
-            },
-            { $sample: { size: reelsPerPage } },
-            {
-                $project: {
-                    analytics: 0,
-                    __v: 0,
-                    "settings.customAudience": 0,
-                    "customization.normal": 0
-                }
-            }
-        ]);
-        reels = legacyReels;
-    }
-    // When filtering by specific contentType, reels are included in the posts query below
 
     // 2. Get posts using reliable find() method like homeFeed (not aggregation)
     const EXPLORE_LIMIT = 100;
@@ -174,17 +165,11 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         });
     }
 
-    // Paginate posts (adjust pagination based on whether reels are separate or included)
-    let skip, take;
-    if (contentType === "all") {
-        // For contentType=all, paginate only posts (reels handled separately)
-        skip = (page - 1) * postsPerPage;
-        take = postsPerPage;
-    } else {
-        // For specific contentType, paginate all content (posts + reels together)
-        skip = (page - 1) * limit;
-        take = limit;
-    }
+    // Paginate posts. Vibes are ordinary posts now, so every branch paginates
+    // the full page size — reserving postsPerPage for the (now empty) separate
+    // reel query would silently drop 2 items per page.
+    const skip = (page - 1) * limit;
+    const take = limit;
     posts = posts.slice(skip, skip + take);
 
     // Handle reel user details (reels need separate user fetching)
@@ -290,7 +275,9 @@ export const getExploreFeed = asyncHandler(async (req, res) => {
         }
 
         totalAvailable = allPosts.length;
-        totalPages = Math.ceil(totalAvailable / postsPerPage);
+        // Matches the `take = limit` slice above; postsPerPage would overstate
+        // the page count now that nothing is reserved for a separate reel query.
+        totalPages = Math.ceil(totalAvailable / limit);
         hasNextPage = page < totalPages;
     } else {
         // For specific contentType, everything comes from posts query

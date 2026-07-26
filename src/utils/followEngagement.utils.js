@@ -1,5 +1,6 @@
 import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from '../config/redis.config.js';
 import Follower from '../models/follower.models.js';
+import FollowRequest from '../models/followRequest.models.js';
 
 const FOLLOW_STATUS_TTL = RedisTTL.FOLLOW_STATUS;
 const COUNT_TTL         = RedisTTL.FOLLOW_COUNT;
@@ -85,6 +86,67 @@ export async function getFollowStatus(followerId, targetUserId) {
         return isMember === 1;
     } catch {
         return !!(await Follower.findOne({ userId: targetUserId, followerId }));
+    }
+}
+
+/**
+ * Bulk counterpart to getFollowStatus.
+ *
+ * Feeds need the follow state of every author on the page. Calling
+ * getFollowStatus once per post costs one Redis round-trip per post; this
+ * returns the viewer's whole following SET in one, so a feed can answer
+ * `isFollowing` with a Set.has() per post.
+ *
+ * Same seeding contract as getFollowStatus: key present → authoritative,
+ * key missing → seed from DB and cache.
+ */
+export async function getFollowingIdSet(followerId) {
+    if (!followerId) return new Set();
+    const setKey = RedisKeys.userFollowingStatus(followerId.toString());
+    try {
+        const [[, exists], [, members]] = await redisClient.pipeline()
+            .exists(setKey)
+            .smembers(setKey)
+            .exec();
+
+        if (exists) return new Set(members);
+
+        const allFollowing = await Follower.find({ followerId }).select('userId').lean();
+        const ids = allFollowing.map(f => f.userId.toString());
+        if (ids.length) {
+            await redisClient.pipeline()
+                .sadd(setKey, ...ids)
+                .expire(setKey, FOLLOW_STATUS_TTL)
+                .exec();
+        }
+        return new Set(ids);
+    } catch {
+        try {
+            const rows = await Follower.find({ followerId }).select('userId').lean();
+            return new Set(rows.map(f => f.userId.toString()));
+        } catch {
+            return new Set();
+        }
+    }
+}
+
+/**
+ * Recipients of the viewer's still-pending follow requests (private accounts).
+ *
+ * Without this a viewer who requested a private account sees a plain "Follow"
+ * pill again on the next refresh, and tapping it fails with
+ * "Follow request already sent".
+ */
+export async function getPendingFollowRequestIdSet(requesterId) {
+    if (!requesterId) return new Set();
+    try {
+        const rows = await FollowRequest.find({ requesterId, status: 'pending' })
+            .select('recipientId')
+            .lean();
+        return new Set(rows.map(r => r.recipientId.toString()));
+    } catch (err) {
+        console.error('[FollowEngagement] getPendingFollowRequestIdSet:', err.message);
+        return new Set();
     }
 }
 
