@@ -19,6 +19,7 @@ import {
     acceptChatRequest,
     declineChatRequest,
     updateChatTheme,
+    updateGroupImage,
     // Enhanced messaging features
     addReaction,
     removeReaction,
@@ -48,6 +49,9 @@ router.patch('/:chatId/decline', declineChatRequest);
 
 // Update chat theme color
 router.patch('/:chatId/theme', updateChatTheme);
+
+// Set, replace or clear a group's image (admins only; multipart 'groupImage')
+router.patch('/:chatId/group-image', upload.single('groupImage'), updateGroupImage);
 
 // Get messages for a chat
 router.get('/:chatId/messages', getChatMessages);

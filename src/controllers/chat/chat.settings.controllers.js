@@ -5,6 +5,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import socketManager from '../../config/socket.js';
 import { getPrivacyFilteredStatus } from '../../middlewares/messaging-privacy.middleware.js';
 import { safeEmitToChat } from './helpers.js';
+import { uploadBufferToBunny } from '../../utils/bunny.js';
 
 export const updateChatTheme = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
@@ -47,6 +48,76 @@ export const updateChatTheme = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, populatedChat, 'Chat theme updated successfully')
+    );
+});
+
+/**
+ * Set or replace a group's image.
+ *
+ * The Chat model has always had a `groupImage` field but nothing could write
+ * to it, so groups were stuck with the generic placeholder. Restricted to
+ * group admins — any participant being able to change the picture everyone
+ * sees is a small but real abuse vector.
+ *
+ * Send `multipart/form-data` with a `groupImage` file, or JSON
+ * `{ "groupImage": null }` to clear it.
+ */
+export const updateGroupImage = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+
+    const chat = await Chat.findOne({ _id: chatId, participants: currentUserId });
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+    if (chat.chatType !== 'group') {
+        throw new ApiError(400, 'Only group chats have a group image');
+    }
+
+    const isAdmin = (chat.admins || []).some(a => String(a) === String(currentUserId))
+        || String(chat.createdBy) === String(currentUserId);
+    if (!isAdmin) {
+        throw new ApiError(403, 'Only group admins can change the group image');
+    }
+
+    //* Explicit removal: { groupImage: null } with no file attached.
+    if (!req.file) {
+        if (req.body?.groupImage === null || req.body?.groupImage === 'null' || req.body?.groupImage === '') {
+            chat.groupImage = undefined;
+            await chat.save();
+            safeEmitToChat(chatId, 'group_image_updated', { chatId, groupImage: null, updatedBy: currentUserId });
+            return res.status(200).json(new ApiResponse(200, { groupImage: null }, 'Group image removed'));
+        }
+        throw new ApiError(400, 'No image supplied');
+    }
+
+    if (!String(req.file.mimetype || '').startsWith('image/')) {
+        throw new ApiError(400, 'Group image must be an image file');
+    }
+
+    const uploaded = await uploadBufferToBunny(
+        req.file.buffer,
+        'chat-groups',
+        req.file.originalname,
+        req.file.mimetype,
+    );
+
+    chat.groupImage = uploaded.secure_url;
+    await chat.save();
+
+    //* Tell everyone in the room, so open clients update without a refetch.
+    safeEmitToChat(chatId, 'group_image_updated', {
+        chatId,
+        groupImage: chat.groupImage,
+        updatedBy: {
+            _id: currentUserId,
+            username: req.user.username,
+            fullName: req.user.fullName,
+        },
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, { chatId, groupImage: chat.groupImage }, 'Group image updated successfully')
     );
 });
 
