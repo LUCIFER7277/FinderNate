@@ -16,8 +16,11 @@ import {
     maskPhone,
     assertValidPassword,
     clientIp,
+    normalizePhone,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
+
+const escapeRegexLocal = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const getOtpStatus = asyncHandler(async (req, res) => {
     const { identifier, type, purpose } = req.query;
@@ -318,26 +321,27 @@ const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
 
     if (!phone) throw new ApiError(400, "Phone number is required");
 
-    const existing = await User.findOne({ phoneNumber: phone, _id: { $ne: userId } });
-    if (existing) throw new ApiError(409, "This phone number is already in use by another account");
+    //* Deliberately NOT rejecting a number another account already uses —
+    //* several accounts may share one. Uniqueness lives on email + username.
+    const normalizedPhone = normalizePhone(phone);
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
-    await rateCheckAndUpsertOtp({ identifier: phone, type: "phone", purpose: "phone_verification", hashedOtp, expiry });
+    await rateCheckAndUpsertOtp({ identifier: normalizedPhone, type: "phone", purpose: "phone_verification", hashedOtp, expiry, ip: clientIp(req) });
 
     try {
-        await sendSms({ phone, otp: plainOtp, request_type });
+        await sendSms({ phone: normalizedPhone, otp: plainOtp, request_type });
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
-            console.warn(`[DEV] SMS failed (${smsErr.message}). Phone verification OTP for ${phone}: ${plainOtp}`);
+            console.warn(`[DEV] SMS failed (${smsErr.message}). Phone verification OTP for ${normalizedPhone}: ${plainOtp}`);
         } else {
             throw new ApiError(503, `Failed to send OTP: ${smsErr.message}`);
         }
     }
 
-    return res.status(200).json(new ApiResponse(200, { phone, retryAfterSeconds: 60 }, "OTP sent to your phone number"));
+    return res.status(200).json(new ApiResponse(200, { phone: normalizedPhone, retryAfterSeconds: 60 }, "OTP sent to your phone number"));
 });
 
 const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
@@ -346,8 +350,12 @@ const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
 
     if (!phone || !otp) throw new ApiError(400, "Phone number and OTP are required");
 
+    //* Filed under the normalised number, so normalise the lookup too —
+    //* otherwise a client echoing the bare national part would miss it.
+    const normalizedPhone = normalizePhone(phone);
+
     const otpRecord = await AuthOtp.findOne({
-        identifier: phone,
+        identifier: normalizedPhone,
         type: "phone",
         purpose: "phone_verification",
     });
@@ -363,7 +371,7 @@ const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
     if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
 
     await User.findByIdAndUpdate(userId, {
-        $set: { phoneNumber: phone, isPhoneVerified: true },
+        $set: { phoneNumber: normalizedPhone, isPhoneVerified: true },
     });
 
     await AuthOtp.deleteOne({ _id: otpRecord._id });
@@ -375,7 +383,120 @@ const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
         await UserCacheManager.invalidateUserProfile(userId.toString());
     }
 
-    return res.status(200).json(new ApiResponse(200, { phone, isPhoneVerified: true }, "Phone number verified and updated successfully"));
+    return res.status(200).json(new ApiResponse(200, { phone: normalizedPhone, isPhoneVerified: true }, "Phone number verified and updated successfully"));
+});
+
+/**
+ * Change the account's email — step 1 of 2: send an OTP to the NEW address.
+ *
+ * Nothing is written until the code is verified, so a typo cannot strand
+ * someone on an address they do not own. (One account already reached
+ * "@gamil.com" that way.)
+ */
+const sendEmailChangeOtp = asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    const userId = req.user._id;
+
+    if (!email) throw new ApiError(400, "Email is required");
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedEmail)) {
+        throw new ApiError(400, "Enter a valid email address");
+    }
+
+    const current = await User.findById(userId).select('email');
+    if (current?.email && String(current.email).toLowerCase() === normalizedEmail) {
+        throw new ApiError(400, "That is already your email address");
+    }
+
+    //* Email is unique per account, checked case-insensitively: the unique
+    //* index is byte-wise, so "Foo@Gmail.com" would otherwise slip past a
+    //* plain equality check against a stored "foo@gmail.com".
+    const taken = await User.findOne({
+        email: new RegExp(`^${escapeRegexLocal(normalizedEmail)}$`, 'i'),
+        _id: { $ne: userId },
+    });
+    if (taken) throw new ApiError(409, "This email is already in use by another account");
+
+    const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    const hashedOtp = await AuthOtp.hashOtp(plainOtp);
+    const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
+
+    //* Filed under the NEW address — that is what gets confirmed, and it keeps
+    //* this separate from any password-reset OTP on the old one.
+    await rateCheckAndUpsertOtp({
+        identifier: normalizedEmail,
+        type: "email",
+        purpose: "email_verification",
+        hashedOtp,
+        expiry,
+        ip: clientIp(req),
+    });
+
+    await sendEmail({
+        to: normalizedEmail,
+        subject: "Confirm your new email address - FinderNate",
+        html: `
+            <h3>Confirm your new email address</h3>
+            <h2>Your OTP is: <b>${plainOtp}</b></h2>
+            <p>This OTP is valid for 5 minutes.</p>
+            <p>If you did not request this change you can ignore this email — your account is unchanged.</p>`
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, { email: normalizedEmail, retryAfterSeconds: 60 }, "OTP sent to your new email address")
+    );
+});
+
+/** Change the account's email — step 2 of 2: verify the OTP and save. */
+const verifyAndUpdateEmail = asyncHandler(async (req, res) => {
+    const { email, otp } = req.body;
+    const userId = req.user._id;
+
+    if (!email || !otp) throw new ApiError(400, "Email and OTP are required");
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    const otpRecord = await AuthOtp.findOne({
+        identifier: normalizedEmail,
+        type: "email",
+        purpose: "email_verification",
+    });
+
+    if (!otpRecord) throw new ApiError(404, "OTP not found. Please request a new one.");
+
+    if (new Date() > otpRecord.expiry) {
+        await AuthOtp.deleteOne({ _id: otpRecord._id });
+        throw new ApiError(400, "OTP has expired. Please request a new one.");
+    }
+
+    const isOtpValid = await otpRecord.verifyOtp(otp);
+    if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
+
+    //* Re-check immediately before writing: someone else could have claimed
+    //* the address during the five minutes this OTP was valid.
+    const taken = await User.findOne({
+        email: new RegExp(`^${escapeRegexLocal(normalizedEmail)}$`, 'i'),
+        _id: { $ne: userId },
+    });
+    if (taken) throw new ApiError(409, "This email is already in use by another account");
+
+    await User.findByIdAndUpdate(userId, {
+        $set: { email: normalizedEmail, isEmailVerified: true },
+    });
+
+    await AuthOtp.deleteOne({ _id: otpRecord._id });
+
+    //* GET /users/profile serves a Redis snapshot; without this the old
+    //* address keeps coming back for up to an hour.
+    {
+        const { UserCacheManager } = await import("../../utils/cache.utils.js");
+        await UserCacheManager.invalidateUserProfile(userId.toString());
+    }
+
+    return res.status(200).json(
+        new ApiResponse(200, { email: normalizedEmail, isEmailVerified: true }, "Email verified and updated successfully")
+    );
 });
 
 export {
@@ -386,4 +507,6 @@ export {
     resetPasswordWithOTP,
     sendPhoneVerificationOtp,
     verifyAndUpdatePhone,
+    sendEmailChangeOtp,
+    verifyAndUpdateEmail,
 };
