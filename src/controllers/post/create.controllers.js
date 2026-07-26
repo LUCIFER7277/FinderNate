@@ -11,6 +11,7 @@ import {
     parseField,
     resolveLocationCoordinates,
     uploadPostMedia,
+    invalidatePostCaches,
 } from "./helpers.js";
 
 export const createNormalPost = asyncHandler(async (req, res) => {
@@ -58,6 +59,11 @@ export const createNormalPost = asyncHandler(async (req, res) => {
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
+    //* Home/explore feeds are cached per user for 5 minutes and nothing
+    //* cleared them on create, so a new post simply did not appear until
+    //* the TTL lapsed — which is why it only showed up via the profile.
+    await invalidatePostCaches(post._id, req.user._id);
+
     return res.status(201).json(new ApiResponse(201, post, "Normal post created successfully"));
 });
 
@@ -105,6 +111,11 @@ export const createTweetPost = asyncHandler(async (req, res) => {
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
+    //* Home/explore feeds are cached per user for 5 minutes and nothing
+    //* cleared them on create, so a new post simply did not appear until
+    //* the TTL lapsed — which is why it only showed up via the profile.
+    await invalidatePostCaches(post._id, req.user._id);
+
     return res.status(201).json(new ApiResponse(201, post, "Tweet post created successfully"));
 });
 
@@ -150,6 +161,11 @@ export const createProductPost = asyncHandler(async (req, res) => {
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
+    //* Home/explore feeds are cached per user for 5 minutes and nothing
+    //* cleared them on create, so a new post simply did not appear until
+    //* the TTL lapsed — which is why it only showed up via the profile.
+    await invalidatePostCaches(post._id, req.user._id);
+
     return res.status(201).json(new ApiResponse(201, post, "Product post created successfully"));
 });
 
@@ -193,6 +209,11 @@ export const createServicePost = asyncHandler(async (req, res) => {
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
+    //* Home/explore feeds are cached per user for 5 minutes and nothing
+    //* cleared them on create, so a new post simply did not appear until
+    //* the TTL lapsed — which is why it only showed up via the profile.
+    await invalidatePostCaches(post._id, req.user._id);
+
     return res.status(201).json(new ApiResponse(201, post, "Service post created successfully"));
 });
 
@@ -238,6 +259,11 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
 
     await Post.db.model('User').findByIdAndUpdate(userId, { $push: { posts: post._id } });
     if (post.status === 'published') pushNewPostToBuffer(post._id, userId).catch(() => {});
+    //* Home/explore feeds are cached per user for 5 minutes and nothing
+    //* cleared them on create, so a new post simply did not appear until
+    //* the TTL lapsed — which is why it only showed up via the profile.
+    await invalidatePostCaches(post._id, req.user._id);
+
     return res.status(201).json(new ApiResponse(201, post, "Business post created successfully"));
 });
 
@@ -401,6 +427,11 @@ export const createBatchPosts = asyncHandler(async (req, res) => {
         );
 
         await session.commitTransaction();
+
+        //* Same as the single-post endpoints: without this the cached feeds
+        //* keep serving the pre-post list for up to 5 minutes, so a multi-post
+        //* upload appears to have done nothing.
+        await invalidatePostCaches(createdPosts[0]?._id, userId);
 
         return res.status(201).json(
             new ApiResponse(201, { posts: createdPosts, count: createdPosts.length }, `${createdPosts.length} posts created successfully`)
