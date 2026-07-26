@@ -12,6 +12,8 @@ import {
     resolveAllUsersByIdentifier,
     canonicalIdentifier,
     accountChoice,
+    maskEmail,
+    maskPhone,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
 
@@ -164,15 +166,24 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
         type = "email";
     } else {
         type = "phone";
+        //* "Resend OTP" echoes back the scoped identifier it was given
+        //* ("<number>#<accountId>"). Strip it here rather than letting the
+        //* number and the account id run together into one digit string,
+        //* which would resolve to no account — or worse, the wrong one.
+        const hashAt = String(phone).indexOf('#');
+        const phoneOnly = hashAt > -1 ? String(phone).slice(0, hashAt) : phone;
+        const scopedUserId = hashAt > -1 ? String(phone).slice(hashAt + 1) : null;
+        const chosenId = userId || scopedUserId;
+
         //* One phone number can belong to several accounts. Picking the first
         //* match would reset an arbitrary sibling's password, so when the
         //* number is shared we return the candidates and let the user choose
         //* instead of sending an OTP.
-        const matches = await resolveAllUsersByIdentifier(phone);
+        const matches = await resolveAllUsersByIdentifier(phoneOnly);
         if (!matches.length) throw new ApiError(404, "No account found with this phone number");
 
-        if (userId) {
-            user = matches.find(u => String(u._id) === String(userId));
+        if (chosenId) {
+            user = matches.find(u => String(u._id) === String(chosenId));
             //* Only accounts on THIS number are selectable — an arbitrary id
             //* must not be resettable by quoting someone else's number.
             if (!user) throw new ApiError(400, "That account is not registered to this phone number");
@@ -218,8 +229,12 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
         new ApiResponse(200, {
             type,
             //* Echo this back to /reset-password. For a shared phone it is
-            //* scoped to the chosen account, so the right password is reset.
+            //* scoped to the chosen account ("<number>#<accountId>"), so the
+            //* right password is reset. It is an internal key — NEVER show it
+            //* to the user; render `sentTo` instead.
             identifier,
+            //* Where the OTP actually went, masked and human-readable.
+            sentTo: type === 'email' ? maskEmail(user.email) : maskPhone(user.phoneNumber),
             userId: user._id,
             username: user.username,
             retryAfterSeconds: 60,

@@ -111,6 +111,16 @@ export const accountChoice = (user) => ({
  * Short local parts only get a head, because revealing both ends of a 4-letter
  * name reveals the whole thing.
  */
+/** Display-safe phone: "+91 ***** 00243". Keeps the last 4 for recognition. */
+export const maskPhone = (phone) => {
+    const value = String(phone || '');
+    const digits = value.replace(/\D/g, '');
+    if (digits.length < 4) return '';
+    const last4 = digits.slice(-4);
+    const prefix = value.startsWith('+') ? `+${digits.slice(0, digits.length - 10) || ''} ` : '';
+    return `${prefix}${'*'.repeat(Math.max(digits.length - 4 - (prefix ? prefix.replace(/\D/g, '').length : 0), 3))} ${last4}`.trim();
+};
+
 export const maskEmail = (email) => {
     const value = String(email || '');
     const at = value.indexOf('@');
