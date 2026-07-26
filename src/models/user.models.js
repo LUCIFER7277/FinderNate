@@ -102,14 +102,18 @@ const UserSchema = new mongoose.Schema({
     }
 }, { timestamps: true });
 
-// 🔐 Hash password before saving
+// 🔐 Hash password before saving, and keep fullNameLower in step
 UserSchema.pre("save", async function (next) {
-    if (!this.isModified("password")) return next();
-    this.password = await bcrypt.hash(this.password, 10);
-
-    if (this.isModified("fullName")) {
+    // The fullName branch used to sit AFTER `if (!this.isModified("password"))
+    // return next()`, so it only ran when the password changed in the same
+    // save — renaming an account left fullNameLower stale and name search kept
+    // matching the old name. Handle the two independently.
+    if (this.isModified("fullName") && this.fullName) {
         this.fullNameLower = this.fullName.toLowerCase();
     }
+
+    if (!this.isModified("password")) return next();
+    this.password = await bcrypt.hash(this.password, 10);
     next();
 }
 );

@@ -1,11 +1,64 @@
 import { AuthOtp } from "../../models/authOtp.models.js";
 import { User } from "../../models/user.models.js";
 import { ApiError } from "../../utils/ApiError.js";
+import { redisClient } from "../../config/redis.config.js";
 
 export const OTP_EXPIRY_MS      = 5  * 60 * 1000;
 export const RESEND_COOLDOWN_MS = 60 * 1000;
-export const OTP_RATE_WINDOW_MS = 24 * 60 * 1000;
-export const OTP_MAX_SENDS      = 3;
+//* 24 HOURS. This was 24 * 60 * 1000 — twenty-four MINUTES — so the daily cap
+//* reset every half hour and barely limited anything.
+export const OTP_RATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** OTPs one account (email address / phone number) may request per day. */
+export const OTP_MAX_SENDS      = 20;
+/** OTPs one IP or device may request per day, across all accounts. */
+export const OTP_MAX_PER_IP     = 50;
+
+// ── Password policy ────────────────────────────────────────────────────────
+export const PASSWORD_MIN = 8;
+export const PASSWORD_MAX = 20;
+
+/**
+ * Enforces the password policy server-side.
+ *
+ * The schema's `minlength: 8` never actually ran: registration writes through
+ * `User.collection.insertOne` (raw driver, no validators) and password reset
+ * saves with `validateBeforeSave: false`. Both paths bypassed it entirely, so
+ * any API client could set a one-character password.
+ */
+export const assertValidPassword = (password) => {
+    const value = String(password ?? '');
+    if (value.length < PASSWORD_MIN) {
+        throw new ApiError(400, `Password must be at least ${PASSWORD_MIN} characters`, [
+            { field: "password", message: `Password must be at least ${PASSWORD_MIN} characters` },
+        ]);
+    }
+    if (value.length > PASSWORD_MAX) {
+        throw new ApiError(400, `Password must be at most ${PASSWORD_MAX} characters`, [
+            { field: "password", message: `Password must be at most ${PASSWORD_MAX} characters` },
+        ]);
+    }
+    return value;
+};
+
+/**
+ * Normalises a phone number to E.164 ("+919483122481").
+ *
+ * The web sent countryCode + number while the app sent the bare national
+ * number, so the same person signing up on both produced two records the
+ * duplicate check could not see — that is how one number ended up on 13
+ * accounts. Everything is stored in one shape from here on.
+ */
+export const normalizePhone = (phone, defaultCountryCode = '+91') => {
+    const raw = String(phone ?? '').trim();
+    if (!raw) return '';
+    const digits = raw.replace(/\D/g, '');
+    if (!digits) return '';
+    if (raw.startsWith('+')) return `+${digits}`;
+    //* A bare national number: prepend the default dial code. 10 digits is the
+    //* Indian case; longer strings that already carry a country code are kept.
+    if (digits.length <= 10) return `${defaultCountryCode}${digits}`;
+    return `+${digits}`;
+};
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -103,15 +156,7 @@ export const accountChoice = (user) => ({
     email: maskEmail(user.email),
 });
 
-/**
- * Masks the local part but keeps BOTH ends visible — "me********30@gmail.com".
- * Showing the tail as well as the head is what makes two of your own accounts
- * on the same number tellable apart; the head alone often matches for both.
- *
- * Short local parts only get a head, because revealing both ends of a 4-letter
- * name reveals the whole thing.
- */
-/** Display-safe phone: "+91 ***** 00243". Keeps the last 4 for recognition. */
+/** Display-safe phone: "+91 ****** 0243". Keeps the last 4 for recognition. */
 export const maskPhone = (phone) => {
     const value = String(phone || '');
     const digits = value.replace(/\D/g, '');
@@ -121,6 +166,14 @@ export const maskPhone = (phone) => {
     return `${prefix}${'*'.repeat(Math.max(digits.length - 4 - (prefix ? prefix.replace(/\D/g, '').length : 0), 3))} ${last4}`.trim();
 };
 
+/**
+ * Masks the local part but keeps BOTH ends visible — "me********30@gmail.com".
+ * Showing the tail as well as the head is what makes two of your own accounts
+ * tellable apart; the head alone often matches for both.
+ *
+ * Local parts of six characters or fewer get a head only, because revealing
+ * both ends of a short name reveals the whole name.
+ */
 export const maskEmail = (email) => {
     const value = String(email || '');
     const at = value.indexOf('@');
@@ -137,7 +190,45 @@ export const maskEmail = (email) => {
     return `${head}${'*'.repeat(local.length - 4)}${tail}${domain}`;
 };
 
-export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry }) => {
+/**
+ * Per-IP / per-device daily OTP cap, on top of the per-account one.
+ *
+ * The per-account cap alone does not stop a script walking a list of numbers:
+ * each one is under its own limit while the SMS bill is not. Counted in Redis
+ * with a 24h TTL.
+ *
+ * Fails OPEN if Redis is unavailable — a cache outage must not stop everyone
+ * signing in. The per-account cap still applies in that case.
+ */
+export const assertIpOtpQuota = async (ip) => {
+    if (!ip) return;
+    const key = `otp:ip:${ip}`;
+    try {
+        const count = await redisClient.incr(key);
+        if (count === 1) {
+            await redisClient.expire(key, Math.floor(OTP_RATE_WINDOW_MS / 1000));
+        }
+        if (count > OTP_MAX_PER_IP) {
+            throw new ApiError(429,
+                "Too many OTP requests from this device today. Please try again tomorrow.");
+        }
+    } catch (err) {
+        if (err instanceof ApiError) throw err;
+        console.error('[OTP] IP quota check skipped:', err.message);
+    }
+};
+
+/** Best-effort client address, honouring the proxy in front of the API. */
+export const clientIp = (req) =>
+    (req?.headers?.['x-forwarded-for']?.split(',')[0] ?? '').trim()
+    || req?.headers?.['x-real-ip']
+    || req?.ip
+    || req?.socket?.remoteAddress
+    || '';
+
+export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedOtp, expiry, ip }) => {
+    await assertIpOtpQuota(ip);
+
     const existing = await AuthOtp.findOne({ identifier, type, purpose });
 
     let sendCount   = 1;
@@ -156,7 +247,8 @@ export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedO
         const withinWindow = (Date.now() - ws.getTime()) < OTP_RATE_WINDOW_MS;
         if (withinWindow) {
             if (existing.sendCount >= OTP_MAX_SENDS) {
-                throw new ApiError(429, "Too many OTP requests. Please try again after 10 minutes.");
+                throw new ApiError(429,
+                    `You have requested the maximum of ${OTP_MAX_SENDS} OTPs for this account today. Please try again tomorrow.`);
             }
             sendCount   = (existing.sendCount || 1) + 1;
             windowStart = ws;

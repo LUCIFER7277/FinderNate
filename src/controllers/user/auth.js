@@ -13,7 +13,13 @@ import {
     OTP_EXPIRY_MS,
     RESEND_COOLDOWN_MS,
     resolveUserByIdentifier,
+    assertValidPassword,
+    normalizePhone,
+    rateCheckAndUpsertOtp,
+    clientIp,
 } from "./_helpers.js";
+
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const registerUser = asyncHandler(async (req, res) => {
     const { fullName, username, email, password, confirmPassword, phoneNumber, dateOfBirth, gender } = req.body;
@@ -43,14 +49,30 @@ const registerUser = asyncHandler(async (req, res) => {
         ]);
     }
 
-    const [existingEmail, existingPhone, existingUsername] = await Promise.all([
-        User.findOne({ email, isEmailVerified: true }),
-        User.findOne({ phoneNumber: phoneNumber.trim() }),
-        User.findOne({ username: normalizedUsername })
+    //* Enforced here because neither write path validates: signup inserts via
+    //* the raw driver and reset saves with validateBeforeSave:false, so the
+    //* schema's minlength never ran and any length was accepted over the API.
+    assertValidPassword(password);
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    //* One canonical shape for phone numbers. The web sent countryCode+number
+    //* and the app sent the bare national number, so the same person signing
+    //* up on both created two records.
+    const normalizedPhone = normalizePhone(phoneNumber);
+
+    //* Email and username are unique per account; a PHONE NUMBER IS NOT —
+    //* several accounts may legitimately share one, so it is deliberately not
+    //* checked here. Password reset asks which account is meant.
+    //* Both checks are case-insensitive: the unique index is byte-wise, so
+    //* "Foo@Gmail.com" and "foo@gmail.com" were two different keys to it and a
+    //* duplicate slipped through. The previous email check also filtered on
+    //* isEmailVerified:true, which made it a no-op for unverified accounts.
+    const [existingEmail, existingUsername] = await Promise.all([
+        User.findOne({ email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, 'i') }),
+        User.findOne({ username: new RegExp(`^${escapeRegex(normalizedUsername)}$`, 'i') })
     ]);
 
     const errors = [];
-    if (existingPhone) errors.push({ field: "phoneNumber", message: "Phone number already in use" });
     if (existingEmail) errors.push({ field: "email", message: "Email already in use" });
     if (existingUsername) errors.push({ field: "username", message: "Username already in use" });
 
@@ -62,14 +84,14 @@ const registerUser = asyncHandler(async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await TempUser.findOneAndUpdate(
-        { phoneNumber },
+        { phoneNumber: normalizedPhone },
         {
             fullName,
             fullNameLower: fullName.toLowerCase(),
             username: normalizedUsername,
-            email,
+            email: normalizedEmail,
             password: hashedPassword,
-            phoneNumber,
+            phoneNumber: normalizedPhone,
             dateOfBirth,
             gender: gender || 'prefer-not-to-say',
         },
@@ -80,24 +102,33 @@ const registerUser = asyncHandler(async (req, res) => {
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
-    await AuthOtp.findOneAndUpdate(
-        { identifier: phoneNumber, type: "phone", purpose: "registration" },
-        { otp: hashedOtp, expiry, retryAfter: new Date(Date.now() + RESEND_COOLDOWN_MS) },
-        { upsert: true, new: true }
-    );
+    //* Registration used to write the OTP record directly, so it set
+    //* `retryAfter` but never checked it and counted nothing: repeated calls
+    //* to /register sent unlimited SMS. Now it goes through the same limiter
+    //* as every other OTP — per-account per day, plus a per-IP cap.
+    await rateCheckAndUpsertOtp({
+        identifier: normalizedPhone,
+        type: "phone",
+        purpose: "registration",
+        hashedOtp,
+        expiry,
+        ip: clientIp(req),
+    });
 
     try {
-        await sendSms({ phone: phoneNumber, otp: plainOtp, request_type });
+        await sendSms({ phone: normalizedPhone, otp: plainOtp, request_type });
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
-            console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${phoneNumber}: ${plainOtp}`);
+            console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${normalizedPhone}: ${plainOtp}`);
         } else {
             throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
         }
     }
 
     return res.status(200).json(
-        new ApiResponse(200, { phone: phoneNumber }, "OTP sent to your phone number. Please verify to complete registration.")
+        //* Return the NORMALISED number: the client echoes it back to
+        //* verify-otp, and the OTP is filed under this shape.
+        new ApiResponse(200, { phone: normalizedPhone }, "OTP sent to your phone number. Please verify to complete registration.")
     );
 });
 
@@ -108,8 +139,13 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Phone number and OTP are required");
     }
 
+    //* Registration files the OTP under the normalised number, so normalise
+    //* here too — otherwise a client echoing back the bare national number
+    //* would not find the record it had just been sent.
+    const normalizedPhone = normalizePhone(phone);
+
     const otpRecord = await AuthOtp.findOne({
-        identifier: phone,
+        identifier: normalizedPhone,
         type: "phone",
         purpose: "registration",
     });
@@ -128,7 +164,7 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invalid OTP");
     }
 
-    const tempUser = await TempUser.findOne({ phoneNumber: phone });
+    const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone });
     if (!tempUser) {
         throw new ApiError(404, "Registration session not found. Please register again.");
     }
@@ -148,7 +184,7 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         username: String(tempUser.username).trim().toLowerCase(),
         email: String(tempUser.email).trim().toLowerCase(),
         password: tempUser.password,
-        phoneNumber: tempUser.phoneNumber,
+        phoneNumber: normalizePhone(tempUser.phoneNumber),
         dateOfBirth: tempUser.dateOfBirth,
         gender: tempUser.gender || 'prefer-not-to-say',
         isPhoneVerified: true,
@@ -202,32 +238,30 @@ const resendRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Phone number is required");
     }
 
-    const tempUser = await TempUser.findOne({ phoneNumber: phone });
+    const normalizedPhone = normalizePhone(phone);
+
+    const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone });
     if (!tempUser) {
         throw new ApiError(404, "Registration session not found. Please register again.");
-    }
-
-    const existing = await AuthOtp.findOne({ identifier: phone, type: "phone", purpose: "registration" });
-    if (existing?.retryAfter && new Date() < existing.retryAfter) {
-        const secondsLeft = Math.ceil((existing.retryAfter.getTime() - Date.now()) / 1000);
-        throw new ApiError(429,
-            `Please wait ${secondsLeft} second${secondsLeft !== 1 ? 's' : ''} before requesting a new OTP.`,
-            [{ retryAfterSeconds: secondsLeft }]
-        );
     }
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry     = new Date(Date.now() + OTP_EXPIRY_MS);
-    const retryAfter = new Date(Date.now() + RESEND_COOLDOWN_MS);
 
-    await AuthOtp.findOneAndUpdate(
-        { identifier: phone, type: "phone", purpose: "registration" },
-        { otp: hashedOtp, expiry, retryAfter },
-        { upsert: true, new: true }
-    );
+    //* Resend enforced the 60s cooldown but counted nothing, so a caller could
+    //* sit on it and pull an OTP every minute forever. The shared limiter adds
+    //* the per-account daily cap and the per-IP cap on top of that cooldown.
+    await rateCheckAndUpsertOtp({
+        identifier: normalizedPhone,
+        type: "phone",
+        purpose: "registration",
+        hashedOtp,
+        expiry,
+        ip: clientIp(req),
+    });
 
-    await sendSms({ phone, otp: plainOtp, request_type });
+    await sendSms({ phone: normalizedPhone, otp: plainOtp, request_type });
 
     return res.status(200).json(
         new ApiResponse(200, { retryAfterSeconds: 60 }, "OTP resent successfully")

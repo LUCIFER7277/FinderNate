@@ -14,6 +14,8 @@ import {
     accountChoice,
     maskEmail,
     maskPhone,
+    assertValidPassword,
+    clientIp,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
 
@@ -80,9 +82,9 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
     if (purpose === "password_reset") {
-        await rateCheckAndUpsertOtp({ identifier: email, type: "email", purpose: "password_reset", hashedOtp, expiry });
+        await rateCheckAndUpsertOtp({ identifier: email, type: "email", purpose: "password_reset", hashedOtp, expiry, ip: clientIp(req) });
     } else {
-        await rateCheckAndUpsertOtp({ identifier: email, type: "email", purpose: "email_verification", hashedOtp, expiry });
+        await rateCheckAndUpsertOtp({ identifier: email, type: "email", purpose: "email_verification", hashedOtp, expiry, ip: clientIp(req) });
     }
 
     const subjects = {
@@ -207,7 +209,7 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
 
-    await rateCheckAndUpsertOtp({ identifier, type, purpose: "password_reset", hashedOtp, expiry });
+    await rateCheckAndUpsertOtp({ identifier, type, purpose: "password_reset", hashedOtp, expiry, ip: clientIp(req) });
 
     if (type === "email") {
         await sendEmail({
@@ -252,6 +254,10 @@ const resetPasswordWithOTP = asyncHandler(async (req, res) => {
     if (newPassword !== confirmPassword) {
         throw new ApiError(400, "New password and confirm password do not match");
     }
+
+    //* The save below uses validateBeforeSave:false, so the schema's
+    //* minlength never runs — without this, reset could set any password.
+    assertValidPassword(newPassword);
 
     //* Resolve the account FIRST, then look the OTP up under that account's
     //* canonical identifier. The client echoes back whatever it typed, which

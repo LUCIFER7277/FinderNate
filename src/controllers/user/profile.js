@@ -32,6 +32,7 @@ import Following from "../../models/following.models.js";
 import Media from "../../models/mediaUser.models.js";
 import { validateUsername } from "../../utils/usernameSuggestions.js";
 import { getFollowStatus } from "../../utils/followEngagement.utils.js";
+import { assertValidPassword } from "./_helpers.js";
 
 const getUserProfile = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
@@ -226,6 +227,11 @@ const changePassword = asyncHandler(async (req, res) => {
     if (!currentPassword || !newPassword) {
         throw new ApiError(400, "Current password and new password are required");
     }
+
+    //* save() below DOES run validators, but minlength alone would allow a
+    //* 200-character password; this applies the same 8-20 policy as signup
+    //* and reset so the rule lives in one place.
+    assertValidPassword(newPassword);
 
     const user = await User.findById(req.user._id);
     const isMatch = await user.isPasswordCorrect(currentPassword);
