@@ -30,7 +30,10 @@ export const resolveUserByIdentifier = async (identifier) => {
     if (raw.includes('@')) {
         const email = raw.toLowerCase();
         return (await User.findOne({ email }))
-            || (await User.findOne({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') }));
+            || (await User.findOne({ email: new RegExp(`^${escapeRegex(email)}$`, 'i') }))
+            // A username may legitimately contain '@' (e.g. "test@123"), so an
+            // '@' is a hint, not proof that this is an email address.
+            || (await User.findOne({ username: email }));
     }
 
     const digits = raw.replace(/\D/g, '');
