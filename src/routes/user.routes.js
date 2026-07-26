@@ -28,6 +28,11 @@ router.route("/verify-update-phone").post(verifyJWT, verifyAndUpdatePhone);
 // Changing the email address mirrors the phone flow: OTP to the NEW address,
 // then verify. Nothing is written until the code checks out.
 router.route("/send-email-change-otp").post(verifyJWT, sendEmailChangeOtp);
+// Alias: the website has been calling this path (and /verify-update-email)
+// since before the handler existed, so those requests were 404ing and email
+// changes silently failed there. Same handler, so both clients work and no
+// already-deployed frontend needs to change.
+router.route("/send-email-update-otp").post(verifyJWT, sendEmailChangeOtp);
 router.route("/verify-update-email").post(verifyJWT, verifyAndUpdateEmail);
 router.route("/profile/upload-image").post(verifyJWT, upload.single("profileImage"), uploadProfileImage);
 router.route("/send-reset-otp").post(sendPasswordResetOTP);
