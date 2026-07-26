@@ -12,9 +12,8 @@ import {
     generateAcessAndRefreshToken,
     OTP_EXPIRY_MS,
     RESEND_COOLDOWN_MS,
+    resolveUserByIdentifier,
 } from "./_helpers.js";
-
-const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const registerUser = asyncHandler(async (req, res) => {
     const { fullName, username, email, password, confirmPassword, phoneNumber, dateOfBirth, gender } = req.body;
@@ -250,21 +249,12 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Password is required");
     }
 
-    let user;
-    if (email) {
-        // Normalise explicitly rather than relying on the schema's
-        // `lowercase: true`: registration used to insert through the raw
-        // driver, so historical documents hold mixed-case addresses. Matching
-        // case-insensitively here keeps those accounts reachable even before
-        // the stored values are migrated.
-        const normalisedEmail = String(email).trim().toLowerCase();
-        user = await User.findOne({ email: normalisedEmail })
-            || await User.findOne({ email: new RegExp(`^${escapeRegex(normalisedEmail)}$`, 'i') });
-    } else {
-        // Trim as well as lowercase: a stray space from an autofilled login
-        // field would otherwise never match a stored username.
-        user = await User.findOne({ username: String(username).trim().toLowerCase() });
-    }
+    // resolveUserByIdentifier matches case-insensitively, because registration
+    // inserted through the raw driver and stored whatever case was typed —
+    // Mongoose lowercases this filter, so those accounts were unreachable by
+    // email. It also trims, so a stray space from an autofilled field cannot
+    // break a username lookup.
+    const user = await resolveUserByIdentifier(email || username);
 
     if (!user) {
         throw new ApiError(404, "User not found");

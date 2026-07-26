@@ -8,10 +8,10 @@ import { sendSms } from "../../utils/sendSms.js";
 import {
     rateCheckAndUpsertOtp,
     generateAcessAndRefreshToken,
+    resolveUserByIdentifier,
+    canonicalIdentifier,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
-
-const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const getOtpStatus = asyncHandler(async (req, res) => {
     const { identifier, type, purpose } = req.query;
@@ -157,27 +157,25 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     let identifier;
     let type;
 
+    //* resolveUserByIdentifier copes with the non-uniform stored data: emails
+    //* keep whatever case was typed at signup, and phone numbers exist both
+    //* bare ("9483122481") and prefixed ("+919483122481"). The web form always
+    //* sends countryCode + number, so an exact match missed every bare one.
+    //* Email also accepts a username, since sign-in takes either identifier.
     if (email) {
-        //* Case-insensitive fallback: registration inserted through the raw
-        //* driver for a long time, so stored addresses can be mixed-case while
-        //* Mongoose lowercases this filter — those accounts got "No account
-        //* found with this email" even though they exist. Also accept a
-        //* username here, because the sign-in screen lets people log in with
-        //* either and they reasonably expect the same on password reset.
-        const normalised = String(email).trim().toLowerCase();
-        user = await User.findOne({ email: normalised })
-            || await User.findOne({ email: new RegExp(`^${escapeRegex(normalised)}$`, 'i') })
-            || await User.findOne({ username: normalised });
+        user = await resolveUserByIdentifier(email);
         if (!user) throw new ApiError(404, "No account found with this email or username");
-        //* Send to the address on file, not the string that was typed.
-        identifier = user.email;
         type = "email";
     } else {
-        user = await User.findOne({ phoneNumber: phone });
+        user = await resolveUserByIdentifier(phone);
         if (!user) throw new ApiError(404, "No account found with this phone number");
-        identifier = phone;
         type = "phone";
     }
+
+    //* File the OTP under the account's own identifier, never the typed
+    //* string, so verification resolves to the same record no matter which
+    //* spelling the client sends back.
+    identifier = canonicalIdentifier(user, type);
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
@@ -215,10 +213,18 @@ const resetPasswordWithOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "New password and confirm password do not match");
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
-    const type = emailRegex.test(identifier) ? "email" : "phone";
+    //* Resolve the account FIRST, then look the OTP up under that account's
+    //* canonical identifier. The client echoes back whatever it typed, which
+    //* need not match how the value is stored (case, or a "+91" the number was
+    //* never saved with) — resolving first makes the two halves agree.
+    const user = await resolveUserByIdentifier(identifier);
+    if (!user) throw new ApiError(404, "User not found");
 
-    const otpRecord = await AuthOtp.findOne({ identifier, type, purpose: "password_reset" });
+    const type = String(identifier).includes('@') ? "email" : "phone";
+    const canonical = canonicalIdentifier(user, type);
+
+    const otpRecord = await AuthOtp.findOne({ identifier: canonical, type, purpose: "password_reset" })
+        || await AuthOtp.findOne({ identifier, type, purpose: "password_reset" });
 
     if (!otpRecord) {
         throw new ApiError(404, "OTP not found. Please request a new one.");
@@ -233,12 +239,6 @@ const resetPasswordWithOTP = asyncHandler(async (req, res) => {
     if (!isOtpValid) {
         throw new ApiError(400, "Invalid OTP");
     }
-
-    const user = type === "email"
-        ? await User.findOne({ email: identifier })
-        : await User.findOne({ phoneNumber: identifier });
-
-    if (!user) throw new ApiError(404, "User not found");
 
     user.password = newPassword;
     user.passwordResetOTP = undefined;
