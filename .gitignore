@@ -6,3 +6,5 @@ logs/
 test_user.txt
 test-user2.txt
 .vscode/
+# Local env snapshots taken before migrations — contain live credentials
+.env.backup-*

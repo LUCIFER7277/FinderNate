@@ -1,4 +1,5 @@
 import multer from "multer";
+import { MAX_UPLOAD_MB } from "../constants/uploadLimits.js";
 
 // Accept any image/*, video/*, audio/*, plus specific document types.
 // Per-type size limits and stricter type checks are handled in each controller.
@@ -24,10 +25,21 @@ const isAllowedMime = (mime) => {
     return allowedDocs.includes(mime);
 };
 
+// Hard ceiling, from constants/uploadLimits.js so the number and the message
+// the user gets can never disagree.
+//
+// WARNING: storage is memoryStorage, so the WHOLE file is held in the Node
+// process while it uploads. Peak RSS is about this figure multiplied by the
+// number of uploads in flight, and post routes accept up to 10 videos per
+// request (the batch route, six posts' worth). Serving this safely needs
+// either disk storage or direct client-to-Bunny uploads — until then, treat
+// the container's memory headroom as the real limit, not this number.
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
 export const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 80 * 1024 * 1024, // 80 MB global cap — per-type limits enforced in controllers
+        fileSize: MAX_UPLOAD_BYTES, // global cap — per-type limits enforced in controllers
     },
     fileFilter: (req, file, cb) => {
         if (isAllowedMime(file.mimetype)) {

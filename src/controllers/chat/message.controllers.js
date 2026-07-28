@@ -5,6 +5,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { ApiResponse } from '../../utils/ApiResponse.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { uploadBufferToBunny } from '../../utils/bunny.js';
+import { CHAT_MEDIA_LIMITS_MB, POST_MEDIA_LIMITS_MB, tooLargeMessage } from '../../constants/uploadLimits.js';
 import socketManager from '../../config/socket.js';
 import { sendPushNotification } from '../pushNotification.controllers.js';
 import { sendNotification } from '../../config/firebase-admin.config.js';
@@ -227,14 +228,6 @@ export const addMessage = asyncHandler(async (req, res) => {
     }
 
     if (mediaFile) {
-        // Per-type size limits
-        const CHAT_MEDIA_LIMITS = {
-            audio: 6 * 1024 * 1024,   // 6 MB
-            video: 50 * 1024 * 1024,  // 50 MB
-            file: 7 * 1024 * 1024,    // 7 MB  (documents)
-            image: 10 * 1024 * 1024,  // 10 MB (images)
-        };
-
         let detectedCategory;
         if (mediaFile.mimetype.startsWith('image/')) {
             detectedCategory = 'image';
@@ -246,10 +239,18 @@ export const addMessage = asyncHandler(async (req, res) => {
             detectedCategory = 'file';
         }
 
-        const sizeLimit = CHAT_MEDIA_LIMITS[detectedCategory];
-        if (mediaFile.size > sizeLimit) {
-            const limitMB = sizeLimit / (1024 * 1024);
-            throw new ApiError(400, `${detectedCategory.charAt(0).toUpperCase() + detectedCategory.slice(1)} file too large. Maximum allowed size is ${limitMB} MB`);
+        const limitMB = CHAT_MEDIA_LIMITS_MB[detectedCategory];
+        if (mediaFile.size > limitMB * 1024 * 1024) {
+            // Chat ceilings are lower than a post's, so say so and name the
+            // way round it rather than leaving the user stuck.
+            throw new ApiError(413, tooLargeMessage({
+                category: detectedCategory,
+                actualBytes: mediaFile.size,
+                limitMB,
+                alternative: detectedCategory === 'video'
+                    ? `Videos in chat are capped lower than posts — you can share this as a post instead, up to ${POST_MEDIA_LIMITS_MB.video} MB.`
+                    : undefined,
+            }));
         }
 
         const folderMap = {

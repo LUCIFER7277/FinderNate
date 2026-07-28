@@ -33,6 +33,14 @@ process.on('unhandledRejection', (error) => {
 
 const server = http.createServer(app);
 
+// Node closes any request still in flight after 5 minutes by default, which is
+// far too short for the 600 MB upload cap: at a realistic mobile 2 Mbps a
+// full-size video takes roughly 40 minutes to send. The socket was destroyed
+// mid-upload and the client only saw a generic network failure.
+// headersTimeout (60s, unchanged) stays well below this and remains the guard
+// against a client dribbling out its headers.
+server.requestTimeout = 60 * 60 * 1000; // 1 hour
+
 // Connect to MongoDB, then start the server
 connectDB()
     .then(async () => {

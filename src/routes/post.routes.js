@@ -1,6 +1,7 @@
 // routes/post.routes.js
 import { Router } from "express";
 import { upload } from "../middlewares/multerConfig.js";
+import { MAX_IMAGES_PER_POST, MAX_VIDEOS_PER_POST } from "../constants/uploadLimits.js";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blocking.middleware.js";
 import { cacheUserFeed } from "../middlewares/cache.middleware.js";
@@ -31,12 +32,18 @@ import { getOnlineStoreProducts } from "../controllers/onlineStoreProducts.contr
 
 const router = Router();
 
-// Accept image or video from frontend
+// Accept image or video from frontend.
+//
+// One video per field, ten images. These counts are the memory guard: multer
+// buffers every file in RAM, so ten 600 MB videos in one request would be
+// several GB before a controller ever runs. The total across the video-ish
+// fields is enforced in uploadPostMedia, since a per-field maxCount cannot see
+// that "video", "reel" and "story" all merge into the same media array.
 const mediaUpload = upload.fields([
-    { name: "image", maxCount: 10 },
-    { name: "video", maxCount: 10 },
-    { name: "reel", maxCount: 10 },
-    { name: "story", maxCount: 10 },
+    { name: "image", maxCount: MAX_IMAGES_PER_POST },
+    { name: "video", maxCount: MAX_VIDEOS_PER_POST },
+    { name: "reel", maxCount: MAX_VIDEOS_PER_POST },
+    { name: "story", maxCount: MAX_VIDEOS_PER_POST },
     { name: "thumbnail", maxCount: 1 },
 ]);
 
@@ -49,8 +56,8 @@ router.route("/create/business").post(mediaUpload, verifyJWT, createBusinessPost
 // Batch post creation - up to 6 posts at once with mixed content types
 const batchMediaUpload = upload.fields(
     Array.from({ length: 6 }, (_, i) => [
-        { name: `post_${i}_image`, maxCount: 10 },
-        { name: `post_${i}_video`, maxCount: 10 },
+        { name: `post_${i}_image`, maxCount: MAX_IMAGES_PER_POST },
+        { name: `post_${i}_video`, maxCount: MAX_VIDEOS_PER_POST },
         { name: `post_${i}_thumbnail`, maxCount: 1 },
     ]).flat()
 );

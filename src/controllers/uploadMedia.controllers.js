@@ -4,6 +4,7 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { uploadBufferToBunny } from "../utils/bunny.js";
 import { User } from "../models/user.models.js";
+import { POST_MEDIA_LIMITS_MB, tooLargeMessage } from "../constants/uploadLimits.js";
 
 // Upload single media file (image, video, audio, document)
 const uploadSingleMedia = asyncHandler(async (req, res) => {
@@ -44,10 +45,15 @@ const uploadSingleMedia = asyncHandler(async (req, res) => {
 
     // Per-type size limits
     const category = isVideo ? 'video' : isAudio ? 'audio' : isDoc ? 'file' : 'image';
-    const sizeLimitMB = { image: 10, video: 50, audio: 6, file: 7 };
-    const maxSize = sizeLimitMB[category] * 1024 * 1024;
-    if (file.size > maxSize) {
-        throw new ApiError(400, `File too large. Maximum size for ${category} is ${sizeLimitMB[category]} MB`);
+    const limitMB = POST_MEDIA_LIMITS_MB[category];
+    if (file.size > limitMB * 1024 * 1024) {
+        // 413, not 400: this is a payload-size refusal specifically, and the
+        // message names the file's actual size so the user can see the gap.
+        throw new ApiError(413, tooLargeMessage({
+            category,
+            actualBytes: file.size,
+            limitMB,
+        }));
     }
 
     // image/video → existing proven Bunny folders; audio/docs → new folders
@@ -113,7 +119,6 @@ const uploadMultipleMedia = asyncHandler(async (req, res) => {
     const allowedImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
     const allowedVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'video/flv', 'video/webm'];
     const allowedTypes = [...allowedImageTypes, ...allowedVideoTypes];
-    const maxSize = 50 * 1024 * 1024; // 50MB
 
     const uploadedFiles = [];
     const errors = [];
@@ -129,17 +134,26 @@ const uploadMultipleMedia = asyncHandler(async (req, res) => {
                 continue;
             }
 
-            // Validate file size
-            if (file.size > maxSize) {
+            const isVideo = allowedVideoTypes.includes(file.mimetype);
+
+            // Validate file size against the same per-type ceilings the
+            // single-file route uses — a flat 50 MB here rejected videos this
+            // API is meant to accept and waved through oversized images.
+            const category = isVideo ? 'video' : 'image';
+            const limitMB = POST_MEDIA_LIMITS_MB[category];
+            if (file.size > limitMB * 1024 * 1024) {
                 errors.push({
                     filename: file.originalname,
-                    error: "File size too large. Maximum size is 50MB"
+                    error: tooLargeMessage({
+                        category,
+                        actualBytes: file.size,
+                        limitMB,
+                    })
                 });
                 continue;
             }
 
             // Determine folder based on file type
-            const isVideo = allowedVideoTypes.includes(file.mimetype);
             const folder = isVideo ? "videos" : "images";
 
             // Upload to Bunny.net

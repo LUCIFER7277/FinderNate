@@ -2,6 +2,7 @@ import { FeedCacheManager, CacheManager } from "../../utils/cache.utils.js";
 import { uploadBufferToBunny, generateOptimizedImageUrl } from "../../utils/bunny.js";
 import { getCoordinates } from "../../utils/getCoordinates.js";
 import { ApiError } from "../../utils/ApiError.js";
+import { MAX_IMAGES_PER_POST, MAX_VIDEOS_PER_POST } from "../../constants/uploadLimits.js";
 import { redisClient } from "../../config/redis.config.js";
 
 export const pushNewPostToBuffer = async (postId, userId) => {
@@ -64,6 +65,19 @@ export const resolveLocationCoordinates = async (parsedLocation) => {
  * A custom video thumbnail is now uploaded ONCE rather than once per video.
  */
 export const uploadPostMedia = async (files, customThumbnail) => {
+    // One video per post. Enforced here rather than in the route because a
+    // video can arrive under any of the "video", "reel" or "story" fields —
+    // extractMediaFiles merges all three, and the batch route builds its own
+    // list — so a per-field maxCount cannot see the total. Checked before any
+    // upload begins, so a rejected post leaves nothing behind on Bunny.
+    const videoCount = files.filter((f) => f.mimetype?.startsWith("video/")).length;
+    if (videoCount > MAX_VIDEOS_PER_POST) {
+        throw new ApiError(400,
+            `A post can include at most ${MAX_VIDEOS_PER_POST} video${MAX_VIDEOS_PER_POST === 1 ? '' : 's'}, but ${videoCount} were attached. ` +
+            `Post the other clips separately — images can still be combined, up to ${MAX_IMAGES_PER_POST} per post.`
+        );
+    }
+
     let videoThumbnailUrl = null;
     if (customThumbnail) {
         const thumbResult = await uploadBufferToBunny(customThumbnail.buffer, "posts");
