@@ -157,8 +157,25 @@ export const likePost = asyncHandler(async (req, res) => {
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
 
+    // Idempotent. Liking something already liked is not an error — it is a
+    // client whose optimistic state drifted from the server's, which happens
+    // routinely: the feed and Vibes render the same post from separate caches,
+    // a tap can be sent twice, a stale feed page can be scrolled back to.
+    //
+    // This used to answer 409, and the app surfaced that as "Error liking
+    // Post" and reverted the heart — so the user saw a failure for a post that
+    // was, in fact, already in exactly the state they wanted. Return the
+    // current truth instead and let the client settle on it.
     const alreadyLiked = await getLikeStatus(userId, postId);
-    if (alreadyLiked) throw new ApiError(409, "You have already liked this post");
+    if (alreadyLiked) {
+        const { users: likedBy, hasMore } = await getLikedByList(postId, { includeUser: req.user });
+        return res.status(200).json(new ApiResponse(200, {
+            likedBy,
+            hasMore,
+            isLikedBy: true,
+            likesCount: await ensureLikesCount(postId, 0),
+        }, "Post already liked"));
+    }
 
     const result = await onPostLiked(userId, postId, {
         username: req.user.username,
@@ -201,8 +218,20 @@ export const unlikePost = asyncHandler(async (req, res) => {
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
 
+    // Idempotent, for the same reason as likePost above. This answered 404
+    // "You have not liked this post", which the app showed as an error and
+    // then reverted — so unliking, liking, and unliking again could fail
+    // purely because two views of the same post disagreed about its state.
     const isLiked = await getLikeStatus(userId, postId);
-    if (!isLiked) throw new ApiError(404, "You have not liked this post");
+    if (!isLiked) {
+        const { users: likedBy, hasMore } = await getLikedByList(postId, { excludeUserId: userId });
+        return res.status(200).json(new ApiResponse(200, {
+            likedBy,
+            hasMore,
+            isLikedBy: false,
+            likesCount: await ensureLikesCount(postId, 0),
+        }, "Post already not liked"));
+    }
 
     const result = await onPostUnliked(userId, postId);
 

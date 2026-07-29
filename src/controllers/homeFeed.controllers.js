@@ -150,7 +150,25 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     { 'settings.visibility': { $exists: false } }, // Default to public if no setting
                     { 'settings.visibility': null } // Null means public
                 ]
-            })
+            }),
+            // A video still encoding is shown to its author and nobody else.
+            //
+            // Bunny needs a minute or two after upload before anything plays.
+            // Until then the post is real but the video is not, so to everyone
+            // else it is a broken card in the middle of the feed. The author
+            // still sees it, with the encoding progress, so their post does not
+            // appear to have vanished.
+            //
+            // $elemMatch, not a dotted path: a post can carry several media and
+            // the type and processing flag must match on the SAME entry, or a
+            // photo carousel with one encoding clip would be judged by the
+            // wrong element.
+            $and: [{
+                $or: [
+                    ...(userId ? [{ userId: new mongoose.Types.ObjectId(userId) }] : []),
+                    { media: { $not: { $elemMatch: { type: 'video', processing: true } } } }
+                ]
+            }]
         };
 
 

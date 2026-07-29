@@ -80,21 +80,25 @@ const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
         user.privacy = newPrivacyState;
         user.isFullPrivate = newFullPrivateState;
 
-        await Post.updateMany(
-            { userId: userId },
-            { $set: { "settings.privacy": newPrivacyState } }
-        );
-
-        await Reel.updateMany(
-            { userId: userId },
-            { $set: { "settings.privacy": newPrivacyState } }
-        );
-
-        await Story.updateMany(
-            { userId: userId },
-            { $set: { "settings.privacy": newPrivacyState } }
-        );
-
+        // Account privacy is NOT stamped onto individual posts.
+        //
+        // This used to write settings.privacy onto every Post, Reel and Story
+        // the user owned, which broke private accounts in both directions:
+        //
+        //  - Going private marked every post "private", and the feeds exclude
+        //    private posts from EVERYONE with `'settings.privacy': {$ne:
+        //    'private'}`. So a private account's followers — the people who are
+        //    supposed to see it — saw nothing. "Nobody can see it."
+        //
+        //  - Going public again reset every post to "public", silently undoing
+        //    any post the user had deliberately made private one at a time.
+        //
+        // The two settings mean different things and are enforced in different
+        // places. Account privacy is decided by getViewableUserIds, which
+        // already resolves to "followers + own + all public accounts" for a
+        // signed-in viewer and "public accounts only" for an anonymous one.
+        // settings.privacy stays what it says on the tin: this one post is
+        // private, whatever the account is.
         await user.save();
 
         const { invalidateAuthCache } = await import('../../middlewares/auth.middleware.js');

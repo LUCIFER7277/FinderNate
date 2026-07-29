@@ -132,6 +132,20 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             }
         };
 
+        // A reel still encoding is shown to its author and nobody else. Bunny
+        // needs a minute or two before anything plays, and until then everyone
+        // else would swipe onto a reel that cannot start. The author still sees
+        // it, with encoding progress, so their post has not simply disappeared.
+        matchCriteria.$and = [
+            ...(matchCriteria.$and || []),
+            {
+                $or: [
+                    ...(currentUserId ? [{ userId: new mongoose.Types.ObjectId(currentUserId) }] : []),
+                    { media: { $not: { $elemMatch: { type: "video", processing: true } } } }
+                ]
+            }
+        ];
+
         // Filter by contentType if specified (normal, product, business)
         if (contentType) {
             matchCriteria.contentType = contentType;

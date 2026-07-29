@@ -45,14 +45,19 @@ export const switchTobusinessprofile = asyncHandler(async (req, res) => {
         );
     }
 
-    let businessId = user.businessProfileId;
-
-    if (!businessId) {
-        businessId = new mongoose.Types.ObjectId();
-        user.businessProfileId = businessId;
-    }
-
+    // No Business document yet — the user has turned business mode ON but has
+    // not filled in the business profile.
+    //
+    // businessProfileId stays NULL here. It used to be set to a freshly minted
+    // ObjectId that pointed at nothing, so the account claimed a business
+    // profile that did not exist and nothing downstream could tell "not set up
+    // yet" from "set up but missing". Null says exactly what is true.
+    //
+    // `needsProfileSetup` is returned so the client can send the user straight
+    // to the business form. Without it the switch looks like it succeeded and
+    // the first sign anything is missing is a red error when they try to pay.
     user.isBusinessProfile = true;
+    user.businessProfileId = null;
     await user.save();
     await invalidateProfileCache(userId);
 
@@ -60,7 +65,8 @@ export const switchTobusinessprofile = asyncHandler(async (req, res) => {
         new ApiResponse(200, {
             alreadyBusiness: false,
             businessProfile: null,
-            businessId: businessId,
+            businessId: null,
+            needsProfileSetup: true,
             message: "Switched to business account mode. Create your business profile to get started."
         }, "Switched to business account mode")
     );
