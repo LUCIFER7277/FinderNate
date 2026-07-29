@@ -135,7 +135,11 @@ export const createProductPost = asyncHandler(async (req, res) => {
     const parsedLocation = parseField(location);
 
     const validatedProduct = await validateDeliveryAndLocation({ ...parsedProduct, location: parsedLocation }, "product");
-    if (!validatedProduct?.link) throw new ApiError(400, "Product post must include a product link");
+    //* A product link is OPTIONAL. Plenty of sellers have a product and no
+    //* website to point at, and refusing the post entirely over a missing URL
+    //* blocked them from listing at all. The model has never required it
+    //* (`link: { type: String }`), and service posts have never asked for one,
+    //* so this check was also the odd one out.
 
     const resolvedLocation = await resolveLocationCoordinates(parsedLocation);
 
@@ -323,9 +327,8 @@ export const createBatchPosts = asyncHandler(async (req, res) => {
         if (contentType === "product") {
             const parsedProduct = parseField(p.product);
             validatedDetails = await validateDeliveryAndLocation({ ...parsedProduct, location: parsedLocation }, "product");
-            if (!validatedDetails?.link) {
-                throw new ApiError(400, `Post ${i + 1}: Product post must include a product link`);
-            }
+            //* Optional — see the single-create path above. Left required here
+            //* the bulk endpoint would reject a whole batch over one missing URL.
         } else if (contentType === "service") {
             const parsedService = parseField(p.service);
             validatedDetails = await validateDeliveryAndLocation({ ...parsedService, location: parsedLocation }, "service");
