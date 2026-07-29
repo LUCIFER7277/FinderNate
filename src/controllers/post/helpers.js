@@ -2,7 +2,12 @@ import { FeedCacheManager, CacheManager } from "../../utils/cache.utils.js";
 import { uploadBufferToBunny, generateOptimizedImageUrl } from "../../utils/bunny.js";
 import { getCoordinates } from "../../utils/getCoordinates.js";
 import { ApiError } from "../../utils/ApiError.js";
-import { MAX_IMAGES_PER_POST, MAX_VIDEOS_PER_POST } from "../../constants/uploadLimits.js";
+import {
+    MAX_IMAGES_PER_POST,
+    MAX_IMAGES_WITH_VIDEO,
+    MAX_MEDIA_PER_POST,
+    MAX_VIDEOS_PER_POST,
+} from "../../constants/uploadLimits.js";
 import { redisClient } from "../../config/redis.config.js";
 
 export const pushNewPostToBuffer = async (postId, userId) => {
@@ -71,10 +76,24 @@ export const uploadPostMedia = async (files, customThumbnail) => {
     // list — so a per-field maxCount cannot see the total. Checked before any
     // upload begins, so a rejected post leaves nothing behind on Bunny.
     const videoCount = files.filter((f) => f.mimetype?.startsWith("video/")).length;
+    const imageCount = files.filter((f) => f.mimetype?.startsWith("image/")).length;
+
     if (videoCount > MAX_VIDEOS_PER_POST) {
         throw new ApiError(400,
             `A post can include at most ${MAX_VIDEOS_PER_POST} video${MAX_VIDEOS_PER_POST === 1 ? '' : 's'}, but ${videoCount} were attached. ` +
             `Post the other clips separately — images can still be combined, up to ${MAX_IMAGES_PER_POST} per post.`
+        );
+    }
+
+    // Ten media in total either way: ten images alone, or one video plus nine.
+    // This is the ceiling that bounds request memory, since multer buffers
+    // every file in RAM before a controller sees it.
+    const imageAllowance = videoCount > 0 ? MAX_IMAGES_WITH_VIDEO : MAX_IMAGES_PER_POST;
+    if (imageCount > imageAllowance) {
+        throw new ApiError(400,
+            videoCount > 0
+                ? `A post with a video can include up to ${MAX_IMAGES_WITH_VIDEO} images, but ${imageCount} were attached — ${MAX_MEDIA_PER_POST} items in total.`
+                : `A post can include up to ${MAX_IMAGES_PER_POST} images, but ${imageCount} were attached.`
         );
     }
 

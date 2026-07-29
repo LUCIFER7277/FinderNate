@@ -54,6 +54,24 @@ export const CHAT_MEDIA_LIMITS_MB = {
 export const MAX_VIDEOS_PER_POST = 1;
 export const MAX_IMAGES_PER_POST = 10;
 
+/**
+ * Images allowed alongside a video. Ten media in total either way: ten images
+ * on their own, or one video plus nine.
+ *
+ * This is also what bounds request memory. Multer buffers uploads in RAM, so
+ * the worst case per request is now one video plus nine images — roughly
+ * 700 MB — rather than the several GB a carousel of videos would have held.
+ */
+export const MAX_IMAGES_WITH_VIDEO = 9;
+export const MAX_MEDIA_PER_POST = 10;
+
+/**
+ * A video at or under this length can appear in Vibes. Longer clips still post
+ * fine, they just stay in the feed rather than the reel scroller — a
+ * five-minute video in a swipe-up feed is not what anyone is there for.
+ */
+export const REEL_MAX_DURATION_SECONDS = 60;
+
 /** Human-readable size — "812.4 MB", "1.2 GB". */
 export const formatBytes = (bytes) => {
     if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size';

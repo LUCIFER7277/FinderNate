@@ -11,6 +11,7 @@ import Like from "../models/like.models.js";
 import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount, batchGetCommentsCount, batchSharedCount } from "../utils/postEngagement.utils.js";
 import mongoose from "mongoose";
 import { getFollowStatus } from "../utils/followEngagement.utils.js";
+import { REEL_MAX_DURATION_SECONDS } from "../constants/uploadLimits.js";
 
 
 // Simple in-memory cache
@@ -113,6 +114,23 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             // Default to reels and videos for better reel experience
             matchCriteria.postType = { $in: ["reel", "video"] };
         }
+
+        // Vibes is a swipe-up scroller, so only short clips belong in it — a
+        // five-minute video still posts and still shows in the feed, it just
+        // does not land here.
+        //
+        // Duration is populated by the Bunny Stream webhook once encoding
+        // finishes. Posts from before Stream have no duration at all, and
+        // excluding those would empty the existing feed, so an unset duration
+        // is treated as eligible rather than assumed to be long.
+        matchCriteria.media = {
+            $not: {
+                $elemMatch: {
+                    type: "video",
+                    duration: { $gt: REEL_MAX_DURATION_SECONDS }
+                }
+            }
+        };
 
         // Filter by contentType if specified (normal, product, business)
         if (contentType) {

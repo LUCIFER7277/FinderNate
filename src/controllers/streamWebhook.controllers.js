@@ -72,6 +72,14 @@ export const handleStreamWebhook = asyncHandler(async (req, res) => {
                 set["media.$[item].url"] = streamVideoUrl(guid, best);
                 set["media.$[item].availableResolutions"] = resolutions;
             }
+            // Bunny reports length in seconds once encoding finishes. This is
+            // the only reliable source for it — the upload call returns before
+            // anything has been probed — and Vibes eligibility is decided on
+            // it, so a video with no duration would otherwise be judged by a
+            // field nothing ever set.
+            if (Number.isFinite(video?.length) && video.length > 0) {
+                set["media.$[item].duration"] = video.length;
+            }
         } catch {
             // Leave the stored URL alone rather than guessing. Worst case it
             // is the 720p one, which is right for any normal phone recording.
