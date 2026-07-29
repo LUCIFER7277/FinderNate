@@ -103,12 +103,34 @@ export const bulkCheckActivePaymentPlans = async (userIds) => {
 };
 
 /**
- * Filter posts to only include those from businesses with active payment plans
- * or non-business posts
- * 
+ * Hides COMMERCIAL posts from business accounts without an active plan.
+ *
+ * Selling is the paid feature, so a business on the free plan keeps its
+ * ordinary presence — photos, reels, tweets — and loses only its product,
+ * service and business listings from discovery.
+ *
+ * This used to filter by ACCOUNT rather than by post. It looked up
+ * isBusinessProfile on the user and, when there was no active plan, dropped
+ * every post that person had ever made, holiday photos included. The old
+ * comment read "keep all non-business posts", which sounds like content type
+ * but meant "posts by a non-business account" — the set it tested was a set of
+ * users. That is why switching an account to a free business plan made the
+ * person vanish from Explore and Search entirely.
+ *
+ * The distinction is already on the model and needs nothing new:
+ *   postType    photo | reel | video | story | tweet   (the format)
+ *   contentType normal | product | service | business  (what it is)  <- this
+ *
+ * Note this only affects DISCOVERY. It is applied by explore and search, not
+ * by the home feed, so followers see an unpaid business account's posts either
+ * way.
+ *
  * @param {Array} posts - Array of post objects with userId field
  * @returns {Promise<Array>} - Filtered array of posts
  */
+
+/** Post content that counts as selling, and so needs an active plan. */
+const COMMERCIAL_CONTENT_TYPES = new Set(['product', 'service', 'business']);
 export const filterBusinessPostsByPaymentPlan = async (posts) => {
     try {
         if (!posts || posts.length === 0) return [];
@@ -135,23 +157,24 @@ export const filterBusinessPostsByPaymentPlan = async (posts) => {
             businessUsers.map(u => u._id.toString())
         );
         
-        // Filter posts:
-        // - Keep all non-business posts
-        // - Keep business posts only if they have active payment plan
+        // Keep everything except commercial content from an unpaid business.
         return posts.filter(post => {
             const userId = post.userId?._id || post.userId;
             if (!userId) return false;
-            
+
             const userIdStr = userId.toString();
-            const isBusiness = businessUserIds.has(userIdStr);
-            
-            if (!isBusiness) {
-                // Not a business account, keep the post
-                return true;
-            }
-            
-            // Is a business account, only keep if has active payment plan
-            return activePlanMap.get(userIdStr) === true;
+
+            // Personal accounts are never filtered.
+            if (!businessUserIds.has(userIdStr)) return true;
+
+            // A paid business shows everything.
+            if (activePlanMap.get(userIdStr) === true) return true;
+
+            // Unpaid business: ordinary posts stay, listings do not. Anything
+            // with no contentType is treated as 'normal' — the field is
+            // required going forward, but older rows predate it and a missing
+            // value must not silently hide somebody's photos.
+            return !COMMERCIAL_CONTENT_TYPES.has(post.contentType);
         });
     } catch (error) {
         console.error('Error filtering business posts by payment plan:', error);
