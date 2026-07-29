@@ -20,6 +20,131 @@ const validateConfig = () => {
     }
 };
 
+// ── Bunny Stream (video only) ────────────────────────────────────────────────
+// Storage serves whatever bytes were uploaded: a phone's 10 MB clip is stored
+// and delivered at 10 MB to every viewer, and the "?thumbnail=1" URL this file
+// used to build was never honoured (the Optimizer is off), so it returned the
+// MP4 itself — several MB downloaded to render a thumbnail that then failed to
+// decode. Stream transcodes to a resolution ladder and produces a real
+// thumbnail, and its encoding is free.
+//
+// Every field below must be set or video keeps going to Storage exactly as
+// before, so this can be deployed before the credentials exist.
+const STREAM_CONFIG = {
+    libraryId: process.env.BUNNY_STREAM_LIBRARY_ID,
+    apiKey: process.env.BUNNY_STREAM_API_KEY,
+    cdnHost: process.env.BUNNY_STREAM_CDN_HOST,
+};
+
+const STREAM_API = 'https://video.bunnycdn.com/library';
+
+/** Default rendition stored in the DB. Clients rewrite it per connection. */
+export const STREAM_DEFAULT_RENDITION = '720p';
+
+export const isStreamEnabled = () =>
+    Boolean(STREAM_CONFIG.libraryId && STREAM_CONFIG.apiKey && STREAM_CONFIG.cdnHost);
+
+/** Playback URL for a Stream video. Progressive MP4, deliberately not HLS. */
+export const streamVideoUrl = (guid, rendition = STREAM_DEFAULT_RENDITION) =>
+    `https://${STREAM_CONFIG.cdnHost}/${guid}/play_${rendition}.mp4`;
+
+export const streamThumbnailUrl = (guid) =>
+    `https://${STREAM_CONFIG.cdnHost}/${guid}/thumbnail.jpg`;
+
+/** Adaptive playlist. Kept for long-form playback; the feeds do not use it. */
+export const streamHlsUrl = (guid) =>
+    `https://${STREAM_CONFIG.cdnHost}/${guid}/playlist.m3u8`;
+
+/** True for a URL this module produced via Stream. */
+export const isStreamUrl = (url) =>
+    Boolean(url && STREAM_CONFIG.cdnHost && url.includes(STREAM_CONFIG.cdnHost));
+
+/**
+ * Fetches a Stream video's metadata. Called from the encoding webhook, which
+ * is the first moment `availableResolutions` is known.
+ */
+export const getStreamVideo = async (guid) => {
+    const { libraryId, apiKey } = STREAM_CONFIG;
+    const { data } = await axios.get(`${STREAM_API}/${libraryId}/videos/${guid}`, {
+        headers: { AccessKey: apiKey },
+    });
+    return data;
+};
+
+/**
+ * Best rendition actually present for a video.
+ *
+ * Bunny never upscales: a 360p source produces only a 360p MP4, so the 720p
+ * URL stored at upload time would 404 forever. `availableResolutions` comes
+ * back as "360p,480p"; this picks the highest at or below [ceiling].
+ */
+export const bestAvailableRendition = (availableResolutions, ceiling = STREAM_DEFAULT_RENDITION) => {
+    const ladder = ['240p', '360p', '480p', '720p', '1080p'];
+    const have = String(availableResolutions || '')
+        .split(',')
+        .map((r) => r.trim())
+        .filter((r) => ladder.includes(r));
+    if (have.length === 0) return null;
+
+    const cap = ladder.indexOf(ceiling);
+    const withinCap = have.filter((r) => ladder.indexOf(r) <= cap);
+    const pool = withinCap.length ? withinCap : have; // else the smallest we have
+    return pool.sort((a, b) => ladder.indexOf(b) - ladder.indexOf(a))[0];
+};
+
+/** The video's GUID is the first path segment of any Stream URL. */
+export const streamGuidFromUrl = (url) => {
+    try {
+        return new URL(url).pathname.split('/').filter(Boolean)[0] || null;
+    } catch {
+        return null;
+    }
+};
+
+/**
+ * Uploads a video to Bunny Stream. Two calls: create the record, then PUT the
+ * bytes into it.
+ *
+ * Encoding is asynchronous — the GUID and both URLs are valid immediately, but
+ * the file is not playable for roughly 10-30s for a short clip. Callers mark
+ * the media as still processing; see the `processing` flag on post media.
+ */
+const uploadVideoToStream = async (fileBuffer, originalName) => {
+    const { libraryId, apiKey } = STREAM_CONFIG;
+    const base = `${STREAM_API}/${libraryId}/videos`;
+
+    const created = await axios.post(
+        base,
+        { title: originalName || `video-${Date.now()}` },
+        { headers: { AccessKey: apiKey, 'Content-Type': 'application/json' } }
+    );
+
+    const guid = created.data?.guid;
+    if (!guid) throw new Error('Bunny Stream did not return a video guid');
+
+    await axios.put(`${base}/${guid}`, fileBuffer, {
+        headers: { AccessKey: apiKey, 'Content-Type': 'application/octet-stream' },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+    });
+
+    const url = streamVideoUrl(guid);
+    return {
+        success: true,
+        secure_url: url,
+        url,
+        public_id: guid,
+        resource_type: 'video',
+        // A real frame from the video, not the MP4 wearing a query string.
+        thumbnailUrl: streamThumbnailUrl(guid),
+        hlsUrl: streamHlsUrl(guid),
+        format: 'mp4',
+        bytes: fileBuffer.length,
+        // Renditions are still encoding at this point; nothing may play yet.
+        processing: true,
+    };
+};
+
 // ── Original extension map (unchanged) ──────────────────────────────────────
 const MIME_TO_EXT = {
     'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp',
@@ -201,6 +326,13 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
             ? getFileTypeFromHint(mimeTypeHint)
             : detected;
 
+        // Video diverts to Stream when it is configured. The return shape is
+        // identical to the Storage path, so none of the eleven call sites care
+        // which one ran — they read secure_url, thumbnailUrl and resource_type.
+        if (fileType.isVideo && isStreamEnabled()) {
+            return await uploadVideoToStream(fileBuffer, originalName);
+        }
+
         // Web optimization: store user images as capped, metadata-stripped AVIF.
         let uploadBuffer = fileBuffer;
         let uploadFileType = fileType;
@@ -272,6 +404,26 @@ export const uploadBufferToBunny = async (fileBuffer, folder = "posts", original
 
 export const deleteFromBunny = async (url) => {
     try {
+        // Stream videos do not live in the storage zone, so the storage DELETE
+        // below would 404 and leave the video in the library — still counting
+        // against storage and still billable — every time a post was removed.
+        if (isStreamUrl(url)) {
+            const guid = streamGuidFromUrl(url);
+            if (!guid) return { success: true, result: 'not_found', url };
+            try {
+                await axios.delete(
+                    `${STREAM_API}/${STREAM_CONFIG.libraryId}/videos/${guid}`,
+                    { headers: { AccessKey: STREAM_CONFIG.apiKey } }
+                );
+                return { success: true, result: 'ok', url };
+            } catch (error) {
+                if (error.response?.status === 404) {
+                    return { success: true, result: 'not_found', url };
+                }
+                throw error;
+            }
+        }
+
         validateConfig();
         const filePath = url.replace(`${BUNNY_CONFIG.cdnUrl}/`, '').split('?')[0];
         const response = await axios.delete(`${BUNNY_CONFIG.storageApiUrl}/${filePath}`, {

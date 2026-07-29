@@ -35,6 +35,16 @@ const MediaSchema = new mongoose.Schema({
     dimensions: MediaDimensionsSchema,
     fileSize: Number,
     format: String,
+    // Bunny Stream encodes after the upload call returns, so the URL is valid
+    // for ~10-30s before anything will actually play. Clients show the
+    // thumbnail while this is true; the Stream webhook clears it. Images and
+    // Storage-hosted video are never in this state.
+    processing: { type: Boolean, default: false },
+    // Comma-separated ladder Bunny actually produced, e.g. "360p,480p".
+    // Bunny never upscales, so this varies per source video — clients must
+    // check it before requesting a smaller rendition on a slow connection,
+    // or they will ask for a file that was never encoded.
+    availableResolutions: String,
     additionalMedia: [AdditionalMediaSchema]
 }, { _id: false });
 

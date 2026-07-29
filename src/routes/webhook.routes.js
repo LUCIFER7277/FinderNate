@@ -4,6 +4,7 @@ import {
     testWebhook,
     getWebhookLogs
 } from '../controllers/webhook.controllers.js';
+import { handleStreamWebhook } from '../controllers/streamWebhook.controllers.js';
 
 const router = Router();
 
@@ -18,6 +19,12 @@ const router = Router();
 // Main webhook endpoint - receives Razorpay events
 // POST /api/v1/webhooks/razorpay
 router.post('/razorpay', handleRazorpayWebhook);
+
+// Bunny Stream encoding-status webhook — clears media.processing once the
+// renditions exist. Unauthenticated by design (Bunny sends no token); the
+// controller only acts on a GUID already stored against a post.
+// POST /api/v1/webhooks/bunny-stream
+router.post('/bunny-stream', handleStreamWebhook);
 
 // Test endpoint to verify webhook is configured correctly
 // GET /api/v1/webhooks/test

@@ -94,9 +94,15 @@ export const uploadPostMedia = async (files, customThumbnail) => {
 
         if (result.resource_type !== "image" && result.resource_type !== "video") return null;
 
+        // Video thumbnails: the uploader's own still wins, then whatever the
+        // upload produced (Stream returns a real frame). The old fallback
+        // appended "?thumbnail=1" to the video URL, but Bunny's Optimizer is
+        // not enabled, so that URL served the MP4 itself — clients downloaded
+        // megabytes and then failed to decode a video as an image. Null is
+        // honest; they already render a placeholder for it.
         const thumbnailUrl = result.resource_type === "image"
             ? generateOptimizedImageUrl(result.secure_url, { width: 300, height: 300, crop: 'fill' })
-            : (videoThumbnailUrl || `${result.secure_url}?thumbnail=1&width=300&height=300`);
+            : (videoThumbnailUrl || result.thumbnailUrl || null);
 
         return {
             type: result.resource_type,
@@ -106,6 +112,9 @@ export const uploadPostMedia = async (files, customThumbnail) => {
             format: result.format,
             duration: result.duration || null,
             dimensions: { width: result.width, height: result.height },
+            // Stream encodes after the upload returns, so the URL is valid but
+            // not yet playable. Clients show the thumbnail until this clears.
+            processing: result.processing === true,
         };
     }));
 
