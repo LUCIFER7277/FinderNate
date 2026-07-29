@@ -32,17 +32,15 @@ export const createChat = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Direct chats must have exactly 2 participants');
     }
 
-    // Two is enough for a group: the creator plus one other. The app's Create
-    // Group sheet lets you tick a single member and its button enables on one
-    // selection, so requiring three rejected the most ordinary case — "1
-    // selected" then a flat failure with no way to tell why.
+    // A group is three people or more — the creator plus at least two others.
+    // Two people is a direct chat, which has its own type above.
     //
-    // A named, described group with one other person is also a real thing: it
-    // has a title and an image, more people get added later, and it is not the
-    // same object as a direct chat between those two. Direct chats are still
-    // pinned to exactly 2 above, so the two kinds cannot collide.
-    if (chatType === 'group' && validParticipants.length < 2) {
-        throw new ApiError(400, 'A group needs at least one other member');
+    // The message says what to DO. It previously read "Group chats must have
+    // at least 3 participants", which counts the creator, so someone who had
+    // ticked two members could reasonably think they had satisfied it. The
+    // client also blocks this before submitting; this is the backstop.
+    if (chatType === 'group' && validParticipants.length < 3) {
+        throw new ApiError(400, 'Add at least 2 members to create a group (3 people including you)');
     }
 
     validParticipants.sort((a, b) => a.toString().localeCompare(b.toString()));
