@@ -77,6 +77,12 @@ import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";
+// DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+import {
+    listDiagnostics,
+    getRequestTrace,
+    getDiagnosticsSummary
+} from "../controllers/admin/diagnostics.js";
 
 const router = Router();
 
@@ -96,6 +102,15 @@ router.route("/logout").post(adminLogout);
 // Dashboard & Analytics
 router.route("/dashboard/stats").get(requirePermission('viewAnalytics'), getDashboardStats);
 router.route("/activity-log").get(getAdminActivityLog);
+
+// DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+// Reading back what the app, the website and the server logged. Behind
+// verifyAdminJWT (applied above) because these entries carry user data.
+// /request/:requestId is registered before the list route so the literal
+// segment is not swallowed by a broader match.
+router.route("/diagnostics/summary").get(requirePermission('viewAnalytics'), getDiagnosticsSummary);
+router.route("/diagnostics/request/:requestId").get(requirePermission('viewAnalytics'), getRequestTrace);
+router.route("/diagnostics").get(requirePermission('viewAnalytics'), listDiagnostics);
 
 // ===============================
 // AADHAAR VERIFICATION ROUTES

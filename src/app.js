@@ -110,9 +110,20 @@ app.use(cors({
                 "Pragma",
                 "Expires",
                 "Access-Control-Request-Method",
-                "Access-Control-Request-Headers"
+                "Access-Control-Request-Headers",
+                // DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+                // Without this the browser preflight rejects a request that
+                // carries a correlation id, so the website could never send one.
+                "X-Request-Id"
         ],
-        exposedHeaders: ["Set-Cookie"],
+        // DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+        // exposedHeaders is an allow-list: a response header the browser is
+        // not told to expose is unreadable from JavaScript even though it
+        // arrived. X-Request-Id was being set on every response and silently
+        // hidden from the one tier that most needed it — the website could not
+        // report the id of the request that just failed.
+        // The mobile app is unaffected; CORS does not apply to it.
+        exposedHeaders: ["Set-Cookie", "X-Request-Id"],
         optionsSuccessStatus: 200,
         preflightContinue: false
 }));

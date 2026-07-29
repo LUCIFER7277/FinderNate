@@ -2,8 +2,42 @@ import multer from 'multer';
 import { ApiError } from '../utils/ApiError.js';
 import { MAX_UPLOAD_MB, overallTooLargeMessage } from '../constants/uploadLimits.js';
 
+/**
+ * The global error handler.
+ *
+ * Structured as classify-then-respond rather than a chain of branches that each
+ * build and send their own response. The earlier shape had six exits and only
+ * two of them logged, so a duplicate key, a validation failure, a cast error
+ * and every multer rejection were answered without recording anything — silent
+ * in exactly the way this handler exists to prevent. Deciding the response and
+ * sending it are now separate steps, which makes "returned without logging"
+ * unrepresentable rather than merely fixed.
+ *
+ * MUST STAY SYNCHRONOUS. Express 4 does not await error handlers: marking this
+ * async turns any internal rejection into an unhandledRejection, and
+ * src/index.js exits the process on those. Nothing here may touch the database
+ * or await anything — the error is stashed on the request and written later,
+ * off the response path, by the diagnostics hook in requestContext.js.
+ */
 const errorHandler = (err, req, res, next) => {
-    // Handle Multer errors
+    const { status, body } = classify(err);
+
+    // Read off the request by the res 'finish' hook, once the response is
+    // already flushed. Nothing is written to the database from in here.
+    req._diagError = err;
+    req._diagStatus = status;
+
+    logError(err, req, status);
+
+    return res.status(status).json({ ...body, requestId: req.id });
+};
+
+/**
+ * Maps a thrown value to the status and body the client should see.
+ * Pure: no I/O, no logging, no response writing.
+ */
+const classify = (err) => {
+    // ── Upload rejections ──────────────────────────────────────────────────
     if (err instanceof multer.MulterError) {
         if (err.code === 'LIMIT_UNEXPECTED_FILE') {
             // Multer raises this for a field it does not recognise AND for one
@@ -11,13 +45,16 @@ const errorHandler = (err, req, res, next) => {
             // post lands here, where the old "Unexpected file field: video"
             // read like a bug rather than a limit. Stays route-agnostic: this
             // handler is global, so it cannot quote any one route's counts.
-            return res.status(400).json({
-                success: false,
-                message: `Too many files, or an unexpected one, on "${err.field}". `
-                    + `Either this endpoint does not accept that field, or more files were attached than it allows.`,
-                errors: [],
-                data: { field: err.field ?? null }
-            });
+            return {
+                status: 400,
+                body: {
+                    success: false,
+                    message: `Too many files, or an unexpected one, on "${err.field}". `
+                        + `Either this endpoint does not accept that field, or more files were attached than it allows.`,
+                    errors: [],
+                    data: { field: err.field ?? null }
+                }
+            };
         }
 
         // Multer's own text for this is the bare string "File too large",
@@ -27,52 +64,54 @@ const errorHandler = (err, req, res, next) => {
         // 413 rather than 400: this is specifically a payload-size refusal,
         // and clients can key retry/compress behaviour off it.
         if (err.code === 'LIMIT_FILE_SIZE') {
-            return res.status(413).json({
-                success: false,
-                message: overallTooLargeMessage(err.field),
-                errors: [],
-                data: { limitMB: MAX_UPLOAD_MB, field: err.field ?? null }
-            });
+            return {
+                status: 413,
+                body: {
+                    success: false,
+                    message: overallTooLargeMessage(err.field),
+                    errors: [],
+                    data: { limitMB: MAX_UPLOAD_MB, field: err.field ?? null }
+                }
+            };
         }
 
-        return res.status(400).json({
-            success: false,
-            message: err.message,
-            errors: [],
-            data: null
-        });
+        return {
+            status: 400,
+            body: { success: false, message: err.message, errors: [], data: null }
+        };
     }
 
-    // Handle custom ApiError
+    // ── Deliberate, already-worded failures ────────────────────────────────
     if (err instanceof ApiError) {
-        logError(err, req, err.statusCode || 500);
-        return res.status(err.statusCode || 500).json({
-            success: false,
-            message: err.message,
-            errors: err.errors || [],
-            data: err.data || null,
-            requestId: req.id
-        });
+        return {
+            status: err.statusCode || 500,
+            body: {
+                success: false,
+                message: err.message,
+                errors: err.errors || [],
+                data: err.data || null
+            }
+        };
     }
 
     // ── Database errors ────────────────────────────────────────────────────
     // These arrive as raw driver objects whose `message` names the collection
     // and index that failed ("E11000 duplicate key error collection:
     // test.users index: username_1 dup key: { username: \"mnbhat\" }"). That
-    // went straight into the response below, so the client both showed the
-    // user something meaningless AND leaked the internal schema. Translate the
-    // ones that represent a real, explainable conflict; everything else falls
-    // through to the generic 500.
-
+    // used to go straight into the response, so the client both showed the
+    // user something meaningless AND leaked the internal schema.
     if (err?.code === 11000) {
         const field = Object.keys(err.keyPattern || err.keyValue || {})[0];
-        return res.status(409).json({
-            success: false,
-            message: duplicateMessage(field),
-            errors: field ? [{ field, message: duplicateMessage(field) }] : [],
-            data: null,
-            requestId: req.id
-        });
+        const message = duplicateMessage(field);
+        return {
+            status: 409,
+            body: {
+                success: false,
+                message,
+                errors: field ? [{ field, message }] : [],
+                data: null
+            }
+        };
     }
 
     if (err?.name === 'ValidationError' && err.errors) {
@@ -80,46 +119,51 @@ const errorHandler = (err, req, res, next) => {
             field,
             message: e.message
         }));
-        return res.status(400).json({
-            success: false,
-            message: errors.map(e => e.message).join(', ') || 'Invalid input',
-            errors,
-            data: null,
-            requestId: req.id
-        });
+        return {
+            status: 400,
+            body: {
+                success: false,
+                message: errors.map(e => e.message).join(', ') || 'Invalid input',
+                errors,
+                data: null
+            }
+        };
     }
 
     if (err?.name === 'CastError') {
         // A malformed id in the URL — "/posts/undefined" is the usual source.
-        return res.status(400).json({
-            success: false,
-            message: `Invalid ${err.path === '_id' ? 'id' : err.path} in request`,
-            errors: [],
-            data: null,
-            requestId: req.id
-        });
+        return {
+            status: 400,
+            body: {
+                success: false,
+                message: `Invalid ${err.path === '_id' ? 'id' : err.path} in request`,
+                errors: [],
+                data: null
+            }
+        };
     }
 
     // ── Anything unexpected ────────────────────────────────────────────────
-    const statusCode = err.statusCode || 500;
-    logError(err, req, statusCode);
+    const status = err?.statusCode || 500;
 
     // `err.message` on an unhandled exception is written for a developer, not
-    // a user, and can carry connection strings, file paths or driver internals.
-    // Past this point the honest thing to show is that something broke, plus
-    // the id that finds the stack in the logs.
-    const safeMessage = statusCode >= 500 && process.env.NODE_ENV === 'production'
+    // a user, and can carry connection strings, file paths or driver
+    // internals. Past this point the honest thing to show is that something
+    // broke, plus the id that finds the stack in the logs.
+    const message = status >= 500 && process.env.NODE_ENV === 'production'
         ? 'Something went wrong on our end. Please try again.'
-        : (err.message || 'Internal Server Error');
+        : (err?.message || 'Internal Server Error');
 
-    return res.status(statusCode).json({
-        success: false,
-        message: safeMessage,
-        errors: err.errors || [],
-        data: null,
-        requestId: req.id,
-        stack: process.env.NODE_ENV === "development" ? err.stack : undefined
-    });
+    return {
+        status,
+        body: {
+            success: false,
+            message,
+            errors: err?.errors || [],
+            data: null,
+            stack: process.env.NODE_ENV === 'development' ? err?.stack : undefined
+        }
+    };
 };
 
 const DUPLICATE_MESSAGES = {
@@ -148,9 +192,9 @@ const logError = (err, req, statusCode) => {
     const head = `[error] id=${req.id} ${req.method} ${req.originalUrl} → ${statusCode}${who}`;
 
     if (statusCode >= 500) {
-        console.error(`${head}\n  ${err.name}: ${err.message}\n${err.stack || ''}`);
+        console.error(`${head}\n  ${err?.name}: ${err?.message}\n${err?.stack || ''}`);
     } else {
-        console.warn(`${head} — ${err.message}`);
+        console.warn(`${head} — ${err?.message}`);
     }
 };
 

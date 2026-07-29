@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+// DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+import { captureServerEvent } from '../diagnostics/serverCapture.js';
 
 /**
  * Gives every request an id, and logs the ones worth looking at.
@@ -45,7 +47,16 @@ const QUIET = new Set(['/', '/health', '/api/v1/health']);
 
 export const requestLogger = (req, res, next) => {
     res.on('finish', () => {
-        if (QUIET.has(req.path)) return;
+        // originalUrl, NOT req.path. Express trims req.url when it enters a
+        // mounted router and only puts it back inside next(), so a handler
+        // that answers without calling next() still has the trimmed value when
+        // 'finish' fires. Every route registered as "/" inside a router —
+        // /api/v1/explore, /chats, /notifications, /invoices, /diagnostics —
+        // therefore reads as req.path === "/" here and was being swallowed by
+        // the health-check filter below. The busiest feed endpoint in the
+        // product was the one this middleware could not see.
+        const path = (req.originalUrl || '').split('?')[0];
+        if (QUIET.has(path)) return;
 
         const ms = Date.now() - (req._startedAt || Date.now());
         const failed = res.statusCode >= 400;
@@ -62,6 +73,26 @@ export const requestLogger = (req, res, next) => {
             `[${tag}] id=${req.id} ${req.method} ${req.originalUrl} ` +
             `→ ${res.statusCode} ${ms}ms${who}`
         );
+
+        // DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
+        //
+        // Deliberately here and not in the error handler. By the time 'finish'
+        // fires the response is fully flushed, so a slow or failing write
+        // cannot delay the user, cannot corrupt a half-sent response, and
+        // cannot throw anywhere that would reach Express. The error object
+        // itself was stashed on the request by errorHandler, which does no I/O
+        // of its own.
+        //
+        // Not awaited, and it never throws — see the hazard notes in
+        // serverCapture.js.
+        if (failed) {
+            captureServerEvent({
+                req,
+                statusCode: res.statusCode,
+                ms,
+                err: req._diagError,
+            });
+        }
     });
 
     next();
