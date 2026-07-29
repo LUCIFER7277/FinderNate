@@ -79,7 +79,13 @@ export const getChatMessages = asyncHandler(async (req, res) => {
             .sort({ timestamp: -1 })
             .skip(skip)
             .limit(pageLimit)
-            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone productReference linkPreview checkoutDetails isEdited isForwarded forwardedFrom isPinned deliveryStatus fontStyle waveform')
+            // storyReference belongs in this list. The socket emit sends the
+            // whole populated document, so a story reply looks right the
+            // moment it arrives — but history comes through here, and a field
+            // missing from this select vanishes on the next refresh. That
+            // failure mode reads as "the attachment disappeared", which is
+            // worse than never having shown it.
+            .select('sender message messageType mediaUrl fileName fileSize duration timestamp readBy replyTo reactions deletedForEveryone productReference storyReference linkPreview checkoutDetails isEdited isForwarded forwardedFrom isPinned deliveryStatus fontStyle waveform')
             .populate('sender', 'username fullName profileImageUrl')
             .populate({
                 path: 'replyTo',
@@ -165,6 +171,16 @@ export const addMessage = asyncHandler(async (req, res) => {
             : body.productReference
     ) : null;
 
+    // Replies sent from the story viewer. Gated on the type the same way
+    // productReference is, so an ordinary text message cannot smuggle one in.
+    // Parsed defensively: multipart sends it as a JSON string, the JSON alias
+    // route sends it as an object.
+    const storyReference = (messageType === 'story_reply' && body.storyReference) ? (
+        typeof body.storyReference === 'string'
+            ? JSON.parse(body.storyReference)
+            : body.storyReference
+    ) : null;
+
     if ((!message || message.trim().length === 0) && !mediaFile) {
         throw new ApiError(400, 'Message content or media file is required');
     }
@@ -214,6 +230,22 @@ export const addMessage = asyncHandler(async (req, res) => {
 
     if (productReference) {
         messageData.productReference = productReference;
+    }
+
+    if (storyReference) {
+        // Whitelisted rather than spread, so a client cannot write arbitrary
+        // keys into the document. capturedAt is stamped here rather than taken
+        // from the body — it records when the server saw it, which is the only
+        // version worth trusting for "has this story expired".
+        messageData.storyReference = {
+            storyId: storyReference.storyId,
+            ownerId: storyReference.ownerId,
+            ownerUsername: storyReference.ownerUsername,
+            mediaUrl: storyReference.mediaUrl,
+            mediaType: storyReference.mediaType === 'video' ? 'video' : 'image',
+            caption: storyReference.caption,
+            capturedAt: new Date(),
+        };
     }
 
     // Media sent by the mobile app is uploaded via /media/upload-single first
@@ -336,8 +368,15 @@ export const addMessage = asyncHandler(async (req, res) => {
 
                 const notificationData = {
                     title: `New message from ${senderName}`,
-                    body: messageType === 'text'
-                        ? finalMessage.length > 50 ? finalMessage.substring(0, 50) + '...' : finalMessage
+                    // A story reply carries real text — an emoji or a typed
+                    // line — so it reads like a message, not like an
+                    // attachment. Without this case it fell into the final
+                    // branch and pushed "Sent a file", which describes nothing
+                    // that happened.
+                    body: (messageType === 'text' || messageType === 'story_reply')
+                        ? (messageType === 'story_reply'
+                            ? `Replied to your story: ${finalMessage.length > 40 ? finalMessage.substring(0, 40) + '…' : finalMessage}`
+                            : finalMessage.length > 50 ? finalMessage.substring(0, 50) + '...' : finalMessage)
                         : `Sent ${messageType === 'image' ? 'an image' : messageType === 'video' ? 'a video' : messageType === 'audio' ? 'an audio' : 'a file'}`,
                     chatId: chatId,
                     messageId: newMessage._id.toString(),

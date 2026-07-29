@@ -19,7 +19,7 @@ const MessageSchema = new mongoose.Schema({
     },
     messageType: {
         type: String,
-        enum: ['text', 'image', 'video', 'file', 'audio', 'location', 'payment_link', 'checkout', 'order_update', 'call', 'contact_seller'],
+        enum: ['text', 'image', 'video', 'file', 'audio', 'location', 'payment_link', 'checkout', 'order_update', 'call', 'contact_seller', 'story_reply'],
         default: 'text'
     },
     mediaUrl: String,
@@ -112,6 +112,29 @@ const MessageSchema = new mongoose.Schema({
         },
         productDescription: String,
         location: String
+    },
+    /**
+     * The story a message was sent in reply to.
+     *
+     * A SNAPSHOT, not a join — the same shape of decision as productReference
+     * above, and for a stronger reason: stories expire after 24 hours and are
+     * deleted. A reference that only held the id would render as a blank card
+     * the next day, so the conversation would lose the thing it was about.
+     * Copying the media url and caption in means "😍" still has its picture
+     * attached a week later.
+     *
+     * storyId is kept anyway, so a story that IS still live can be opened.
+     */
+    storyReference: {
+        storyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Story' },
+        ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+        ownerUsername: String,
+        mediaUrl: String,
+        mediaType: { type: String, enum: ['image', 'video'] },
+        caption: String,
+        // When the snapshot was taken, so a client can say "expired" rather
+        // than silently offering a tap that goes nowhere.
+        capturedAt: Date,
     },
     // 📤 Forwarding support
     forwardedFrom: {
