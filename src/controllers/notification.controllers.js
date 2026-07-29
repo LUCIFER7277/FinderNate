@@ -5,6 +5,8 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
 import notificationCache from "../utils/notificationCache.utils.js";
+import { User } from "../models/user.models.js";
+import { sendEmail } from "../utils/sendEmail.js";
 
 const sendRealTimeNotification = async (recipientId, notification) => {
     // Use Socket.IO Redis adapter to emit to user across all processes
@@ -67,6 +69,72 @@ export const createFollowNotification = async ({ recipientId, sourceUserId }) =>
 
     sendRealTimeNotification(recipientId, notification);
     await notificationCache.invalidateNotificationCache(recipientId);
+};
+
+/**
+ * Business verification decided by an admin — approved or rejected.
+ *
+ * Until this existed, an admin approved a business and the owner had no way to
+ * find out. Nothing was written, nothing was sent, and no socket event fired:
+ * the only way to learn the outcome was to open the profile and look, which
+ * assumes you knew to keep checking.
+ *
+ * Sent two ways on purpose. The in-app notification is the record, and the
+ * email is what actually reaches someone — a decision can land days after they
+ * last opened the app, which is exactly when an in-app-only notice is missed.
+ *
+ * senderId is left null: the decision comes from the platform, and admins are
+ * not Users, so there is no honest id to attribute it to.
+ */
+export const createBusinessVerificationNotification = async ({
+    recipientId,
+    approved,
+    businessName,
+    remarks,
+}) => {
+    if (!recipientId) return;
+
+    const message = approved
+        ? `Your business profile${businessName ? ` for ${businessName}` : ''} has been approved`
+        : `Your business profile${businessName ? ` for ${businessName}` : ''} was not approved${remarks ? `: ${remarks}` : ''}`;
+
+    const notification = await Notification.create({
+        receiverId: recipientId,
+        type: 'business_verification',
+        senderId: null,
+        message,
+    });
+
+    sendRealTimeNotification(recipientId, notification);
+    await notificationCache.invalidateNotificationCache(recipientId);
+
+    // Email is best-effort and deliberately not awaited into the caller's
+    // failure path: a bounced address must not roll back an approval an admin
+    // has already made.
+    try {
+        const user = await User.findById(recipientId).select('email fullName username');
+        if (user?.email) {
+            const name = user.fullName || user.username || 'there';
+            await sendEmail({
+                to: user.email,
+                subject: approved
+                    ? 'Your Findernate business profile is approved'
+                    : 'About your Findernate business profile',
+                html: approved
+                    ? `<p>Hi ${name},</p>
+                       <p>Your business profile${businessName ? ` for <strong>${businessName}</strong>` : ''} has been approved.</p>
+                       <p>You can now use the business features on Findernate.</p>
+                       <p>— The Findernate team</p>`
+                    : `<p>Hi ${name},</p>
+                       <p>Your business profile${businessName ? ` for <strong>${businessName}</strong>` : ''} could not be approved yet.</p>
+                       ${remarks ? `<p><strong>Reason:</strong> ${remarks}</p>` : ''}
+                       <p>You can update your details and submit again from your profile settings.</p>
+                       <p>— The Findernate team</p>`,
+            });
+        }
+    } catch (e) {
+        console.warn(`[notify] business verification email failed for ${recipientId}: ${e?.message}`);
+    }
 };
 
 // 🔴 Unlike Notification

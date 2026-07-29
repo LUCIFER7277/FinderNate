@@ -1,4 +1,5 @@
 import Business from "../../models/business.models.js";
+import { createBusinessVerificationNotification } from "../notification.controllers.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
@@ -100,6 +101,19 @@ export const verifyAadhaarCard = asyncHandler(async (req, res) => {
         businessId,
         `Aadhaar verification ${status} for business: ${business.businessName}`
     );
+
+    // Tell the owner. Approving used to be silent — the record changed and
+    // nothing reached the person whose business it was, so the only way to find
+    // out was to keep opening the profile and checking.
+    //
+    // Fire-and-forget with a terminal catch: a failed notification must not
+    // undo a decision the admin has already made and been shown as saved.
+    createBusinessVerificationNotification({
+        recipientId: business.userId?._id || business.userId,
+        approved: status === 'approved',
+        businessName: business.businessName,
+        remarks: business.verificationRemarks,
+    }).catch((e) => console.warn(`[notify] verification notice failed: ${e?.message}`));
 
     return res.status(200).json(
         new ApiResponse(200, {

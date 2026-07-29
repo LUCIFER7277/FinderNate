@@ -1,4 +1,5 @@
 import Business from "../../models/business.models.js";
+import { createBusinessVerificationNotification } from "../notification.controllers.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
@@ -175,6 +176,16 @@ export const verifyBusinessAccount = asyncHandler(async (req, res) => {
         businessId,
         `Business verification ${status} for: ${business.businessName} (${business.userId.username}). GST: ${approveGst ? 'Approved' : 'N/A'}, Aadhaar: ${approveAadhaar ? 'Approved' : 'N/A'}`
     );
+
+    // The second of the two approval paths — both were silent, and fixing only
+    // one would have made the notification depend on which screen the admin
+    // happened to use.
+    createBusinessVerificationNotification({
+        recipientId: business.userId?._id || business.userId,
+        approved: status === 'approved',
+        businessName: business.businessName,
+        remarks: business.verificationRemarks,
+    }).catch((e) => console.warn(`[notify] verification notice failed: ${e?.message}`));
 
     return res.status(200).json(
         new ApiResponse(200, {
