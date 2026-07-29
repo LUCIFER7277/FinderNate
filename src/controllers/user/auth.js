@@ -316,7 +316,21 @@ const resendRegistrationOTP = asyncHandler(async (req, res) => {
         ip: clientIp(req),
     });
 
-    await sendSms({ phone: normalizedPhone, otp: plainOtp, request_type });
+    //* Same handling as registerUser above. Unwrapped, a gateway failure threw
+    //* a raw error that became a 500 — "something broke on our end" — when the
+    //* truth is a 503: the SMS provider would not take it, and retrying may
+    //* well work. The daily OTP cap has already been consumed by
+    //* rateCheckAndUpsertOtp either way, so the person deserves to know which
+    //* of the two it was.
+    try {
+        await sendSms({ phone: normalizedPhone, otp: plainOtp, request_type });
+    } catch (smsErr) {
+        if (process.env.NODE_ENV === 'development') {
+            console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${normalizedPhone}: ${plainOtp}`);
+        } else {
+            throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
+        }
+    }
 
     return res.status(200).json(
         new ApiResponse(200, { retryAfterSeconds: 60 }, "OTP resent successfully")

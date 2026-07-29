@@ -227,7 +227,20 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     } else {
         //* The account's real number — `identifier` is scoped with the account
         //* id for shared phones and is not a dialable number.
-        await sendSms({ phone: String(user.phoneNumber), otp: plainOtp, request_type: 'password_reset' });
+        //*
+        //* Wrapped like the registration path: unwrapped, a gateway failure
+        //* surfaced as a 500 reading "something went wrong on our end", which
+        //* sends somebody locked out of their account to support instead of
+        //* telling them the SMS could not be delivered and to try again.
+        try {
+            await sendSms({ phone: String(user.phoneNumber), otp: plainOtp, request_type: 'password_reset' });
+        } catch (smsErr) {
+            if (process.env.NODE_ENV === 'development') {
+                console.warn(`[DEV] SMS failed (${smsErr.message}). Reset OTP for ${user.phoneNumber}: ${plainOtp}`);
+            } else {
+                throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
+            }
+        }
     }
 
     return res.status(200).json(
