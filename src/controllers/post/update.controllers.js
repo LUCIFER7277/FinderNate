@@ -61,12 +61,57 @@ export const editPost = asyncHandler(async (req, res) => {
 
     const customization = post.customization?.toObject?.() || { ...post.customization } || {};
 
+    /**
+     * Re-geocodes a nested location when its text has changed.
+     *
+     * editPost geocoded ONLY the top-level `location` body field. The location
+     * objects nested inside product/service/business were written straight
+     * through, so moving a shop to a new address saved the new text against the
+     * OLD coordinates — and every distance search, map pin and "near me" result
+     * went on pointing at the previous address indefinitely.
+     */
+    const regeocodeNested = async (incoming, existing) => {
+        if (!incoming) return incoming;
+        const textChanged =
+            (incoming.address && incoming.address !== existing?.address) ||
+            (incoming.name && incoming.name !== existing?.name) ||
+            (incoming.city && incoming.city !== existing?.city);
+        if (!textChanged || incoming.coordinates) return incoming;
+        try {
+            const coords = await getCoordinates(incoming);
+            if (coords?.latitude && coords?.longitude) {
+                return {
+                    ...incoming,
+                    coordinates: {
+                        type: "Point",
+                        coordinates: [coords.longitude, coords.latitude],
+                    },
+                };
+            }
+        } catch (error) {
+            console.error('Error re-geocoding nested location during edit:', error.message);
+        }
+        return incoming;
+    };
+
     // Type-specific details, merged so anything the client did not send is kept.
     if (post.contentType === "product" && parsedProduct) {
+        if (parsedProduct.location) {
+            parsedProduct.location = await regeocodeNested(
+                parsedProduct.location, customization.product?.location);
+        }
         customization.product = { ...(customization.product || {}), ...parsedProduct };
     } else if (post.contentType === "service" && parsedService) {
+        if (parsedService.location) {
+            parsedService.location = await regeocodeNested(
+                parsedService.location, customization.service?.location);
+        }
         customization.service = { ...(customization.service || {}), ...parsedService };
     } else if (post.contentType === "business" && parsedBusiness) {
+        if (parsedBusiness.location) {
+            parsedBusiness.location = await regeocodeNested(
+                parsedBusiness.location, customization.business?.location);
+        }
         customization.business = { ...(customization.business || {}), ...parsedBusiness };
     }
 

@@ -8,8 +8,13 @@ import { getCoordinates } from "./getCoordinates.js";
  * @returns {Object} Validated and potentially enhanced location data
  */
 export const validateDeliveryAndLocation = async (postData, postType) => {
-    if (!postData) {
-        throw new ApiError(400, `${postType} data is required`);
+    // Every caller passes an object literal `{ ...parsed, location: parsed }`,
+    // which is truthy even when the client sent no product/service/business
+    // object at all — so this guard could never fire and omitting the details
+    // entirely fell through to the delivery check below with an empty object.
+    // Test what the caller actually meant: whether there is anything in it.
+    if (!postData || Object.keys(postData).every((k) => postData[k] === undefined || postData[k] === null)) {
+        throw new ApiError(400, `${postType} details are required`);
     }
 
     const { deliveryOptions, location } = postData;
