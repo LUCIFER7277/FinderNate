@@ -67,6 +67,21 @@ const UserSchema = new mongoose.Schema({
     deletedAt: { type: Date, default: null },
     adminActionReason: { type: String, default: null },
     // Service post preferences
+    /**
+     * Chat background wallpaper — an id from constants/chatWallpapers.js, or
+     * null.
+     *
+     * Per USER, not per chat, and deliberately not stored on the Chat document
+     * where themeColor lives: themeColor is shared with the other participant
+     * and broadcast to them over a socket, whereas a wallpaper is one person's
+     * own view of their own app. Choosing it should not change what anyone else
+     * sees.
+     *
+     * null means no wallpaper, and must render as the chat looked before this
+     * existed — not as a white or default background.
+     */
+    chatWallpaper: { type: String, default: null },
+
     servicePostPreferences: {
         enableAutoFill: { type: Boolean, default: true }
     },
