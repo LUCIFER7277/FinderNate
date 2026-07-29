@@ -184,6 +184,17 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
         const obj = story.toObject();
         obj.postType = obj.mediaType;
         delete obj.mediaType;
+
+        // The author gets a count of who has seen each story; nobody else
+        // learns anything about the audience. The identities stay behind
+        // GET /stories/:storyId/viewers, which is owner-only — this is just
+        // the number, so the badge can render without opening that screen.
+        // The story's own author never counts as a viewer of it.
+        if (isOwnStory) {
+            obj.viewerCount = (obj.viewers || []).filter(
+                v => v.toString() !== story.userId.toString()
+            ).length;
+        }
         delete obj.viewers;
         return obj;
     });
@@ -219,8 +230,19 @@ export const fetchStoryViewers = asyncHandler(async (req, res) => {
     const { storyId } = req.params;
     const { page = 1, limit = 20 } = req.query;
 
-    const story = await Story.findById(storyId).populate("viewers", "username profileImageUrl");
+    // fullName as well as username: the list is rendered as a profile row, and
+    // a username alone is not who people recognise each other by.
+    const story = await Story.findById(storyId)
+        .populate("viewers", "username fullName profileImageUrl");
     if (!story) throw new ApiError(404, "Story not found");
+
+    // Owner only. This previously answered for ANY authenticated caller, so
+    // anyone holding a story id could enumerate who had watched someone else's
+    // story — the audience for a story is private to its author everywhere
+    // else, and the app only ever offers this screen to the author anyway.
+    if (story.userId.toString() !== req.user._id.toString()) {
+        throw new ApiError(403, "Only the author can see who viewed this story");
+    }
 
     // Filter out the story owner from viewers (safety measure)
     const filteredViewers = story.viewers.filter(

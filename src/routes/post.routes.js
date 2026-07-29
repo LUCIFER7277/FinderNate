@@ -79,8 +79,19 @@ router.route("/unlike-comment").post(verifyJWT, unlikeComment);
 
 // Comment routes
 router.route("/comment").post(verifyJWT, createComment);
-router.route("/comments").get(verifyJWT, getCommentsByPost);
-router.route("/comment/:commentId").get(verifyJWT, getCommentById);
+// READING comments is public, like the feed those comments hang off.
+//
+// These were verifyJWT, so a signed-out visitor got 401 and the sheet opened
+// empty — while the post card beside it read "2 comments", because the count
+// comes from engagement.comments in the public feed payload. The feed already
+// returns comment CONTENT to guests too, so requiring a token here protected
+// nothing; it only made the app contradict itself.
+//
+// Both controllers already do `req.user?._id ? ... : null`, i.e. they were
+// written for optional auth from the start — only the middleware disagreed.
+// Writing a comment stays behind verifyJWT below.
+router.route("/comments").get(optionalVerifyJWT, getCommentsByPost);
+router.route("/comment/:commentId").get(optionalVerifyJWT, getCommentById);
 router.route("/comment/:commentId").put(verifyJWT, updateComment);
 router.route("/comment/:commentId").delete(verifyJWT, deleteComment);
 
