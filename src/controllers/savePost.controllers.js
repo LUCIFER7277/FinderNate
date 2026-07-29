@@ -120,7 +120,12 @@ const getSavedPosts = asyncHandler(async (req, res) => {
             .limit(parseInt(limit))
             .populate({
                 path: 'postId',
-                select: 'caption media customization userId createdAt engagement',
+                // contentType and postType decide which card the client
+                // renders; without them a saved product post came back
+                // indistinguishable from a plain photo and lost its price,
+                // link and everything else. description is the body text for
+                // app-created posts.
+                select: 'caption description contentType postType media customization userId createdAt engagement',
                 populate: {
                     path: 'userId',
                     select: 'username fullName profileImageUrl'

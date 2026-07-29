@@ -320,6 +320,20 @@ const PostSchema = new mongoose.Schema({
     contentType: { type: String, required: true, enum: ['normal', 'product', 'service', 'business'] },
     caption: String,
     description: String,
+    /**
+     * The category chosen in the composer.
+     *
+     * The website has always collected this and BLOCKED submission until it was
+     * filled in, then sent it as a top-level field that no create controller
+     * read and no schema path accepted — so Mongoose dropped it silently. A
+     * required field that is thrown away on arrival.
+     *
+     * Kept at the top level rather than folded into customization.<type>
+     * .category, because the composer asks for it on every post type including
+     * normal, which has no customization object of its own.
+     */
+    category: String,
+    customCategory: String,
     hashtags: [String],
     mentions: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     media: [MediaSchema],

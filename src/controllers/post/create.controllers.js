@@ -18,7 +18,7 @@ export const createNormalPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, mood, activity, location, tags, settings, scheduledAt, publishedAt, status } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, settings, scheduledAt, publishedAt, status, category, customCategory } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
@@ -40,6 +40,8 @@ export const createNormalPost = asyncHandler(async (req, res) => {
         contentType: "normal",
         caption,
         description,
+        // Collected and required by the composer; previously dropped on arrival.
+        category, customCategory,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
@@ -71,7 +73,7 @@ export const createTweetPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { caption, description, mentions, location, tags, settings, scheduledAt, publishedAt, status } = req.body;
+    const { caption, description, mentions, location, tags, settings, scheduledAt, publishedAt, status, category, customCategory } = req.body;
     if (!caption || !caption.trim()) {
         throw new ApiError(400, "Tweet text (caption) is required");
     }
@@ -92,6 +94,8 @@ export const createTweetPost = asyncHandler(async (req, res) => {
         contentType: "normal",
         caption,
         description,
+        // Collected and required by the composer; previously dropped on arrival.
+        category, customCategory,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
@@ -123,7 +127,7 @@ export const createProductPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, mood, activity, location, tags, product, settings, scheduledAt, publishedAt, status } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, product, settings, scheduledAt, publishedAt, status, category, customCategory } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
@@ -150,6 +154,8 @@ export const createProductPost = asyncHandler(async (req, res) => {
 
     const post = await Post.create({
         userId, postType, contentType: "product", caption, description,
+        // Collected and required by the composer; previously dropped on arrival.
+        category, customCategory,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
@@ -185,7 +191,7 @@ export const createServicePost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, mood, activity, location, tags, service, settings, scheduledAt, publishedAt, status } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, service, settings, scheduledAt, publishedAt, status, category, customCategory } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
@@ -206,6 +212,8 @@ export const createServicePost = asyncHandler(async (req, res) => {
 
     const post = await Post.create({
         userId, postType, contentType: "service", caption, description,
+        // Collected and required by the composer; previously dropped on arrival.
+        category, customCategory,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
@@ -241,7 +249,7 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
 
-    const { postType, caption, description, mentions, mood, activity, location, tags, business, settings, scheduledAt, publishedAt, status } = req.body;
+    const { postType, caption, description, mentions, mood, activity, location, tags, business, settings, scheduledAt, publishedAt, status, category, customCategory } = req.body;
     if (!postType || !["photo", "reel", "video", "story", "tweet"].includes(postType)) {
         throw new ApiError(400, "postType must be one of 'photo', 'reel', 'video', 'story', or 'tweet'");
     }
@@ -264,6 +272,8 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
 
     const post = await Post.create({
         userId, postType, contentType: "business", caption, description,
+        // Collected and required by the composer; previously dropped on arrival.
+        category, customCategory,
         mentions: parsedMentions || [],
         media: uploadedMedia,
         customization: {
@@ -351,7 +361,7 @@ export const createBatchPosts = asyncHandler(async (req, res) => {
         if (contentType === "product") {
             const parsedProduct = parseField(p.product);
             validatedDetails = await validateDeliveryAndLocation({ ...parsedProduct, location: parsedLocation }, "product");
-            //* Optional — see the single-create path above. Left required here
+            //* Optional — see the single-create path above. Left required here,
             //* the bulk endpoint would reject a whole batch over one missing URL.
         } else if (contentType === "service") {
             const parsedService = parseField(p.service);

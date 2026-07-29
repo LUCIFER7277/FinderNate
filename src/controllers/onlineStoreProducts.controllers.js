@@ -96,6 +96,11 @@ export const getOnlineStoreProducts = asyncHandler(async (req, res) => {
             name:            p.name            || post.caption || 'Product',
             category:        p.category        || '',
             price:           p.price           ?? 0,
+            // The seller enters both of these and the store dropped them, so
+            // every listing rendered in a default currency with no way through
+            // to the product.
+            currency:        p.currency        || 'INR',
+            link:            p.link            || '',
             originalPrice:   p.price           ?? 0,   // extend if you add MRP field
             description:     p.description     || post.description || '',
             rating:          0,                         // extend when reviews are wired up

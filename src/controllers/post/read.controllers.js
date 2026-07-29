@@ -370,8 +370,13 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         const enrichedPosts = await enrichWithRatings(postsAfterBusinessFilter, 'userId');
         const postsWithBadges = await addBadgesToNestedUsers(enrichedPosts);
 
-        // Strip description from each post before sending
-        postsWithBadges.forEach(post => { delete post.description; });
+        // description is NOT stripped.
+        //
+        // It used to be deleted from every post here, with no reason recorded.
+        // For posts created in the app that is the only copy of the text — the
+        // app writes the body into `description` and leaves `caption` for the
+        // short line — so the profile grid showed those posts with nothing
+        // written on them at all.
 
         return res.status(200).json(
             new ApiResponse(200, {
