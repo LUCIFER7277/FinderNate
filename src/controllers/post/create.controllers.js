@@ -156,7 +156,15 @@ export const createProductPost = asyncHandler(async (req, res) => {
             product: validatedProduct,
             normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
-        settings: parsedSettings || {},
+        // Privacy resolved the same way createNormalPost does. Storing
+        // parsedSettings raw left privacy at the schema default 'public', so a
+        // commercial post ignored BOTH the per-post choice and the account's own
+        // privacy setting — a fully private account published public products.
+        settings: {
+            ...parsedSettings,
+            privacy: parsedSettings?.privacy || req.user?.privacy || 'public',
+            isPrivacyTouched: parsedSettings?.privacy ? true : false
+        },
         scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
         isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
@@ -204,7 +212,15 @@ export const createServicePost = asyncHandler(async (req, res) => {
             service: validatedService,
             normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
-        settings: parsedSettings || {},
+        // Privacy resolved the same way createNormalPost does. Storing
+        // parsedSettings raw left privacy at the schema default 'public', so a
+        // commercial post ignored BOTH the per-post choice and the account's own
+        // privacy setting — a fully private account published public products.
+        settings: {
+            ...parsedSettings,
+            privacy: parsedSettings?.privacy || req.user?.privacy || 'public',
+            isPrivacyTouched: parsedSettings?.privacy ? true : false
+        },
         scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
         isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,
@@ -254,7 +270,15 @@ export const createBusinessPost = asyncHandler(async (req, res) => {
             business: validatedBusiness,
             normal: { mood, activity, location: resolvedLocation, tags: parsedTags || [] },
         },
-        settings: parsedSettings || {},
+        // Privacy resolved the same way createNormalPost does. Storing
+        // parsedSettings raw left privacy at the schema default 'public', so a
+        // commercial post ignored BOTH the per-post choice and the account's own
+        // privacy setting — a fully private account published public products.
+        settings: {
+            ...parsedSettings,
+            privacy: parsedSettings?.privacy || req.user?.privacy || 'public',
+            isPrivacyTouched: parsedSettings?.privacy ? true : false
+        },
         scheduledAt, publishedAt,
         status: status || (scheduledAt ? "scheduled" : "published"),
         isPromoted: false, isFeatured: false, isReported: false, reportCount: 0,

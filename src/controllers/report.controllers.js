@@ -7,6 +7,9 @@ import Story from "../models/story.models.js";
 import Comment from "../models/comment.models.js";
 import { User } from "../models/user.models.js";
 
+/** Reports needed before content is queued for an admin to look at. */
+const REPORT_ESCALATION_THRESHOLD = 3;
+
 export const reportContent = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, "Authentication required");
@@ -101,26 +104,23 @@ export const reportContent = asyncHandler(async (req, res) => {
         // Count total reports for this content
         reportCount = await Report.countDocuments(deleteFilter);
 
-        // If content reaches 3 reports, automatically delete it
-        if (reportCount >= 3) {
-            try {
-                if (type === 'post' || type === 'reel') {
-                    await Post.findByIdAndDelete(contentId);
-                } else if (type === 'story') {
-                    await Story.findByIdAndDelete(contentId);
-                } else if (type === 'comment') {
-                    await Comment.findByIdAndDelete(contentId);
-                } else if (type === 'user') {
-                    // For users, you might want to suspend/ban instead of delete
-                    // await User.findByIdAndUpdate(contentId, { status: 'suspended' });
-                }
-
-                // Update all reports for this content to 'resolved' status
-                await Report.updateMany(deleteFilter, { status: 'resolved' });
-            } catch (deleteError) {
-                console.error(`Error deleting content ${contentId}:`, deleteError);
-                // Continue with report creation even if deletion fails
-            }
+        // Reports are ESCALATED for review, never auto-actioned.
+        //
+        // This used to hard-delete the content outright once three reports
+        // existed: findByIdAndDelete, no ownership check, no admin involved, no
+        // appeal, and none of the cleanup the real delete path performs (media
+        // on Bunny, likes, comments, saved posts all left behind). Three
+        // accounts — trivially three friends, or one person with three logins —
+        // could permanently destroy anybody's post, and the author was never
+        // told. Reporting is an accusation, not a verdict.
+        //
+        // The admin panel already reviews reports and offers view / delete /
+        // keep, so the decision has a home. This only makes sure it reaches it.
+        if (reportCount >= REPORT_ESCALATION_THRESHOLD) {
+            await Report.updateMany(
+                { ...deleteFilter, status: 'pending' },
+                { status: 'under_review' }
+            );
         }
 
         return res

@@ -3,6 +3,7 @@ import { Router } from "express";
 import { upload } from "../middlewares/multerConfig.js";
 import { MAX_IMAGES_PER_POST, MAX_VIDEOS_PER_POST } from "../constants/uploadLimits.js";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
+import { verifyAdminJWT } from "../middlewares/adminAuth.middleware.js";
 import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blocking.middleware.js";
 import { cacheUserFeed } from "../middlewares/cache.middleware.js";
 import {
@@ -108,9 +109,15 @@ router.route("/saved").get(verifyJWT, getSavedPosts);
 router.route("/saved/check/:postId").get(verifyJWT, checkPostSaved);
 
 // Report routes
+//
+// Filing a report is something any signed-in user does. READING the reports and
+// changing their status are moderation actions and were sitting behind plain
+// verifyJWT — so any authenticated account could enumerate every report on the
+// platform (who reported whom, and why) and mark any of them resolved or
+// dismissed, quietly clearing complaints about their own content.
 router.route("/report").post(verifyJWT, reportContent);
-router.route("/reports").get(verifyJWT, getReports);
-router.route("/report/:reportId/status").put(verifyJWT, updateReportStatus);
+router.route("/reports").get(verifyAdminJWT, getReports);
+router.route("/report/:reportId/status").put(verifyAdminJWT, updateReportStatus);
 
 // Interaction tracking routes
 router.route("/interaction/track").post(verifyJWT, trackPostInteraction);

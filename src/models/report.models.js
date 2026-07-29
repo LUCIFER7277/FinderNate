@@ -37,7 +37,10 @@ const ReportSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['pending', 'reviewed', 'resolved', 'dismissed'],
+        // under_review: enough reports have accumulated that this is queued for
+        // an admin to look at. Distinct from 'reviewed', which means an admin
+        // already has.
+        enum: ['pending', 'under_review', 'reviewed', 'resolved', 'dismissed'],
         default: 'pending'
     },
     // Admin review fields
