@@ -1,7 +1,7 @@
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
-import Post from "../../models/userPost.models.js";
+import Post, { deriveHashtags } from "../../models/userPost.models.js";
 import { getCoordinates } from "../../utils/getCoordinates.js";
 import { FeedCacheManager } from "../../utils/cache.utils.js";
 import { redisClient } from "../../config/redis.config.js";
@@ -61,36 +61,44 @@ export const editPost = asyncHandler(async (req, res) => {
 
     const customization = post.customization?.toObject?.() || { ...post.customization } || {};
 
-    if (post.contentType === "normal") {
-        customization.normal = {
-            ...(customization.normal || {}),
-            tags: parsedTags || customization.normal?.tags || [],
-            location: resolvedLocation || customization.normal?.location
-        };
-    } else if (post.contentType === "product" && parsedProduct) {
+    // Type-specific details, merged so anything the client did not send is kept.
+    if (post.contentType === "product" && parsedProduct) {
         customization.product = { ...(customization.product || {}), ...parsedProduct };
-        customization.normal = {
-            ...(customization.normal || {}),
-            tags: parsedTags || customization.normal?.tags || [],
-            location: resolvedLocation || customization.normal?.location
-        };
     } else if (post.contentType === "service" && parsedService) {
         customization.service = { ...(customization.service || {}), ...parsedService };
-        customization.normal = {
-            ...(customization.normal || {}),
-            tags: parsedTags || customization.normal?.tags || [],
-            location: resolvedLocation || customization.normal?.location
-        };
     } else if (post.contentType === "business" && parsedBusiness) {
         customization.business = { ...(customization.business || {}), ...parsedBusiness };
-        customization.normal = {
-            ...(customization.normal || {}),
-            tags: parsedTags || customization.normal?.tags || [],
-            location: resolvedLocation || customization.normal?.location
-        };
     }
 
+    // Tags and location are shared by every contentType and are applied
+    // UNCONDITIONALLY.
+    //
+    // This block used to sit inside each branch above, gated on the
+    // type-specific object being present — so editing only the tags or only the
+    // location of a product post did nothing at all, silently, because
+    // `parsedProduct` was undefined and the whole branch was skipped. The
+    // request returned 200 and the change simply evaporated.
+    customization.normal = {
+        ...(customization.normal || {}),
+        tags: parsedTags || customization.normal?.tags || [],
+        location: resolvedLocation || customization.normal?.location
+    };
+
     updateData.customization = customization;
+
+    // Recompute the hashtag index.
+    //
+    // `hashtags` is derived by a pre('save') hook on the model, and this
+    // controller uses findByIdAndUpdate — which does NOT fire it. So editing a
+    // caption changed the visible text while the search index kept the old
+    // words forever: a hashtag removed in an edit still matched, and one added
+    // never did. Mirrors the hook rather than calling it, because there is no
+    // document to save here.
+    updateData.hashtags = deriveHashtags({
+        caption: caption !== undefined ? caption : post.caption,
+        description: description !== undefined ? description : post.description,
+        customization,
+    });
 
     const oldPrivacy = post.settings?.privacy || 'public';
     const isPrivacyChangingToPublic = privacy && privacy === 'public' && oldPrivacy === 'private';
@@ -169,16 +177,19 @@ export const togglePostPrivacy = asyncHandler(async (req, res) => {
     }, `Post privacy updated to ${privacy}`));
 });
 
-export const updatePost = asyncHandler(async (req, res) => {
-    const { id } = req.params;
-    const updates = req.body;
-    updates.updatedAt = new Date();
-
-    const post = await Post.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
-    if (!post) throw new ApiError(404, "Post not found");
-
-    return res.status(200).json(new ApiResponse(200, post, "Post updated successfully"));
-});
+/*
+ * REMOVED — updatePost.
+ *
+ * It passed req.body straight into findByIdAndUpdate with no authentication,
+ * no req.user read and no ownership comparison, so anyone who could reach it
+ * could rewrite any field of any post by id — including userId, engagement
+ * counts and settings.privacy.
+ *
+ * It was never routed, so nothing broke by deleting it. Left in place it was a
+ * loaded gun: the next person wiring up a route by name would have shipped an
+ * unauthenticated write over the whole collection. editPost above is the real
+ * update path and checks ownership on entry.
+ */
 
 export const saveDraft = asyncHandler(async (req, res) => {
     const userId = req.user?._id || req.body.userId;

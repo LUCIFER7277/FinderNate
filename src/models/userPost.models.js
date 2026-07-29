@@ -360,26 +360,38 @@ function extractHashtags(text) {
 // customization.<type>.tags. This hook used to take the caption/description
 // only and overwrite everything else, so `hashtags` was empty on virtually every
 // post and hashtag search had nothing to match.
-PostSchema.pre('save', function (next) {
-    const captionHashtags = extractHashtags(this.caption || '');
-    const descriptionHashtags = extractHashtags(this.description || '');
+/**
+ * Derives the hashtag index from a post's text and its composer tags.
+ *
+ * Exported so the EDIT path can reuse it. editPost goes through
+ * findByIdAndUpdate, which does not fire the pre('save') hook below, and it
+ * previously left `hashtags` untouched — a tag removed in an edit still matched
+ * in search, and one added never did. Two copies of this logic would drift, so
+ * there is one, used by both.
+ */
+export function deriveHashtags({ caption, description, customization }) {
+    const captionHashtags = extractHashtags(caption || '');
+    const descriptionHashtags = extractHashtags(description || '');
 
-    const customization = this.customization || {};
+    const c = customization || {};
     const explicitTags = [
-        ...(customization.normal?.tags || []),
-        ...(customization.product?.tags || []),
-        ...(customization.service?.tags || []),
-        ...(customization.business?.tags || []),
+        ...(c.normal?.tags || []),
+        ...(c.product?.tags || []),
+        ...(c.service?.tags || []),
+        ...(c.business?.tags || []),
     ]
         .map(tag => String(tag).replace(/^#+/, '').trim().toLowerCase())
         .filter(Boolean);
 
-    const combinedHashtags = new Set([
-        ...captionHashtags,
-        ...descriptionHashtags,
-        ...explicitTags,
-    ]);
-    this.hashtags = [...combinedHashtags];
+    return [...new Set([...captionHashtags, ...descriptionHashtags, ...explicitTags])];
+}
+
+PostSchema.pre('save', function (next) {
+    this.hashtags = deriveHashtags({
+        caption: this.caption,
+        description: this.description,
+        customization: this.customization,
+    });
     next();
 });
 

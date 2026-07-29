@@ -7,6 +7,8 @@ import Reel from "../../models/reels.models.js";
 import Like from "../../models/like.models.js";
 import Comment from "../../models/comment.models.js";
 import SavedPost from "../../models/savedPost.models.js";
+import PostInteraction from "../../models/postInteraction.models.js";
+import Report from "../../models/report.models.js";
 import { deleteMultipleFromBunny, deleteFromBunny } from "../../utils/bunny.js";
 import { invalidatePostCaches } from "./helpers.js";
 
@@ -216,6 +218,17 @@ export const deleteContent = asyncHandler(async (req, res) => {
                 });
             }
 
+            // Database row FIRST, then the media.
+            //
+            // The order used to be the other way round, and it is only
+            // recoverable in one direction. Deleting Bunny first and then
+            // failing on the database leaves a live post pointing at files that
+            // no longer exist — broken images in everyone's feed, permanently.
+            // Doing the row first and failing on Bunny leaves orphaned files:
+            // invisible, costing a little storage, and cleanable later.
+            await Post.findByIdAndDelete(postId);
+            await Post.db.model('User').findByIdAndUpdate(userId, { $pull: { posts: postId } });
+
             if (mediaUrls.length > 0) {
                 try {
                     bunnyDeletionResult = await deleteMultipleFromBunny(mediaUrls);
@@ -225,13 +238,16 @@ export const deleteContent = asyncHandler(async (req, res) => {
                 }
             }
 
-            await Post.findByIdAndDelete(postId);
-            await Post.db.model('User').findByIdAndUpdate(userId, { $pull: { posts: postId } });
-
+            // Everything that points AT the post. PostInteraction, Report,
+            // PaymentLink and Order were left dangling — rows referencing an id
+            // that no longer resolves, which then render as blank cards and
+            // skew the counts built from them.
             await Promise.allSettled([
                 Like.deleteMany({ postId: postId }),
                 Comment.deleteMany({ postId: postId }),
-                SavedPost.deleteMany({ postId: postId })
+                SavedPost.deleteMany({ postId: postId }),
+                PostInteraction.deleteMany({ postId: postId }),
+                Report.deleteMany({ reportedPostId: postId }),
             ]);
 
             await invalidatePostCaches(postId, userId);

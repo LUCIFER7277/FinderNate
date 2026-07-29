@@ -468,8 +468,60 @@ export const deleteBusinessProfile = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Business profile not found");
     }
 
+    // Business posts are removed WITH everything that points at them.
+    //
+    // This was a bare deleteMany — a second, parallel delete path that skipped
+    // every cleanup the real one performs. The posts vanished while their
+    // media stayed on Bunny forever, and their likes, comments, saved-post
+    // entries, interactions and reports were left referencing ids that no
+    // longer resolve, which then render as blank cards and skew the counts
+    // built from them.
     const { default: Post } = await import("../../models/userPost.models.js");
+    const { default: Like } = await import("../../models/like.models.js");
+    const { default: Comment } = await import("../../models/comment.models.js");
+    const { default: SavedPost } = await import("../../models/savedPost.models.js");
+    const { default: PostInteraction } = await import("../../models/postInteraction.models.js");
+    const { default: Report } = await import("../../models/report.models.js");
+    const { deleteMultipleFromBunny } = await import("../../utils/bunny.js");
+
+    const businessPosts = await Post.find({ userId, contentType: 'business' })
+        .select('_id media').lean();
+    const postIds = businessPosts.map(p => p._id);
+
+    const mediaUrls = [];
+    for (const p of businessPosts) {
+        for (const m of p.media || []) {
+            if (m.url) mediaUrls.push(m.url);
+            if (m.thumbnailUrl) mediaUrls.push(m.thumbnailUrl);
+            for (const extra of m.additionalMedia || []) {
+                if (extra.url) mediaUrls.push(extra.url);
+                if (extra.thumbnailUrl) mediaUrls.push(extra.thumbnailUrl);
+            }
+        }
+    }
+
+    // Rows first, then media — a failed Bunny call leaves orphaned files, which
+    // is recoverable; the reverse leaves live posts with dead images, which is not.
     const deletedPosts = await Post.deleteMany({ userId, contentType: 'business' });
+
+    if (postIds.length) {
+        await Promise.allSettled([
+            Like.deleteMany({ postId: { $in: postIds } }),
+            Comment.deleteMany({ postId: { $in: postIds } }),
+            SavedPost.deleteMany({ postId: { $in: postIds } }),
+            PostInteraction.deleteMany({ postId: { $in: postIds } }),
+            Report.deleteMany({ reportedPostId: { $in: postIds } }),
+            Post.db.model('User').updateMany(
+                { posts: { $in: postIds } },
+                { $pull: { posts: { $in: postIds } } }
+            ),
+        ]);
+    }
+
+    if (mediaUrls.length) {
+        await deleteMultipleFromBunny(mediaUrls).catch((e) =>
+            console.warn(`[business] media cleanup failed: ${e?.message}`));
+    }
 
     await Business.deleteOne({ userId });
 
