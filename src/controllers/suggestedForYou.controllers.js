@@ -21,7 +21,96 @@ function shuffleArray(array) {
     }
 }
 
+/**
+ * Signed-out visitors get the accounts most people follow.
+ *
+ * Everything the personalised path below scores on — posts you liked, posts you
+ * commented on, friends you have in common — requires knowing who you are.
+ * There is nothing to personalise for a visitor, but "nothing to personalise"
+ * is not the same as "nothing to show": this panel is how someone who has just
+ * arrived finds the first account worth following.
+ *
+ * Same response shape as the personalised path, so the client needs no branch.
+ */
+const sendPopularSuggestions = async (req, res) => {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const skip = (page - 1) * limit;
+    const blockedUsers = req.blockedUsers || [];
+
+    // Follower counts are not denormalised onto User, so ranking by popularity
+    // means aggregating. Capped well above one page: the sort has to happen
+    // before the cut or "most followed" would mean "most followed out of an
+    // arbitrary slice".
+    const ranked = await Follower.aggregate([
+        { $group: { _id: "$userId", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 200 },
+    ]);
+
+    const rankedIds = ranked.map(r => r._id);
+    const countById = new Map(ranked.map(r => [r._id.toString(), r.count]));
+
+    // Same eligibility rules the personalised path applies at its own final
+    // lookup — active, not a business profile, not blocked.
+    const eligible = await User.find({
+        _id: { $in: rankedIds, $nin: blockedUsers },
+        accountStatus: 'active',
+        isBusinessProfile: { $ne: true },
+    }).select('username fullName profileImageUrl bio isBusinessProfile');
+
+    // Re-impose the popularity order: $in returns documents in natural order,
+    // not the order of the array handed to it.
+    eligible.sort((a, b) =>
+        (countById.get(b._id.toString()) || 0) - (countById.get(a._id.toString()) || 0));
+
+    const pageUsers = eligible.slice(skip, skip + limit);
+
+    const followingCounts = await Follower.aggregate([
+        { $match: { followerId: { $in: pageUsers.map(u => u._id) } } },
+        { $group: { _id: "$followerId", count: { $sum: 1 } } },
+    ]);
+    const followingMap = new Map(followingCounts.map(f => [f._id.toString(), f.count]));
+
+    const details = pageUsers.map(user => ({
+        _id: user._id,
+        username: user.username,
+        fullName: user.fullName,
+        profileImageUrl: user.profileImageUrl,
+        bio: user.bio,
+        isBusinessProfile: user.isBusinessProfile,
+        followersCount: countById.get(user._id.toString()) || 0,
+        followingCount: followingMap.get(user._id.toString()) || 0,
+        // Nobody is signed in, so nobody is followed by them.
+        isFollowing: false,
+    }));
+
+    const withBadges = await addBadgesToUsers(details);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            suggestions: withBadges,
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(eligible.length / limit),
+                totalSuggestions: eligible.length,
+                hasNextPage: skip + limit < eligible.length,
+                hasPrevPage: page > 1,
+            },
+        }, "Popular users retrieved successfully")
+    );
+};
+
 const getSuggestedForYou = asyncHandler(async (req, res) => {
+    // The route is mounted with optionalVerifyJWT, so req.user is legitimately
+    // undefined for a signed-out visitor — and destructuring it threw
+    // "Cannot destructure property '_id' of 'req.user' as it is undefined",
+    // which asyncHandler turned into a 500. Every logged-out visitor to the
+    // home page hit it, so the panel had never worked for anyone not signed in.
+    if (!req.user?._id) {
+        return sendPopularSuggestions(req, res);
+    }
+
     const { _id: currentUserId } = req.user;
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.min(parseInt(req.query.limit) || 10, 50);
