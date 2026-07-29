@@ -192,6 +192,11 @@ const BusinessContactSchema = new mongoose.Schema({
 }, { _id: false });
 
 const BusinessLocationSchema = new mongoose.Schema({
+    // Present on every other location shape in this file (the generic one at
+    // customization.normal.location, and ServiceLocationSchema) and missing
+    // only here — so the website's business Location input, which writes to
+    // business.location.name, was silently discarded by Mongoose on save.
+    name: String,
     address: String,
     city: String,
     state: String,
