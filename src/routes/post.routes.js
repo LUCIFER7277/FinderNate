@@ -63,7 +63,13 @@ const batchMediaUpload = upload.fields(
 );
 router.route("/create/batch").post(batchMediaUpload, verifyJWT, createBatchPosts);
 router.route("/user/:userId/profile").get(verifyJWT, getUserProfilePosts);
-router.route("/switch/profile/:userId").get(verifyJWT, getProfileTabContent);
+// Viewing a profile's tabs is browsing, so a signed-out visitor may do it —
+// but only now that getProfileTabContent actually enforces privacy. Until
+// this commit it filtered on userId alone, and verifyJWT was doing the entire
+// job of "who may see this", which it cannot: being signed in is not the same
+// as being allowed. checkContentVisibility now covers blocking, the target's
+// privacy setting and own-content, and takes a null viewer.
+router.route("/switch/profile/:userId").get(optionalVerifyJWT, getProfileTabContent);
 router.route("/home-feed").get(optionalVerifyJWT, getBlockedUsersMiddleware, getHomeFeed);
 router.route("/myPosts").get(verifyJWT, getMyPosts);
 router.route("/notifications").get(verifyJWT, getNotifications);

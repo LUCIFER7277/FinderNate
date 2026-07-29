@@ -5,6 +5,7 @@ import Story from "../models/story.models.js";
 import TaggedUser from "../models/taggedUser.models.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
+import { checkContentVisibility } from "../middlewares/privacy.middleware.js";
 
 const allowedTabs = ["photos", "reels", "videos", "tagged", "stories"];
 const postProjection = {
@@ -40,6 +41,28 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
     if (!Number.isInteger(page) || page < 1) throw new ApiError(400, "Page must be a positive integer");
     if (!Number.isInteger(limit) || limit < 1) throw new ApiError(400, "Limit must be a positive integer");
 
+    // Privacy. There was NONE here: every tab queried on userId alone, so any
+    // signed-in caller could read any account's photos, reels, videos and
+    // tweets — private accounts included — and private posts came back with
+    // the rest. verifyJWT on the route only proved the caller was *someone*,
+    // not that they were allowed to see this.
+    //
+    // checkContentVisibility covers the three cases together: own content,
+    // a blocking relationship in either direction, and the target's privacy
+    // setting. It takes a null viewer, which is what lets a signed-out visitor
+    // browse a public profile.
+    const isOwnProfile = currentUserId === userId?.toString();
+    if (!isOwnProfile) {
+        const canView = await checkContentVisibility(currentUserId, userId);
+        if (!canView) {
+            throw new ApiError(403, "This account is private. Follow to see their posts.");
+        }
+    }
+
+    // Posts the author marked private stay with the author, even on a public
+    // account — the same rule the reels feed applies.
+    const privacyFilter = isOwnProfile ? {} : { "settings.privacy": { $ne: "private" } };
+
     let data = [], total = 0;
 
     switch (tab) {
@@ -48,7 +71,8 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
                 userId,
                 postType: { $in: ["photo", "video"] },
                 contentType: "normal",
-                status: { $in: ["published", "scheduled"] }
+                status: { $in: ["published", "scheduled"] },
+                ...privacyFilter
             };
             data = await Post.find(filter, postProjection)
                 .populate("userId", "username profileImageUrl")
@@ -63,7 +87,8 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
             const filter = {
                 userId,
                 postType: "reel",
-                status: { $in: ["published", "scheduled"] }
+                status: { $in: ["published", "scheduled"] },
+                ...privacyFilter
             };
             data = await Post.find(filter, postProjection)
                 .populate("userId", "username profileImageUrl")
@@ -79,7 +104,8 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
                 userId,
                 postType: "video",
                 contentType: { $ne: "normal" },
-                status: { $in: ["published", "scheduled"] }
+                status: { $in: ["published", "scheduled"] },
+                ...privacyFilter
             };
             data = await Post.find(filter, postProjection)
                 .populate("userId", "username profileImageUrl")
@@ -97,8 +123,13 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
                 .lean();
             const postIds = tagged.map(t => t.targetId);
             // Paginate posts directly
-            total = await Post.countDocuments({ _id: { $in: postIds } });
-            data = await Post.find({ _id: { $in: postIds } }, postProjection)
+            // A tagged post belongs to whoever wrote it, not to this profile,
+            // so the account-level check above does not cover it. Filter on the
+            // posts' own privacy flag instead; a full per-author visibility
+            // check would need one lookup per post.
+            const taggedFilter = { _id: { $in: postIds }, ...privacyFilter };
+            total = await Post.countDocuments(taggedFilter);
+            data = await Post.find(taggedFilter, postProjection)
                 .populate("userId", "username profileImageUrl")
                 .sort({ createdAt: -1 })
                 .skip(skip)
