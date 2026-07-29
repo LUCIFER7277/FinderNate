@@ -169,6 +169,43 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Registration session not found. Please register again.");
     }
 
+    //* A TempUser row is keyed by PHONE NUMBER, so the same email and username
+    //* can sit in two of them under two different numbers — sign up, fail to
+    //* receive the SMS, sign up again from a second phone. registerUser checks
+    //* both against existing accounts, but it ran minutes ago and against the
+    //* other session, so it cannot see an account created in between.
+    //*
+    //* Once either session completed, verifying the other reached the unique
+    //* index on `users` and threw a raw E11000 from the driver. That surfaced
+    //* as an opaque 500, and because it threw BEFORE the cleanup below, the
+    //* TempUser and the OTP both survived — so every retry failed identically.
+    //* The signup could never be finished and never be abandoned.
+    const wanted = {
+        email: String(tempUser.email).trim().toLowerCase(),
+        username: String(tempUser.username).trim().toLowerCase(),
+    };
+
+    const claimed = await User.findOne({
+        $or: [
+            { email: new RegExp(`^${escapeRegex(wanted.email)}$`, 'i') },
+            { username: new RegExp(`^${escapeRegex(wanted.username)}$`, 'i') },
+        ],
+    });
+
+    if (claimed) {
+        //* Nothing about this session can ever succeed, so retire it rather
+        //* than leaving it to fail the same way on the next attempt.
+        await Promise.all([
+            TempUser.deleteOne({ _id: tempUser._id }),
+            AuthOtp.deleteOne({ _id: otpRecord._id }),
+        ]);
+
+        throw new ApiError(409,
+            String(claimed.email).toLowerCase() === wanted.email
+                ? "An account already exists for this email address. Please sign in, or reset your password if you have forgotten it."
+                : "That username was taken while you were signing up. Please register again with a different username.");
+    }
+
     const uid = uuidv4();
     //* This writes through User.collection — the RAW driver — so NONE of the
     //* schema setters run. `email` is declared `trim: true, lowercase: true`,
@@ -177,7 +214,7 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
     //* (User.findOne({ email })), where Mongoose DOES lowercase the filter —
     //* so a stored "Foo@Gmail.com" could never be matched and the account was
     //* locked out of both email login and password reset. Normalise here.
-    await User.collection.insertOne({
+    const newUserDoc = {
         uid,
         fullName: tempUser.fullName,
         fullNameLower: tempUser.fullNameLower,
@@ -209,7 +246,25 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         lastSeenAt: new Date(),
         createdAt: new Date(),
         updatedAt: new Date(),
-    });
+    };
+
+    try {
+        await User.collection.insertOne(newUserDoc);
+    } catch (e) {
+        //* The check above closes the window that stays open for minutes; this
+        //* closes the one that stays open for milliseconds, when the same
+        //* signup is verified twice at once. Same reasoning, same cleanup —
+        //* without it the session would be left in the un-finishable state.
+        if (e?.code === 11000) {
+            await Promise.all([
+                TempUser.deleteOne({ _id: tempUser._id }),
+                AuthOtp.deleteOne({ _id: otpRecord._id }),
+            ]);
+            throw new ApiError(409,
+                "An account with these details already exists. Please sign in.");
+        }
+        throw e;
+    }
 
     const user = await User.findOne({ uid }).select("-password -refreshToken");
 

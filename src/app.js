@@ -5,6 +5,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import helmet from 'helmet';
 import { errorHandler } from './middlewares/errorHandler.js';
+import { requestContext, requestLogger } from './middlewares/requestContext.js';
 import { redisHealthCheck } from './config/redis.config.js';
 import { generalRateLimit, healthCheckRateLimit } from './middlewares/rateLimiter.middleware.js';
 
@@ -15,6 +16,14 @@ app.use(helmet({
         contentSecurityPolicy: false, // Disable CSP for now to avoid breaking existing functionality
         crossOriginEmbedderPolicy: false // Needed for some CDN integrations
 }));
+
+// Request id + failure logging. Mounted first so the id exists for every
+// later middleware, including the ones that reject a request before it ever
+// reaches a route. Unlike morgan below this is always on: it only writes for
+// failures and slow requests, which is the difference between having something
+// to read when a user reports a problem and having nothing.
+app.use(requestContext);
+app.use(requestLogger);
 
 // Morgan logging middleware - Only in development mode
 if (process.env.NODE_ENV === 'development') {
