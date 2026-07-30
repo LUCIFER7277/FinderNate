@@ -260,24 +260,34 @@ export class UserCacheManager extends CacheManager {
 export class SearchCacheManager extends CacheManager {
 
     /**
-     * Cache search results
+     * Cache search results.
+     *
+     * [viewerId] is REQUIRED for a logged-in viewer and must not be omitted:
+     * a search response carries per-viewer state (isLikedBy, isFollowing,
+     * likedByPreview), so caching it without one puts a personal response in
+     * the shared anonymous bucket, where the next searcher reads it back as
+     * their own. See the note on RedisKeys.searchResults.
+     *
      * @param {string} query - Search query
      * @param {number} page - Page number
      * @param {Array} results - Search results
+     * @param {string|null} viewerId - Signed-in viewer, or null if anonymous
      */
-    static async cacheSearchResults(query, page, results) {
-        const key = RedisKeys.searchResults(query, page);
+    static async cacheSearchResults(query, page, results, viewerId = null) {
+        const key = RedisKeys.searchResults(query, page, viewerId);
         await this.set(key, results, RedisTTL.SEARCH_RESULTS);
     }
 
     /**
-     * Get cached search results
+     * Get cached search results. See cacheSearchResults on [viewerId].
+     *
      * @param {string} query - Search query
      * @param {number} page - Page number
+     * @param {string|null} viewerId - Signed-in viewer, or null if anonymous
      * @returns {Promise<Array|null>} Cached search results
      */
-    static async getSearchResults(query, page) {
-        const key = RedisKeys.searchResults(query, page);
+    static async getSearchResults(query, page, viewerId = null) {
+        const key = RedisKeys.searchResults(query, page, viewerId);
         return await this.get(key);
     }
 

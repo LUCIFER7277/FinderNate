@@ -165,9 +165,23 @@ export const RedisKeys = {
     trendingPosts: (location = 'global') => `fn:posts:trending:${location}`,
     
     // Search and exploration
-    searchResults: (query, page = 1) => {
+    //* Keyed by VIEWER as well as query.
+    //*
+    //* The cached search response carries per-viewer fields — isLikedBy,
+    //* likedByPreview, and now isFollowing / isFollowRequested — so a key of
+    //* (query, page) alone served the first searcher's personal state to
+    //* everyone else who ran the same search inside the TTL: another account's
+    //* posts showing as already liked, already followed.
+    //*
+    //* An anonymous bucket is safe to share: a logged-out viewer resolves all
+    //* of those to false, so every anonymous response is identical.
+    //*
+    //* This costs cache hit rate — each viewer now warms their own entry — but
+    //* cacheUserFeed already makes exactly this trade for the same reason, and
+    //* a shared cache of per-viewer state is not a cache, it is a leak.
+    searchResults: (query, page = 1, viewerId = null) => {
         const queryHash = Buffer.from(query).toString('base64').slice(0, 16);
-        return `fn:search:${queryHash}:p${page}`;
+        return `fn:search:${queryHash}:p${page}:v${viewerId || 'anon'}`;
     },
     exploreFeed: (page = 1) => `fn:explore:feed:p${page}`,
     userSuggestions: (userId) => `fn:suggestions:user:${userId}`,

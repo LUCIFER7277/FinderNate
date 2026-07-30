@@ -71,7 +71,13 @@ export const cacheTrendingPosts = cacheMiddleware(
 );
 
 export const cacheSearchResults = cacheMiddleware(
-    (req) => RedisKeys.searchResults(req.query.q || req.query.query, req.query.page || 1),
+    // Viewer id included: the response carries per-viewer state (isLikedBy,
+    // isFollowing, likedByPreview). See the note on RedisKeys.searchResults.
+    (req) => RedisKeys.searchResults(
+        req.query.q || req.query.query,
+        req.query.page || 1,
+        req.user?._id?.toString() ?? null,
+    ),
     RedisTTL.SEARCH_RESULTS
 );
 

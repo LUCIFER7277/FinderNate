@@ -10,6 +10,7 @@ import { filterBusinessPostsByPaymentPlan } from '../utils/businessPlan.utils.js
 import { addBadgesToNestedUsers, addBadgesToUsers } from '../utils/userBadge.utils.js';
 import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount,batchSharedCount } from '../utils/postEngagement.utils.js';
 import { getLikedByPreview } from '../utils/likedByPreview.utils.js';
+import { getFollowingIdSet, getPendingFollowRequestIdSet } from '../utils/followEngagement.utils.js';
 
 export const searchAllContent = async (req, res) => {
     try {
@@ -514,17 +515,30 @@ export const searchAllContent = async (req, res) => {
         // Stitch isLikedBy + likedBy (max 20 from Redis Hash) into search results
         const currentUserId = req.user?._id?.toString() ?? null;
         const contentIds = paginatedContent.map(item => item._id);
-        const [likedSet, likedByMap, searchLikeCountMap, sharedCountMap] = await Promise.all([
+        const [likedSet, likedByMap, searchLikeCountMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
             currentUserId ? batchIsLikedByUser(req.user._id, contentIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(contentIds),
             batchGetLikesCount(paginatedContent),
-            batchSharedCount(paginatedContent)
+            batchSharedCount(paginatedContent),
+            //* Follow state was never resolved here at all — the field simply
+            //* was not in the response, so every client defaulted it to false
+            //* and drew "Follow" on authors the viewer already follows.
+            //* Resolved live, per-viewer, exactly as getHomeFeed does: it
+            //* changes the instant someone taps Follow, so a cached value would
+            //* be stale immediately.
+            getFollowingIdSet(currentUserId),
+            getPendingFollowRequestIdSet(currentUserId)
         ]);
 
         const stitchedContent = paginatedContent.map(item => {
             const idStr = item._id.toString();
             const likedByUsers = likedByMap.get(idStr) || [];
             const preview = getLikedByPreview(likedByUsers, currentUserId);
+            //* userId is populated on these results, so the author id may be
+            //* either the populated document or a raw ObjectId depending on
+            //* the branch that produced the item.
+            const author = item.userId;
+            const authorId = author ? (author._id ?? author).toString() : null;
             return {
                 ...item,
                 engagement: {
@@ -534,6 +548,8 @@ export const searchAllContent = async (req, res) => {
 
                 },
                 isLikedBy: likedSet.has(idStr),
+                isFollowing: !!authorId && followingSet.has(authorId),
+                isFollowRequested: !!authorId && requestedSet.has(authorId),
                 likedBy: likedByUsers,
                 likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
             };
