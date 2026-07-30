@@ -7,6 +7,8 @@ import {
     MAX_IMAGES_WITH_VIDEO,
     MAX_MEDIA_PER_POST,
     MAX_VIDEOS_PER_POST,
+    POST_MEDIA_LIMITS_MB,
+    tooLargeMessage,
 } from "../../constants/uploadLimits.js";
 import { redisClient } from "../../config/redis.config.js";
 
@@ -95,6 +97,41 @@ export const uploadPostMedia = async (files, customThumbnail) => {
                 ? `A post with a video can include up to ${MAX_IMAGES_WITH_VIDEO} images, but ${imageCount} were attached — ${MAX_MEDIA_PER_POST} items in total.`
                 : `A post can include up to ${MAX_IMAGES_PER_POST} images, but ${imageCount} were attached.`
         );
+    }
+
+    // Per-type size ceilings.
+    //
+    // multerConfig says "per-type limits enforced in controllers" and that was
+    // true of the media and chat controllers — but NOT of this one, the path
+    // every post takes. So POST_MEDIA_LIMITS_MB existed and the post pipeline
+    // ignored it: the only ceiling in play was multer's blanket 600 MB, which
+    // let a 500 MB file through as an "image" against a 10 MB stated limit, and
+    // let it through as a fully buffered RAM copy at that.
+    //
+    // Checked before the Bunny loop, alongside the count checks, so an
+    // oversized post leaves nothing uploaded.
+    const categoryOf = (mimetype = "") => {
+        if (mimetype.startsWith("image/")) return "image";
+        if (mimetype.startsWith("video/")) return "video";
+        if (mimetype.startsWith("audio/")) return "audio";
+        return "file";
+    };
+
+    for (const file of files) {
+        const category = categoryOf(file.mimetype);
+        const limitMB = POST_MEDIA_LIMITS_MB[category];
+        if (!limitMB) continue;
+        // buffer.length as the fallback: if `size` were ever absent, comparing
+        // undefined would be false and this whole guard would silently pass
+        // everything — a check that cannot fail loudly is worse than no check.
+        const size = file.size ?? file.buffer?.length ?? 0;
+        if (size > limitMB * 1024 * 1024) {
+            throw new ApiError(400, tooLargeMessage({
+                category,
+                actualBytes: size,
+                limitMB,
+            }));
+        }
     }
 
     let videoThumbnailUrl = null;

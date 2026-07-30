@@ -20,7 +20,8 @@
  *
  * NOTE: multer uses memoryStorage, so a file this size sits in the Node
  * process for the duration of the upload. Raising this raises peak RSS
- * proportionally, and the post routes accept several videos per request.
+ * proportionally. Only video can legitimately reach this ceiling — every other
+ * type is held to POST_MEDIA_LIMITS_MB by uploadPostMedia.
  */
 export const MAX_UPLOAD_MB = 600;
 

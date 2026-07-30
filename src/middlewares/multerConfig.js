@@ -30,10 +30,12 @@ const isAllowedMime = (mime) => {
 //
 // WARNING: storage is memoryStorage, so the WHOLE file is held in the Node
 // process while it uploads. Peak RSS is about this figure multiplied by the
-// number of uploads in flight, and post routes accept up to 10 videos per
-// request (the batch route, six posts' worth). Serving this safely needs
-// either disk storage or direct client-to-Bunny uploads — until then, treat
-// the container's memory headroom as the real limit, not this number.
+// number of uploads in flight. A single post is now bounded at one video plus
+// nine images (uploadPostMedia enforces both the counts and the per-type sizes,
+// so ~700 MB worst case), but the batch route still carries six posts' worth.
+// Serving this safely needs either disk storage or direct client-to-Bunny
+// uploads — until then, treat the container's memory headroom as the real
+// limit, not this number.
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
 export const upload = multer({
