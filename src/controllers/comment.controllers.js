@@ -7,6 +7,7 @@ import Like from "../models/like.models.js";
 import { createCommentNotification } from "./notification.controllers.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
+import socketManager from "../config/socket.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 
@@ -94,7 +95,8 @@ export const createComment = asyncHandler(async (req, res) => {
     });
 
     // Replies run through this same handler, so they are counted too.
-    await adjustCommentsCount(postId, 1);
+    const commentsCount = await adjustCommentsCount(postId, 1);
+    if (commentsCount !== null) socketManager.emitGlobal('post_engagement_updated', { postId: postId.toString(), commentsCount });
 
     // Send notification to post owner (if not commenting on own post)
     try {
@@ -469,7 +471,8 @@ export const deleteComment = asyncHandler(async (req, res) => {
     );
 
     if (!existing.isDeleted) {
-        await adjustCommentsCount(existing.postId, -1);
+        const commentsCount = await adjustCommentsCount(existing.postId, -1);
+        if (commentsCount !== null) socketManager.emitGlobal('post_engagement_updated', { postId: existing.postId.toString(), commentsCount });
     }
 
     return res.status(200).json(new ApiResponse(200, null, "Comment deleted successfully"));

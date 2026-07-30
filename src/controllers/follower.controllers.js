@@ -10,6 +10,7 @@ import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from "../config/red
 const LIST_TTL = RedisTTL.FOLLOW_LIST;
 import { addBadgesToUsers } from "../utils/userBadge.utils.js";
 import { invalidateViewableUsersCache } from "../middlewares/privacy.middleware.js";
+import socketManager from "../config/socket.js";
 import {
     getFollowStatus,
     onUserFollowed,
@@ -75,7 +76,16 @@ export const followUser = asyncHandler(async (req, res) => {
         createFollowNotification({ recipientId: userId, sourceUserId: requesterId })?.catch(() => {});
         invalidateViewableUsersCache(requesterId)?.catch(() => {});
         invalidateViewableUsersCache(userId)?.catch(() => {});
-        
+
+        if (newFollowersCount !== null && newFollowingCount !== null) {
+            socketManager.emitGlobal('follow_status_updated', {
+                followedUserId: userId,
+                followersCount: newFollowersCount,
+                followerUserId: requesterId.toString(),
+                followingCount: newFollowingCount,
+            });
+        }
+
         return res.status(200).json(new ApiResponse(200, {
             followedUser: {
                 _id: userId,
@@ -155,7 +165,16 @@ export const unfollowUser = asyncHandler(async (req, res) => {
         // Cache invalidation fire-and-forget
         invalidateViewableUsersCache(requesterId).catch(() => {});
         invalidateViewableUsersCache(userId).catch(() => {});
-        
+
+        if (newFollowersCount !== null && newFollowingCount !== null) {
+            socketManager.emitGlobal('follow_status_updated', {
+                followedUserId: userId,
+                followersCount: newFollowersCount,
+                followerUserId: requesterId.toString(),
+                followingCount: newFollowingCount,
+            });
+        }
+
         return res.status(200).json(new ApiResponse(200, {
             unfollowedUser: {
                 _id: userId,

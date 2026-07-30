@@ -774,6 +774,14 @@ class SocketManager {
         }
     }
 
+    emitGlobal(event, data) {
+        if (this.io) {
+            this.io.emit(event, data);
+        } else {
+            console.warn(`Socket.IO not initialized, skipping emitGlobal for event: ${event}`);
+        }
+    }
+
     emitToUsers(userIds, event, data) {
         if (!this.io) {
             console.warn('Socket.IO not initialized, skipping emitToUsers');

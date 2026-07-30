@@ -8,6 +8,7 @@ import { createLikeNotification, createUnlikeNotification } from "./notification
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import { onPostLiked, onPostUnliked, batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 import { likeQueue } from "../queues/likeQueue.js";
+import socketManager from "../config/socket.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 
@@ -203,6 +204,7 @@ export const likePost = asyncHandler(async (req, res) => {
 
     // Lua returns the new count; fall back to DB-seed only if Lua failed entirely
     const likesCount = result.count ?? await ensureLikesCount(postId, +1);
+    socketManager.emitGlobal('post_engagement_updated', { postId: postId.toString(), likesCount });
 
     return res.status(200).json(new ApiResponse(200, {
         likedBy,
@@ -254,6 +256,7 @@ export const unlikePost = asyncHandler(async (req, res) => {
     ]);
 
     const likesCount = result.count ?? await ensureLikesCount(postId, -1);
+    socketManager.emitGlobal('post_engagement_updated', { postId: postId.toString(), likesCount });
 
     return res.status(200).json(new ApiResponse(200, {
         likedBy,
