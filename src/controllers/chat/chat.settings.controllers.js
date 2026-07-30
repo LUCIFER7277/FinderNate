@@ -121,6 +121,54 @@ export const updateGroupImage = asyncHandler(async (req, res) => {
     );
 });
 
+/**
+ * Rename a group.
+ *
+ * Restricted to group admins, same as updateGroupImage. Broadcasts a
+ * room-only event (not a per-participant emit) since a rename is a
+ * low-stakes cosmetic change.
+ */
+export const updateGroupName = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+    const { groupName } = req.body;
+
+    const chat = await Chat.findOne({ _id: chatId, participants: currentUserId });
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+    if (chat.chatType !== 'group') {
+        throw new ApiError(400, 'Only group chats can be renamed');
+    }
+
+    const isAdmin = (chat.admins || []).some(a => String(a) === String(currentUserId))
+        || String(chat.createdBy) === String(currentUserId);
+    if (!isAdmin) {
+        throw new ApiError(403, 'Only group admins can rename the group');
+    }
+
+    if (!groupName || !groupName.trim()) {
+        throw new ApiError(400, 'Group name is required');
+    }
+
+    chat.groupName = groupName.trim();
+    await chat.save();
+
+    safeEmitToChat(chatId, 'group_name_updated', {
+        chatId,
+        groupName: chat.groupName,
+        updatedBy: {
+            _id: currentUserId,
+            username: req.user.username,
+            fullName: req.user.fullName,
+        },
+    });
+
+    return res.status(200).json(
+        new ApiResponse(200, { chatId, groupName: chat.groupName }, 'Group renamed successfully')
+    );
+});
+
 export const startTyping = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { chatId } = req.params;

@@ -20,6 +20,7 @@ import {
     declineChatRequest,
     updateChatTheme,
     updateGroupImage,
+    updateGroupName,
     removeGroupMember,
     leaveGroup,
     deleteGroup,
@@ -55,6 +56,9 @@ router.patch('/:chatId/theme', updateChatTheme);
 
 // Set, replace or clear a group's image (admins only; multipart 'groupImage')
 router.patch('/:chatId/group-image', upload.single('groupImage'), updateGroupImage);
+
+// Rename a group (admins only)
+router.patch('/:chatId/group-name', updateGroupName);
 
 // Remove another participant from a group (admins only)
 router.delete('/:chatId/members/:memberId', removeGroupMember);
