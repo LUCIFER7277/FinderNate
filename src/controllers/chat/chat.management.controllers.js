@@ -6,7 +6,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import mongoose from 'mongoose';
 import socketManager from '../../config/socket.js';
 import { redisClient } from '../../config/redis.config.js';
-import { safeEmitToChat, checkFollowStatus } from './helpers.js';
+import { safeEmitToChat, safeEmitToUser, checkFollowStatus } from './helpers.js';
 
 export const createChat = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
@@ -503,5 +503,119 @@ export const declineChatRequest = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { chatId }, 'Chat request declined successfully')
+    );
+});
+
+/**
+ * Removes another participant from a group. Admin-only.
+ *
+ * The group had a member list with Admin/Creator badges and no way to act on
+ * it — no route existed to remove anyone, on either client. This is that
+ * route; the creator is exempt (they can only leave, via leaveGroup below,
+ * which promotes a replacement admin) so a group can never end up with no one
+ * able to manage it.
+ */
+export const removeGroupMember = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId, memberId } = req.params;
+
+    const chat = await Chat.findOne({ _id: chatId, participants: currentUserId });
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+    if (chat.chatType !== 'group') {
+        throw new ApiError(400, 'Only group chats have members to remove');
+    }
+
+    const isAdmin = (chat.admins || []).some(a => String(a) === String(currentUserId))
+        || String(chat.createdBy) === String(currentUserId);
+    if (!isAdmin) {
+        throw new ApiError(403, 'Only group admins can remove members');
+    }
+
+    if (String(memberId) === String(currentUserId)) {
+        throw new ApiError(400, 'Use "Leave group" to remove yourself');
+    }
+    if (String(memberId) === String(chat.createdBy)) {
+        throw new ApiError(403, 'The group creator cannot be removed');
+    }
+    if (!chat.participants.some(p => String(p) === String(memberId))) {
+        throw new ApiError(404, 'That user is not a member of this group');
+    }
+
+    chat.participants = chat.participants.filter(p => String(p) !== String(memberId));
+    chat.admins = (chat.admins || []).filter(a => String(a) !== String(memberId));
+    chat.stats = chat.stats || {};
+    chat.stats.totalParticipants = chat.participants.length;
+    await chat.save();
+
+    const populatedChat = await Chat.findById(chat._id)
+        .populate('participants', 'username fullName profileImageUrl')
+        .populate('createdBy', 'username fullName profileImageUrl');
+
+    const removedBy = {
+        _id: currentUserId,
+        username: req.user.username,
+        fullName: req.user.fullName
+    };
+
+    //* To the remaining members, so their member list updates without a refetch.
+    safeEmitToChat(chatId, 'group_member_removed', { chatId, memberId, removedBy });
+    //* Direct to the removed member too — they are no longer in the chat room
+    //* (their existing socket connection stays joined to it until they next
+    //* reconnect, but they can no longer fetch this chat's messages or member
+    //* list via the API, since both require participants membership), so
+    //* emitToChat above would never reach them.
+    safeEmitToUser(memberId, 'removed_from_group', { chatId, groupName: chat.groupName, removedBy });
+
+    return res.status(200).json(
+        new ApiResponse(200, populatedChat, 'Member removed successfully')
+    );
+});
+
+/**
+ * Leaves a group. Any participant, including the creator, may call this.
+ *
+ * If the leaver was the last admin, the longest-standing remaining member is
+ * promoted so the group is never left with nobody able to manage it. If the
+ * leaver was the last participant, the chat is kept (empty, inactive) rather
+ * than deleted — consistent with how the rest of this app never hard-deletes
+ * a record just because it became empty.
+ */
+export const leaveGroup = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+
+    const chat = await Chat.findOne({ _id: chatId, participants: currentUserId });
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+    if (chat.chatType !== 'group') {
+        throw new ApiError(400, 'Only group chats can be left — leave a direct chat by deleting it instead');
+    }
+
+    chat.participants = chat.participants.filter(p => String(p) !== String(currentUserId));
+    chat.admins = (chat.admins || []).filter(a => String(a) !== String(currentUserId));
+
+    let promoted = null;
+    if (chat.admins.length === 0 && chat.participants.length > 0) {
+        promoted = chat.participants[0];
+        chat.admins = [promoted];
+    }
+
+    chat.stats = chat.stats || {};
+    chat.stats.totalParticipants = chat.participants.length;
+    await chat.save();
+
+    const leftBy = {
+        _id: currentUserId,
+        username: req.user.username,
+        fullName: req.user.fullName
+    };
+
+    safeEmitToChat(chatId, 'group_member_left', { chatId, leftBy, promotedAdminId: promoted });
+
+    return res.status(200).json(
+        new ApiResponse(200, { chatId, promotedAdminId: promoted }, 'You have left the group')
     );
 });
