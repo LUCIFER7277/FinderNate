@@ -22,6 +22,7 @@ import {
     updateGroupImage,
     removeGroupMember,
     leaveGroup,
+    deleteGroup,
     // Enhanced messaging features
     addReaction,
     removeReaction,
@@ -60,6 +61,9 @@ router.delete('/:chatId/members/:memberId', removeGroupMember);
 
 // Leave a group (any participant, including the creator)
 router.post('/:chatId/leave', leaveGroup);
+
+// Delete an entire group (admins only) — destroys it for every member
+router.delete('/:chatId', deleteGroup);
 
 // Get messages for a chat
 router.get('/:chatId/messages', getChatMessages);

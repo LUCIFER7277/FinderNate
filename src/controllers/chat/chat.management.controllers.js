@@ -591,7 +591,7 @@ export const leaveGroup = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'Chat not found or you are not a participant');
     }
     if (chat.chatType !== 'group') {
-        throw new ApiError(400, 'Only group chats can be left — leave a direct chat by deleting it instead');
+        throw new ApiError(400, 'Only group chats can be left');
     }
 
     chat.participants = chat.participants.filter(p => String(p) !== String(currentUserId));
@@ -617,5 +617,79 @@ export const leaveGroup = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, { chatId, promotedAdminId: promoted }, 'You have left the group')
+    );
+});
+
+/**
+ * Deletes an entire group — destroys it for every member, not just the caller.
+ * Admin-only (same admin check as removeGroupMember).
+ *
+ * Unlike leaveGroup, which keeps an emptied-out chat around rather than
+ * hard-deleting it, this is an explicit, admin-initiated destruction of the
+ * whole group: the Chat document and all of its messages are removed.
+ */
+export const deleteGroup = asyncHandler(async (req, res) => {
+    const currentUserId = req.user._id;
+    const { chatId } = req.params;
+
+    const chat = await Chat.findOne({ _id: chatId, participants: currentUserId });
+    if (!chat) {
+        throw new ApiError(404, 'Chat not found or you are not a participant');
+    }
+    if (chat.chatType !== 'group') {
+        throw new ApiError(400, 'Only group chats can be deleted this way');
+    }
+
+    const isAdmin = (chat.admins || []).some(a => String(a) === String(currentUserId))
+        || String(chat.createdBy) === String(currentUserId);
+    if (!isAdmin) {
+        throw new ApiError(403, 'Only group admins can delete the group');
+    }
+
+    const participantIds = chat.participants.map(p => p.toString());
+    const groupName = chat.groupName;
+
+    await Message.deleteMany({ chatId: chat._id });
+    await Chat.findByIdAndDelete(chat._id);
+
+    (async () => {
+        try {
+            const cacheInvalidations = [];
+            for (const participantId of participantIds) {
+                for (let page = 1; page <= 3; page++) {
+                    const activeKey = `chats:user:${participantId}:status:active:page:${page}:limit:20`;
+                    const requestedKey = `chats:user:${participantId}:status:requested:page:${page}:limit:20`;
+                    cacheInvalidations.push(
+                        redisClient.del(activeKey),
+                        redisClient.del(requestedKey)
+                    );
+                }
+            }
+            await Promise.all(cacheInvalidations);
+        } catch (cacheError) {
+            console.error('Error invalidating caches:', cacheError);
+        }
+    })();
+
+    const deletedBy = {
+        _id: currentUserId,
+        username: req.user.username,
+        fullName: req.user.fullName
+    };
+
+    //* To anyone whose socket is still joined to the chat room.
+    safeEmitToChat(chatId, 'group_deleted', { chatId, groupName, deletedBy });
+    //* Direct to every other participant too — mirrors removeGroupMember's
+    //* removed_from_group: a participant's socket may or may not still be
+    //* joined to the chat room at this point, so the direct emit is the
+    //* reliable path regardless.
+    participantIds
+        .filter(participantId => participantId !== String(currentUserId))
+        .forEach(participantId => {
+            safeEmitToUser(participantId, 'group_deleted', { chatId, groupName, deletedBy });
+        });
+
+    return res.status(200).json(
+        new ApiResponse(200, { chatId }, 'Group deleted successfully')
     );
 });
