@@ -7,7 +7,14 @@ const saveFCMToken = asyncHandler(async (req, res) => {
     const { fcmToken } = req.body;
     const userId = req.user?._id;
 
-    if (!fcmToken) {
+    // Normalise FIRST, and treat anything that is not a non-empty string as absent.
+    // The updateMany below filters BY this value, so a blank/whitespace/non-string value
+    // reaching it would be catastrophic (see the guard comment there). The original
+    // `if (!fcmToken)` check already rejected undefined/null/"" but would have let a
+    // whitespace-only string (" ") or a non-string body value through to the query.
+    const deviceToken = typeof fcmToken === "string" ? fcmToken.trim() : "";
+
+    if (!deviceToken) {
         throw new ApiError(400, "FCM token is required");
     }
 
@@ -20,9 +27,31 @@ const saveFCMToken = asyncHandler(async (req, res) => {
         );
     }
 
+    // Detach this device token from every OTHER account before claiming it for the current one.
+    // An FCM token identifies a PHYSICAL DEVICE, not an account, so two accounts must never hold
+    // the same one at the same time — the loser of that race receives the winner's pushes.
+    //
+    // This, not logout, is what actually closes the collision in the common case: it does not
+    // depend on the previous session having ended cleanly. A crash, a force-quit, or an access
+    // token that simply expired all leave the old account still holding this device's token with
+    // no logout ever running. This call site is the ONLY point where we definitively know the
+    // device now belongs to someone else, because someone else just authenticated on it.
+    //
+    // The `deviceToken &&` guard is load-bearing, not defensive noise: the filter matches BY token
+    // value, so if the value were ever empty or null the filter would degenerate to
+    // "every user whose fcmToken is null" and null out the token of every such account in the DB.
+    // `deviceToken` is already proven to be a non-empty trimmed string above; this re-asserts it
+    // at the dangerous call site so no future edit to the guard above can quietly re-open it.
+    if (deviceToken) {
+        await User.updateMany(
+            { _id: { $ne: userId }, fcmToken: deviceToken },
+            { $set: { fcmToken: null, fcmTokenUpdatedAt: new Date() } }
+        );
+    }
+
     const user = await User.findByIdAndUpdate(
         userId,
-        { fcmToken, fcmTokenUpdatedAt: new Date() },
+        { fcmToken: deviceToken, fcmTokenUpdatedAt: new Date() },
         { new: true }
     ).select('fcmToken fcmTokenUpdatedAt');
 

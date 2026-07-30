@@ -396,11 +396,52 @@ const loginUser = asyncHandler(async (req, res) => {
 });
 
 const logOutUser = asyncHandler(async (req, res) => {
-    await User.findByIdAndUpdate(
-        req.user._id,
-        { $set: { refreshToken: undefined } },
-        { new: true }
-    );
+    // An FCM token addresses a PHYSICAL DEVICE, not an account. Left attached to
+    // this user after they sign out, every push generated for THIS user —
+    // message previews, incoming calls — still lands on that handset, in front
+    // of whoever signs in next.
+    //
+    // But it is cleared ONLY when the caller proves it owns that device, by
+    // sending the token it currently holds. This endpoint serves both clients,
+    // and User.fcmToken stores the MOBILE token: an unconditional clear meant
+    // signing out of the website on a laptop silently killed push notifications
+    // on the user's phone, where they were still perfectly signed in. The web
+    // client sends no token, matches nothing, and now leaves the phone alone.
+    //
+    // The login-side steal in saveFCMToken is the real backstop here — it runs
+    // even when logout never does (crash, force-quit, expired token), so this
+    // is defence in depth rather than the only line.
+    //
+    // NOTE: `null`, not `undefined`. Mongoose 8 strips undefined out of an
+    // update before it reaches the driver (`{$set:{x:undefined}}` casts to
+    // `{}`), so `undefined` would be a silent no-op. `null` is also the schema
+    // default for this field.
+    const deviceToken = typeof req.body?.fcmToken === "string"
+        ? req.body.fcmToken.trim()
+        : "";
+
+    const update = { $set: { refreshToken: undefined } };
+    const filter = { _id: req.user._id };
+    if (deviceToken) {
+        // Matched in the FILTER, not just assigned: if this user's stored token
+        // is some other device's, the update simply does not apply, rather than
+        // one handset's sign-out unhooking another's.
+        filter.fcmToken = deviceToken;
+        update.$set.fcmToken = null;
+    }
+
+    const cleared = await User.findOneAndUpdate(filter, update, { new: true });
+
+    // The filtered update above matches nothing when the token was not this
+    // user's (or none was sent), so refreshToken would go uncleared too. Run
+    // the unconditional half separately in that case.
+    if (!cleared) {
+        await User.findByIdAndUpdate(
+            req.user._id,
+            { $set: { refreshToken: undefined } },
+            { new: true }
+        );
+    }
 
     const options = { httpOnly: true, secure: true };
 
