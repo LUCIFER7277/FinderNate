@@ -292,58 +292,16 @@ export const searchAllContent = async (req, res) => {
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
 
-        // BUSINESS POST PRIORITY SYSTEM:
-        // Rule 1: Unpaid business posts are hidden from ALL users (including followers)
-        // Rule 2: If paid and unpaid posts share tags/categories, only paid post is visible
-
-        // First, categorize all posts
-        const postsWithMeta = rawPosts.map(post => {
-            const userId = post.userId?._id || post.userId;
-            const userIdStr = userId ? userId.toString() : null;
-            const isBusiness = userIdStr && businessUserIdsSet.has(userIdStr);
-            const hasActivePlan = userIdStr && activePlanUserIdsSet.has(userIdStr);
-
-            // Extract tags and categories for conflict detection
-            const tags = (post.hashtags || []).map(t => t.toLowerCase());
-            let categories = [];
-
-            if (post.contentType === 'business' && post.customization?.business?.category) {
-                categories.push(post.customization.business.category.toLowerCase());
-                if (post.customization.business.subcategory) {
-                    categories.push(post.customization.business.subcategory.toLowerCase());
-                }
-            } else if (post.contentType === 'product' && post.customization?.product?.category) {
-                categories.push(post.customization.product.category.toLowerCase());
-                if (post.customization.product.subcategory) {
-                    categories.push(post.customization.product.subcategory.toLowerCase());
-                }
-            } else if (post.contentType === 'service' && post.customization?.service?.category) {
-                categories.push(post.customization.service.category.toLowerCase());
-                if (post.customization.service.subcategory) {
-                    categories.push(post.customization.service.subcategory.toLowerCase());
-                }
-            }
-
-            return { post, isBusiness, hasActivePlan, tags, categories };
-        });
-
-        // Filter posts based on business priority rules
-        const filteredPosts = postsWithMeta.filter(({ isBusiness, hasActivePlan }) => {
-            // Rule 1: Always hide unpaid business posts from ALL users
-            if (isBusiness && !hasActivePlan) {
-                return false;
-            }
-
-            // Rule 2: For non-business posts, check if they conflict with paid business posts
-            // If a normal user's post shares tags/categories with a paid business post,
-            // the normal post is still visible (only business vs business conflict matters)
-            // This rule only hides unpaid business posts when paid ones exist with same tags
-
-            return true;
-        });
-
-        // Extract the post objects
-        const finalPosts = filteredPosts.map(({ post }) => post);
+        //* This used to hide the WHOLE post — any contentType — the moment its
+        //* author was an unpaid business account. filterBusinessPostsByPaymentPlan
+        //* (already used a few lines down for reels) only hides product/service/
+        //* business LISTINGS from an unpaid business; ordinary photos, tweets and
+        //* reels stay visible, matching the home feed's own rule that normal
+        //* content from every account always shows. The gap meant an unpaid
+        //* business's own hashtags never matched their own posts in search: the
+        //* post rendered on the home feed with a clickable "#tag", but that same
+        //* tag's search silently filtered the post back out.
+        const finalPosts = await filterBusinessPostsByPaymentPlan(rawPosts);
 
         const scoredPosts = finalPosts.map(post => {
             const userId = post.userId?._id || post.userId;
