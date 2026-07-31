@@ -39,8 +39,11 @@ router.get("/link/:linkId", getPaymentLinkDetails);
 // Used when someone accesses /post/:postId/pay/:amount
 router.get("/post/:postId/pay/:amount", getShareablePaymentLinkDetails);
 
-// Create Cashfree payment for shareable link (optional auth - can be used by guests)
-router.post("/post/create-order", optionalVerifyJWT, createShareablePhonePeOrder);
+// Create Cashfree payment for shareable link.
+// Auth is REQUIRED: a guest order has no buyer account, so it never shows up in
+// anyone's order history and never rolls into the seller's sales stats. The web
+// checkout gates on this too, but the gate has to hold at the API as well.
+router.post("/post/create-order", verifyJWT, createShareablePhonePeOrder);
 
 // Public route - get checkout details by linkId (for shareable checkout links)
 // Used when someone accesses /checkout/:linkId
@@ -60,6 +63,15 @@ router.post("/store/create-order", optionalVerifyJWT, createOnlineStoreOrder);
 // Public (no auth) so guest buyers can also complete verification
 router.post("/store/verify", verifyOnlineStorePayment);
 
+// Verify Cashfree payment after the return redirect.
+// Public, for the same reason as /store/verify above. This runs AFTER the money
+// has moved, and the buyer may come back on an expired token — a UPI hop can
+// take minutes. Requiring auth here meant a charged buyer saw "Payment Failed"
+// while the webhook quietly marked the order paid. It gives up no security:
+// verifyPayment never reads req.user, so the JWT authorised nothing; the order
+// status comes from Cashfree server-side, which is the real source of truth.
+router.post("/verify", verifyPayment);
+
 // Protected routes
 router.use(verifyJWT);
 
@@ -72,8 +84,6 @@ router.post("/create-shareable-link", createShareablePaymentLink);
 // Buyer initiates Cashfree payment (chat payment link)
 router.post("/create-order", createPhonePeOrder);
 
-// Verify Cashfree payment after return redirect
-router.post("/verify", verifyPayment);
 
 // Buyer shows interest - sends checkout message in chat with full product details & price breakdown
 router.post("/checkout", sendCheckoutMessage);
