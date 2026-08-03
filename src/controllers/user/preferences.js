@@ -4,6 +4,26 @@ import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import Post from "../../models/userPost.models.js";
 
+/**
+ * The value a toggle endpoint should write.
+ *
+ * These endpoints were flip-only: they ignored the body and inverted whatever
+ * was stored. A retried request, a double tap, or two screens open at once
+ * therefore landed on the opposite of what the user asked for, and the switch
+ * "would not stay". An explicit boolean in the body now wins; sending nothing
+ * still flips, so already-deployed clients keep working.
+ */
+const resolveToggleValue = (body, currentSetting) => {
+    const explicit = [body?.enableAutoFill, body?.enabled, body?.isEnabled]
+        .find(value => typeof value === 'boolean');
+    return typeof explicit === 'boolean' ? explicit : !currentSetting;
+};
+
+const invalidateProfileCaches = async (userId) => {
+    const { UserCacheManager } = await import('../../utils/cache.utils.js');
+    await UserCacheManager.invalidateUserProfile(userId.toString()).catch(() => {});
+};
+
 const toggleServiceAutoFill = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(400, "User ID is required");
@@ -12,9 +32,10 @@ const toggleServiceAutoFill = asyncHandler(async (req, res) => {
     if (!user) throw new ApiError(404, "User not found");
 
     const currentSetting = user.servicePostPreferences?.enableAutoFill ?? true;
-    user.servicePostPreferences = { enableAutoFill: !currentSetting };
+    user.servicePostPreferences = { enableAutoFill: resolveToggleValue(req.body, currentSetting) };
 
     await user.save({ validateBeforeSave: false });
+    await invalidateProfileCaches(userId);
 
     return res.status(200).json(
         new ApiResponse(200, {
@@ -69,9 +90,10 @@ const toggleProductAutoFill = asyncHandler(async (req, res) => {
     if (!user) throw new ApiError(404, "User not found");
 
     const currentSetting = user.productPostPreferences?.enableAutoFill ?? true;
-    user.productPostPreferences = { enableAutoFill: !currentSetting };
+    user.productPostPreferences = { enableAutoFill: resolveToggleValue(req.body, currentSetting) };
 
     await user.save({ validateBeforeSave: false });
+    await invalidateProfileCaches(userId);
 
     return res.status(200).json(
         new ApiResponse(200, {

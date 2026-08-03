@@ -14,9 +14,15 @@ import {
     RESEND_COOLDOWN_MS,
     resolveUserByIdentifier,
     assertValidPassword,
+    assertMinimumAge,
     normalizePhone,
     rateCheckAndUpsertOtp,
     clientIp,
+    assertOtpNotLocked,
+    registerFailedOtpAttempt,
+    assertLoginAttemptsAvailable,
+    registerFailedLogin,
+    clearFailedLogins,
 } from "./_helpers.js";
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -53,6 +59,13 @@ const registerUser = asyncHandler(async (req, res) => {
     //* the raw driver and reset saves with validateBeforeSave:false, so the
     //* schema's minlength never ran and any length was accepted over the API.
     assertValidPassword(password);
+
+    //* Age gate. Both clients only ever blocked a future date, and this handler
+    //* wrote dateOfBirth straight through, so an 11-year-old could complete
+    //* signup and get DMs from strangers and escrow checkout. Enforced here for
+    //* the same reason as the password rule — the raw-driver insert below runs
+    //* no schema validators, so nothing downstream would catch it.
+    assertMinimumAge(dateOfBirth);
 
     const normalizedEmail = String(email).trim().toLowerCase();
     //* One canonical shape for phone numbers. The web sent countryCode+number
@@ -159,9 +172,14 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
 
+    //* Same attempt budget as every other OTP path: a wrong code costs one of
+    //* five and the record locks after that, instead of the code being free to
+    //* guess for its whole five-minute life.
+    assertOtpNotLocked(otpRecord);
+
     const isOtpValid = await otpRecord.verifyOtp(otp);
     if (!isOtpValid) {
-        throw new ApiError(400, "Invalid OTP");
+        await registerFailedOtpAttempt(otpRecord);
     }
 
     const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone });
@@ -363,10 +381,20 @@ const loginUser = asyncHandler(async (req, res) => {
         throw new ApiError(404, "User not found");
     }
 
+    //* This endpoint had no limiter of its own and the general one allows
+    //* 50,000 requests a minute, so passwords could be sprayed at an account
+    //* without resistance. Counted per ACCOUNT, not per IP: `x-forwarded-for`
+    //* is caller-supplied, so an IP-keyed counter is beaten by rotating one
+    //* header. The counter is cleared as soon as the right password arrives.
+    await assertLoginAttemptsAvailable(user._id);
+
     const isPasswordValid = await user.isPasswordCorrect(password);
     if (!isPasswordValid) {
+        await registerFailedLogin(user._id);
         throw new ApiError(401, "Invalid credentials");
     }
+
+    await clearFailedLogins(user._id);
 
     if (user.isDeleted) {
         throw new ApiError(403, "Your account has been deleted. Please contact Find support.");

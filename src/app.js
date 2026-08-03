@@ -137,11 +137,22 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
 
-// Trust proxy for production (needed when behind nginx, load balancer, or using X-Forwarded-For headers)
-// In development, we don't trust proxy headers for security reasons
-if (process.env.NODE_ENV === 'production') {
-        app.set('trust proxy', 1);
-}
+// Trust exactly one proxy hop (nginx / the container platform's load balancer).
+//
+// This MUST be right, because req.ip is now the key for the auth and OTP rate
+// limiters and for the per-IP OTP quota (see clientIp in controllers/user/_helpers.js,
+// which was narrowed to req.ip precisely so a caller-supplied X-Forwarded-For
+// could not forge it). If Express does not trust the proxy, req.ip resolves to
+// the proxy's own address for EVERY request — so every user on the platform
+// shares one rate-limit bucket and the limiters lock everybody out at once.
+//
+// This used to be gated on NODE_ENV === 'production'. That made a security-
+// and availability-critical setting depend on one env var being spelled exactly
+// right in the deployed environment, with a silent, total-lockout failure mode
+// if it was not. It is now on by default and must be turned off explicitly,
+// which is the safe direction for a service that is always deployed behind a
+// proxy. Set TRUST_PROXY=false only when running with no proxy in front.
+app.set('trust proxy', process.env.TRUST_PROXY === 'false' ? false : 1);
 
 // Apply general rate limiting to all routes (but not to OPTIONS)
 app.use((req, res, next) => {

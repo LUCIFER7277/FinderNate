@@ -17,6 +17,8 @@ import {
     assertValidPassword,
     clientIp,
     normalizePhone,
+    assertOtpNotLocked,
+    registerFailedOtpAttempt,
     OTP_EXPIRY_MS,
 } from "./_helpers.js";
 
@@ -133,8 +135,12 @@ const verifyEmailWithOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
 
+    //* Checked before the hash comparison, so a locked record cannot be used to
+    //* keep guessing; a wrong code then costs one of the five attempts.
+    assertOtpNotLocked(otpRecord);
+
     const isOtpValid = await otpRecord.verifyOtp(otp);
-    if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
+    if (!isOtpValid) await registerFailedOtpAttempt(otpRecord);
 
     const verifiedUser = await User.findOneAndUpdate({ email }, { $set: { isEmailVerified: true } });
     await AuthOtp.deleteOne({ _id: otpRecord._id });
@@ -304,9 +310,15 @@ const resetPasswordWithOTP = asyncHandler(async (req, res) => {
         throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
 
+    //* Without this the same six digits could be walked from 000000 upwards for
+    //* the full five minutes the code is alive — a wrong guess left the record
+    //* untouched and cost the caller nothing. The lock is checked before the
+    //* hash comparison so a burnt record does not buy another free guess.
+    assertOtpNotLocked(otpRecord);
+
     const isOtpValid = await otpRecord.verifyOtp(otp);
     if (!isOtpValid) {
-        throw new ApiError(400, "Invalid OTP");
+        await registerFailedOtpAttempt(otpRecord);
     }
 
     user.password = newPassword;
@@ -380,8 +392,10 @@ const verifyAndUpdatePhone = asyncHandler(async (req, res) => {
         throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
 
+    assertOtpNotLocked(otpRecord);
+
     const isOtpValid = await otpRecord.verifyOtp(otp);
-    if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
+    if (!isOtpValid) await registerFailedOtpAttempt(otpRecord);
 
     await User.findByIdAndUpdate(userId, {
         $set: { phoneNumber: normalizedPhone, isPhoneVerified: true },
@@ -483,8 +497,10 @@ const verifyAndUpdateEmail = asyncHandler(async (req, res) => {
         throw new ApiError(400, "OTP has expired. Please request a new one.");
     }
 
+    assertOtpNotLocked(otpRecord);
+
     const isOtpValid = await otpRecord.verifyOtp(otp);
-    if (!isOtpValid) throw new ApiError(400, "Invalid OTP");
+    if (!isOtpValid) await registerFailedOtpAttempt(otpRecord);
 
     //* Re-check immediately before writing: someone else could have claimed
     //* the address during the five minutes this OTP was valid.

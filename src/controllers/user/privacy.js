@@ -6,6 +6,28 @@ import Post from "../../models/userPost.models.js";
 import Reel from "../../models/reels.models.js";
 import Story from "../../models/story.models.js";
 
+/**
+ * Drops the caches a settings change has to outlive.
+ *
+ * GET /users/profile serves a Redis snapshot with a ONE HOUR TTL, and none of
+ * the toggles below used to invalidate it. The write landed in Mongo every
+ * time, then the very next profile read handed back the pre-toggle snapshot —
+ * so "Hide Phone" and "Hide Address" appeared not to save at all, and both
+ * clients ended up carrying local workarounds for it. The auth cache holds its
+ * own copy of the user for req.user, so it goes too.
+ */
+const invalidateProfileCaches = async (userId) => {
+    const [{ invalidateAuthCache }, { UserCacheManager }] = await Promise.all([
+        import('../../middlewares/auth.middleware.js'),
+        import('../../utils/cache.utils.js'),
+    ]);
+
+    await Promise.allSettled([
+        invalidateAuthCache(userId),
+        UserCacheManager.invalidateUserProfile(userId.toString()),
+    ]);
+};
+
 const togglePhoneNumberVisibility = asyncHandler(async (req, res) => {
     const { isHidden } = req.body;
 
@@ -22,6 +44,8 @@ const togglePhoneNumberVisibility = asyncHandler(async (req, res) => {
     if (!updatedUser) {
         throw new ApiError(404, "User not found");
     }
+
+    await invalidateProfileCaches(req.user._id);
 
     return res.status(200).json(
         new ApiResponse(
@@ -52,6 +76,8 @@ const toggleAddressVisibility = asyncHandler(async (req, res) => {
         throw new ApiError(404, "User not found");
     }
 
+    await invalidateProfileCaches(req.user._id);
+
     return res.status(200).json(
         new ApiResponse(
             200,
@@ -67,6 +93,22 @@ const toggleAddressVisibility = asyncHandler(async (req, res) => {
 const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
     const userId = req.user._id;
 
+    // An explicit target wins over a blind flip.
+    //
+    // A flip-only endpoint desynchronises the moment a request is retried or
+    // the switch is tapped twice: the client sends "make me private" and gets
+    // back whatever the opposite of the server's state happened to be. Both
+    // spellings the clients use are accepted; omitting them keeps the old
+    // toggle behaviour so nothing already deployed breaks.
+    const body = req.body || {};
+    const requested = typeof body.isFullPrivate === 'boolean'
+        ? body.isFullPrivate
+        : typeof body.isPrivate === 'boolean'
+            ? body.isPrivate
+            : typeof body.privacy === 'string'
+                ? body.privacy === 'private'
+                : null;
+
     try {
         const user = await User.findById(userId);
 
@@ -74,8 +116,11 @@ const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
             throw new ApiError(404, "User not found");
         }
 
-        const newPrivacyState = user.privacy === "private" ? "public" : "private";
-        const newFullPrivateState = newPrivacyState === "private";
+        // Private by EITHER flag, so an account where the two disagree
+        // resolves to the safe reading rather than flipping to public.
+        const currentlyPrivate = user.privacy === "private" || user.isFullPrivate === true;
+        const newFullPrivateState = requested === null ? !currentlyPrivate : requested;
+        const newPrivacyState = newFullPrivateState ? "private" : "public";
 
         user.privacy = newPrivacyState;
         user.isFullPrivate = newFullPrivateState;
@@ -104,17 +149,27 @@ const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
         const { invalidateAuthCache } = await import('../../middlewares/auth.middleware.js');
         await invalidateAuthCache(userId);
 
-        const { UserCacheManager, FeedCacheManager } = await import('../../utils/cache.utils.js');
+        const { UserCacheManager, FeedCacheManager, CacheManager } = await import('../../utils/cache.utils.js');
         await UserCacheManager.invalidateUserProfile(userId);
         await FeedCacheManager.invalidateUserFeed(userId);
 
         const { invalidateViewableUsersCache } = await import('../../middlewares/privacy.middleware.js');
         await invalidateViewableUsersCache(userId);
 
-        if (newPrivacyState === 'public') {
-            await FeedCacheManager.invalidateExploreFeed();
-            await FeedCacheManager.invalidateTrendingFeed();
-        }
+        // Going PRIVATE has to purge OTHER people's caches, not just this
+        // user's.
+        //
+        // Only the "went public" case was handled, so switching an account to
+        // private left its posts sitting in every viewer's already-cached home
+        // feed (fn:user:<id>:feed:*), in explore and in trending until those
+        // expired — the account read as private everywhere except the one
+        // place people actually look, which is exactly the "other users can
+        // still see the posts" report. Both directions now clear all three.
+        await Promise.allSettled([
+            CacheManager.delPattern('fn:user:*:feed:*'),
+            FeedCacheManager.invalidateExploreFeed(),
+            FeedCacheManager.invalidateTrendingFeed(),
+        ]);
 
         return res.status(200).json(
             new ApiResponse(200, {
@@ -133,9 +188,24 @@ const toggleFullPrivateAccount = asyncHandler(async (req, res) => {
 
 const updateMessagingPrivacy = asyncHandler(async (req, res) => {
     const userId = req.user._id;
-    const { onlineStatus, lastSeen } = req.body;
+    const body = req.body || {};
 
     const validSettings = ['everyone', 'followers', 'nobody'];
+
+    // Messaging privacy is set THROUGH THIS ROUTE, not through the profile.
+    //
+    // PUT /users/profile now writes a strict allow-list of editable fields
+    // and messagingPrivacy is deliberately not on it, so a client still
+    // posting it there has it dropped in silence. This is the endpoint that
+    // does the work, and it accepts the shapes the clients actually send:
+    // { onlineStatus, lastSeen } for the two settings individually, or a
+    // single value under `visibility`/`messagingPrivacy`/`privacy` when the
+    // screen offers one control and moves both together.
+    const single = [body.visibility, body.messagingPrivacy, body.privacy]
+        .find(value => typeof value === 'string' && value.trim());
+
+    const onlineStatus = body.onlineStatus || single;
+    const lastSeen = body.lastSeen || single;
 
     if (onlineStatus && !validSettings.includes(onlineStatus)) {
         throw new ApiError(400, 'Invalid onlineStatus setting. Must be: everyone, followers, or nobody');
@@ -166,6 +236,11 @@ const updateMessagingPrivacy = asyncHandler(async (req, res) => {
     if (!user) {
         throw new ApiError(404, 'User not found');
     }
+
+    // GET /users/profile now reports messagingPrivacy too, and it is served
+    // from a one-hour snapshot — without this the settings screen could read
+    // back the pre-change value.
+    await invalidateProfileCaches(userId);
 
     const updatedOnlineStatus = user.messagingPrivacy?.onlineStatus || 'everyone';
     const updatedLastSeen = user.messagingPrivacy?.lastSeen || 'everyone';

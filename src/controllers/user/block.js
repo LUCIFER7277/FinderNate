@@ -3,7 +3,6 @@ import { User } from "../../models/user.models.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import Block from "../../models/block.models.js";
-import Follower from "../../models/follower.models.js";
 import { invalidateBlockedUsersCache } from "../../middlewares/blocking.middleware.js";
 
 const blockUser = asyncHandler(async (req, res) => {
@@ -36,8 +35,18 @@ const blockUser = asyncHandler(async (req, res) => {
 
     await invalidateBlockedUsersCache(blockerId, blockedUserId);
 
-    await Follower.findOneAndDelete({ followerId: blockerId, followingId: blockedUserId });
-    await Follower.findOneAndDelete({ followerId: blockedUserId, followingId: blockerId });
+    // Blocking HIDES, it does not unfollow.
+    //
+    // There were two Follower.findOneAndDelete calls here keyed on
+    // `followingId`, a field that does not exist on FollowerSchema (it is
+    // `userId`), so under Mongoose 8 — where strictQuery defaults to false and
+    // the unknown key is passed straight to MongoDB — they matched nothing and
+    // deleted nothing. Restoring them to the right field name would have been
+    // the wrong fix: severing the follow makes the block irreversible in
+    // practice, because after unblocking neither side follows the other any
+    // more and a private account's posts and stories never come back. The
+    // Block row alone is what hides the content, and removing it is what
+    // brings it back.
 
     return res.status(200).json(
         new ApiResponse(200, { block }, "User blocked successfully")
@@ -58,10 +67,31 @@ const unblockUser = asyncHandler(async (req, res) => {
     }
 
     await Block.findByIdAndDelete(existingBlock._id);
+
+    // Belt and braces: a duplicate row in the same direction (possible for
+    // records written before the unique index existed) would keep every
+    // read path filtering this pair out and make the unblock look ignored.
+    await Block.deleteMany({ blockerId, blockedId: blockedUserId });
+
     await invalidateBlockedUsersCache(blockerId, blockedUserId);
 
+    // The OTHER direction is a separate row and is not ours to remove — if
+    // they blocked us too, content stays hidden both ways and the client
+    // should say so rather than leaving the user to wonder why nothing
+    // reappeared.
+    const stillBlockedByThem = await Block.exists({
+        blockerId: blockedUserId,
+        blockedId: blockerId
+    });
+
     return res.status(200).json(
-        new ApiResponse(200, null, "User unblocked successfully")
+        new ApiResponse(
+            200,
+            { unblocked: true, blockedByThem: !!stillBlockedByThem },
+            stillBlockedByThem
+                ? "User unblocked. They have also blocked you, so their content stays hidden."
+                : "User unblocked successfully"
+        )
     );
 });
 

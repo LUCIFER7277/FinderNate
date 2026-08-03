@@ -34,6 +34,14 @@ const AuthOtpSchema = new mongoose.Schema(
         windowStart: { type: Date, default: Date.now },
         // Cooldown: earliest time the user may request another OTP (now + 60s)
         retryAfter: { type: Date, default: null },
+        // Brute-force protection: how many WRONG codes have been tried against
+        // this OTP. sendCount above only ever limited how many codes are SENT —
+        // nothing limited how many are guessed, so a 6-digit code could be
+        // walked from 000000 upwards for its whole 5-minute life.
+        attemptCount: { type: Number, default: 0 },
+        // Set once attemptCount hits the cap; until it passes, verification is
+        // refused without even comparing the hash.
+        lockedUntil: { type: Date, default: null },
     },
     { timestamps: true }
 );

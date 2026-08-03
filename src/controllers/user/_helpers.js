@@ -12,10 +12,31 @@ export const OTP_RATE_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const OTP_MAX_SENDS      = 20;
 /** OTPs one IP or device may request per day, across all accounts. */
 export const OTP_MAX_PER_IP     = 50;
+/**
+ * Wrong codes that may be tried against ONE OTP before it is locked.
+ *
+ * The send caps above limit how many codes go out; nothing limited how many
+ * were guessed, so the same 6-digit code could be walked from 000000 upwards
+ * for the whole five minutes it was valid — an unassisted account takeover on
+ * password reset. Five is enough for a mistyped code, far short of 10^6.
+ */
+export const OTP_MAX_ATTEMPTS   = 5;
+/** How long a burnt OTP stays locked. It expires inside this window anyway. */
+export const OTP_LOCK_MS        = 15 * 60 * 1000;
+
+// ── Failed-login throttle ──────────────────────────────────────────────────
+/** Consecutive failed sign-ins allowed per account before the cooldown. */
+export const LOGIN_MAX_FAILURES  = 10;
+/** How long the counter (and therefore the cooldown) lasts. */
+export const LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
 
 // ── Password policy ────────────────────────────────────────────────────────
 export const PASSWORD_MIN = 8;
 export const PASSWORD_MAX = 20;
+
+// ── Age policy ─────────────────────────────────────────────────────────────
+/** Minimum age to hold an account, matching the declared store content rating. */
+export const MIN_SIGNUP_AGE = 13;
 
 /**
  * Enforces the password policy server-side.
@@ -218,11 +239,30 @@ export const assertIpOtpQuota = async (ip) => {
     }
 };
 
-/** Best-effort client address, honouring the proxy in front of the API. */
+/**
+ * The client address the per-IP OTP quota is keyed on.
+ *
+ * This used to read the LEFTMOST `x-forwarded-for` entry, with `x-real-ip`
+ * behind it and `req.ip` only third. Both of those headers are supplied by the
+ * caller, so the quota above was keyed on a string the attacker chooses: every
+ * request with a fresh `X-Forwarded-For` landed in a fresh, empty bucket and
+ * OTP_MAX_PER_IP bounded nothing at all. A script could send unlimited OTPs —
+ * unlimited SMS spend, and unlimited codes at a chosen victim's number — from
+ * one host without touching a proxy.
+ *
+ * `req.ip` is what express resolves through the `trust proxy` setting in
+ * app.js: behind our proxy it is the last hop the proxy actually observed, and
+ * in development (where trust proxy is off) it is the socket address. Either
+ * way it is not caller-supplied, which is the whole point.
+ *
+ * EVERY caller of this helper feeds it straight into `rateCheckAndUpsertOtp({
+ * ip })` → assertIpOtpQuota (controllers/user/auth.js and
+ * controllers/user/otp.js), so nothing else changes behaviour here. Consent
+ * records already went to req.ip directly for this same reason — see
+ * recordGuestConsent in utils/guestCheckout.utils.js.
+ */
 export const clientIp = (req) =>
-    (req?.headers?.['x-forwarded-for']?.split(',')[0] ?? '').trim()
-    || req?.headers?.['x-real-ip']
-    || req?.ip
+    req?.ip
     || req?.socket?.remoteAddress
     || '';
 
@@ -259,9 +299,162 @@ export const rateCheckAndUpsertOtp = async ({ identifier, type, purpose, hashedO
 
     return AuthOtp.findOneAndUpdate(
         { identifier, type, purpose },
-        { otp: hashedOtp, expiry, sendCount, windowStart, retryAfter },
+        {
+            otp: hashedOtp, expiry, sendCount, windowStart, retryAfter,
+            //* A new code is a new secret, so it gets a fresh attempt budget and
+            //* clears any lock. That is not a way around the lockout: sends are
+            //* still capped at OTP_MAX_SENDS a day behind a 60s cooldown, which
+            //* leaves at most OTP_MAX_SENDS * OTP_MAX_ATTEMPTS guesses out of a
+            //* million. Without this, a genuine user who mistyped five times
+            //* could not recover their account even with a brand-new code.
+            attemptCount: 0,
+            lockedUntil: null,
+        },
         { upsert: true, new: true }
     );
+};
+
+/**
+ * Refuses verification while an OTP is locked out.
+ *
+ * Call this BEFORE comparing the code, so a locked record costs the attacker a
+ * 429 rather than another free guess.
+ */
+export const assertOtpNotLocked = (otpRecord) => {
+    if (otpRecord?.lockedUntil && new Date() < otpRecord.lockedUntil) {
+        const secondsLeft = Math.ceil((otpRecord.lockedUntil.getTime() - Date.now()) / 1000);
+        throw new ApiError(429,
+            "Too many incorrect codes. Please request a new OTP.",
+            [{ retryAfterSeconds: secondsLeft }]
+        );
+    }
+};
+
+/**
+ * Charges a wrong code to this OTP's attempt budget and throws.
+ *
+ * A wrong guess used to cost nothing at all — the record was left untouched and
+ * a plain 400 came back — so the code could be brute-forced for its whole life.
+ * Every failed verification now consumes one of OTP_MAX_ATTEMPTS, and the last
+ * one locks the record until a new code is requested.
+ */
+export const registerFailedOtpAttempt = async (otpRecord) => {
+    const attempts = (otpRecord.attemptCount || 0) + 1;
+    const locked = attempts >= OTP_MAX_ATTEMPTS;
+
+    await AuthOtp.updateOne(
+        { _id: otpRecord._id },
+        {
+            $set: {
+                attemptCount: attempts,
+                lockedUntil: locked ? new Date(Date.now() + OTP_LOCK_MS) : (otpRecord.lockedUntil || null),
+            },
+        }
+    );
+
+    if (locked) {
+        throw new ApiError(429, "Too many incorrect codes. Please request a new OTP.");
+    }
+
+    const remaining = OTP_MAX_ATTEMPTS - attempts;
+    throw new ApiError(400,
+        `Invalid OTP. ${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.`);
+};
+
+/**
+ * Per-account failed-sign-in throttle.
+ *
+ * /users/login had no limiter of its own and the general one allows 50,000
+ * requests a minute, so passwords could be sprayed without resistance. Counted
+ * per ACCOUNT rather than per IP on purpose: `x-forwarded-for` is caller-
+ * supplied, so an IP-keyed counter is bypassed by rotating one header.
+ *
+ * Fails OPEN if Redis is unavailable — a cache outage must not lock everybody
+ * out of signing in.
+ */
+export const assertLoginAttemptsAvailable = async (userId) => {
+    if (!userId) return;
+    try {
+        const count = Number(await redisClient.get(`login:fail:${userId}`)) || 0;
+        if (count >= LOGIN_MAX_FAILURES) {
+            throw new ApiError(429,
+                "Too many failed sign-in attempts. Please try again in a few minutes, or reset your password.");
+        }
+    } catch (err) {
+        if (err instanceof ApiError) throw err;
+        console.error('[LOGIN] failure throttle check skipped:', err.message);
+    }
+};
+
+/** Records one wrong password for this account. */
+export const registerFailedLogin = async (userId) => {
+    if (!userId) return;
+    try {
+        const key = `login:fail:${userId}`;
+        const count = await redisClient.incr(key);
+        if (count === 1) {
+            await redisClient.expire(key, Math.floor(LOGIN_FAIL_WINDOW_MS / 1000));
+        }
+    } catch (err) {
+        console.error('[LOGIN] failure counter skipped:', err.message);
+    }
+};
+
+/** Clears the failure counter once the right password arrives. */
+export const clearFailedLogins = async (userId) => {
+    if (!userId) return;
+    try {
+        await redisClient.del(`login:fail:${userId}`);
+    } catch (err) {
+        console.error('[LOGIN] failure counter reset skipped:', err.message);
+    }
+};
+
+/**
+ * Minimum-age gate for signup.
+ *
+ * Nothing derived an age anywhere: the clients only blocked future dates and
+ * the register handler wrote `dateOfBirth` straight to the document, so a
+ * child could complete signup and get DMs and escrow checkout. Play and the
+ * App Store both require an age gate on a social app carrying UGC and
+ * messaging, and DPDP requires parental consent below 18.
+ */
+export const assertMinimumAge = (dateOfBirth) => {
+    if (!dateOfBirth) {
+        throw new ApiError(400, "Date of birth is required", [
+            { field: "dateOfBirth", message: "Date of birth is required" },
+        ]);
+    }
+
+    const dob = new Date(dateOfBirth);
+    if (isNaN(dob.getTime())) {
+        throw new ApiError(400, "Enter a valid date of birth", [
+            { field: "dateOfBirth", message: "Enter a valid date of birth" },
+        ]);
+    }
+
+    const now = new Date();
+    if (dob > now) {
+        throw new ApiError(400, "Date of birth cannot be in the future", [
+            { field: "dateOfBirth", message: "Date of birth cannot be in the future" },
+        ]);
+    }
+
+    //* Whole years, so a birthday later today does not count as reached.
+    let age = now.getFullYear() - dob.getFullYear();
+    const monthDiff = now.getMonth() - dob.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < dob.getDate())) {
+        age -= 1;
+    }
+
+    if (age < MIN_SIGNUP_AGE) {
+        throw new ApiError(400,
+            `You must be at least ${MIN_SIGNUP_AGE} years old to create a Findernate account`, [
+            { field: "dateOfBirth", message: `You must be at least ${MIN_SIGNUP_AGE} years old to create an account` },
+        ]);
+    }
+
+    return dob;
 };
 
 export const generateAcessAndRefreshToken = async (userId) => {

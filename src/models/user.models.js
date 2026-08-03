@@ -114,6 +114,32 @@ const UserSchema = new mongoose.Schema({
         communityVersion:      { type: String,  default: null },
         acceptanceIP:          { type: String,  default: null },
         acceptanceUserAgent:   { type: String,  default: null },
+    },
+
+    /**
+     * 13+ ATTESTATION FOR ACCOUNTS CREATED BY GUEST CHECKOUT.
+     *
+     * Ordinary registration proves the age gate with `dateOfBirth`. A guest
+     * checkout has no date of birth — the buyer ticks "I am 13 or older" and
+     * inventing a birth date to satisfy the gate would be fabricating a fact
+     * about a person — so the attestation itself IS the compliance record.
+     *
+     * It must be a real schema path. guestAccount.js writes it through the raw
+     * driver, which happily stored it while Mongoose's strict mode dropped it
+     * from every ordinary read: the record existed in the collection and was
+     * invisible to all application code, including anything that would ever be
+     * asked to produce it. Declared here so `User.findById(...)` returns it.
+     */
+    guestAgeAttestation: {
+        attested:   { type: Boolean, default: false },
+        minimumAge: { type: Number,  default: null },
+        attestedAt: { type: Date,    default: null },
+        // 'guest_checkout' for the shareable-payment-link flow.
+        source:     { type: String,  default: null },
+        // EVIDENCE. Must be req.ip (resolved through app.js `trust proxy`),
+        // never a raw x-forwarded-for value, which the caller controls.
+        ip:         { type: String,  default: null },
+        userAgent:  { type: String,  default: null },
     }
 }, { timestamps: true });
 
