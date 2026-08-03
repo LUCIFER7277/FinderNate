@@ -7,14 +7,55 @@ import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
 import Follower from "../models/follower.models.js";
 import { checkContentVisibility } from "../middlewares/privacy.middleware.js";
+import { POST_MEDIA_LIMITS_MB, tooLargeMessage } from "../constants/uploadLimits.js";
 
 // 1. Upload Story
 export const uploadStory = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     if (!req.file) throw new ApiError(400, "Media file is required");
 
+    // A story is an image or a video — mediaType has no other value. The route
+    // uses the shared multer instance, which also accepts audio and documents,
+    // so without this a PDF uploaded by mistake was stored as a ".bin" and
+    // written to the ring as mediaType "image": an unopenable grey box the
+    // author was told had uploaded successfully. Size was unchecked too, so
+    // anything up to multer's 600 MB global ceiling was accepted whatever its
+    // type; the per-type ceilings below are the ones posts and reels use.
+    const mime = req.file.mimetype || '';
+    const isVideo = mime.startsWith('video/');
+    const isImage = mime.startsWith('image/');
+    if (!isImage && !isVideo) {
+        throw new ApiError(400, `File type "${mime}" is not allowed. A story must be an image or a video.`);
+    }
+
+    const category = isVideo ? 'video' : 'image';
+    const limitMB = POST_MEDIA_LIMITS_MB[category];
+    if (req.file.size > limitMB * 1024 * 1024) {
+        // 413, matching uploadSingleMedia: a payload-size refusal, not a bad request.
+        throw new ApiError(413, tooLargeMessage({
+            category,
+            actualBytes: req.file.size,
+            limitMB,
+        }));
+    }
+
     const result = await uploadBufferToBunny(req.file.buffer, "stories");
     if (!result.secure_url) throw new ApiError(500, "Failed to upload story media");
+
+    // Second gate, on what the bytes actually are rather than what the client
+    // called them. uploadBufferToBunny identifies the file from its magic bytes
+    // and names it from that; a buffer it cannot identify — a document sent as
+    // "image/jpeg", a truncated upload — is stored as ".bin" and would become a
+    // story the app can only render as a grey box. Remove it again instead.
+    if (result.format === 'bin' || (result.resource_type !== 'image' && result.resource_type !== 'video')) {
+        try {
+            const { deleteFromBunny } = await import("../utils/bunny.js");
+            await deleteFromBunny(result.secure_url);
+        } catch (error) {
+            console.error('⚠️ Failed to clean up rejected story media:', error.message);
+        }
+        throw new ApiError(400, "That file could not be read as an image or a video. Try a JPEG, PNG or MP4.");
+    }
 
     const story = await Story.create({
         userId,
@@ -214,9 +255,15 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
         // the number, so the badge can render without opening that screen.
         // The story's own author never counts as a viewer of it.
         if (isOwnStory) {
-            obj.viewerCount = (obj.viewers || []).filter(
-                v => v.toString() !== story.userId.toString()
-            ).length;
+            // Deduplicated, for the same reason fetchStoryViewers dedupes:
+            // markStorySeen used a non-atomic push, so an id can appear twice
+            // on stories seen before that was fixed.
+            const ownerId = story.userId.toString();
+            obj.viewerCount = new Set(
+                (obj.viewers || [])
+                    .map(v => v.toString())
+                    .filter(v => v !== ownerId)
+            ).size;
         }
         delete obj.viewers;
         return obj;
@@ -239,10 +286,48 @@ export const markStorySeen = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Cannot view this story");
     }
 
-    // Don't add the story owner to viewers
-    if (story.userId.toString() !== userId.toString() && !story.viewers.includes(userId)) {
-        story.viewers.push(userId);
-        await story.save();
+    const isOwnStory = story.userId.toString() === userId.toString();
+
+    // A visibility gate. Only the block list was checked here, so anyone
+    // holding a story id — they travel in share links — could write themselves
+    // into a private account's viewer list for a story they were never allowed
+    // to open.
+    //
+    // The rules are fetchStoriesFeed's, not fetchStoriesByUser's, because the
+    // feed is where a story is opened from: it shows a private account's
+    // stories to people who follow that account AND to people that account
+    // follows (Rule 6). Gating on checkContentVisibility alone would 403 the
+    // second group on a story the tray had just shown them.
+    if (!isOwnStory) {
+        const owner = await User.findById(story.userId)
+            .select('privacy isFullPrivate accountStatus isDeleted')
+            .lean();
+        if (!owner || owner.isDeleted || ['deactivated', 'banned'].includes(owner.accountStatus)) {
+            throw new ApiError(403, "Cannot view this story");
+        }
+
+        const isPrivateAccount = owner.privacy === 'private' || owner.isFullPrivate === true;
+        if (isPrivateAccount) {
+            const isConnected = await Follower.exists({
+                $or: [
+                    { userId: story.userId, followerId: userId },  // viewer follows the author
+                    { userId, followerId: story.userId }           // the author follows the viewer
+                ]
+            });
+            if (!isConnected) {
+                throw new ApiError(403, "Cannot view this story");
+            }
+        }
+    }
+
+    // Don't add the story owner to viewers.
+    //
+    // $addToSet, applied by the database rather than read-check-push-save: the
+    // app fires this twice on a fast open, and both calls used to pass the
+    // in-memory includes() check and push the same viewer twice, inflating the
+    // count the author is shown.
+    if (!isOwnStory) {
+        await Story.updateOne({ _id: story._id }, { $addToSet: { viewers: userId } });
     }
 
     res.status(200).json(new ApiResponse(200, {}, "Story marked as seen"));
@@ -253,10 +338,7 @@ export const fetchStoryViewers = asyncHandler(async (req, res) => {
     const { storyId } = req.params;
     const { page = 1, limit = 20 } = req.query;
 
-    // fullName as well as username: the list is rendered as a profile row, and
-    // a username alone is not who people recognise each other by.
-    const story = await Story.findById(storyId)
-        .populate("viewers", "username fullName profileImageUrl");
+    const story = await Story.findById(storyId).select("userId viewers").lean();
     if (!story) throw new ApiError(404, "Story not found");
 
     // Owner only. This previously answered for ANY authenticated caller, so
@@ -267,24 +349,50 @@ export const fetchStoryViewers = asyncHandler(async (req, res) => {
         throw new ApiError(403, "Only the author can see who viewed this story");
     }
 
-    // Filter out the story owner from viewers (safety measure)
-    const filteredViewers = story.viewers.filter(
-        viewer => viewer._id.toString() !== story.userId.toString()
-    );
+    // Filter out the story owner from viewers (safety measure), and collapse
+    // any duplicate ids left behind by the old non-atomic push in
+    // markStorySeen — they made the total the author sees too high.
+    const ownerId = story.userId.toString();
+    const seenIds = new Set();
+    const viewerIds = [];
+    for (const viewerId of story.viewers || []) {
+        const key = viewerId.toString();
+        if (key === ownerId || seenIds.has(key)) continue;
+        seenIds.add(key);
+        viewerIds.push(viewerId);
+    }
 
     // Pagination logic
-    const start = (parseInt(page) - 1) * parseInt(limit);
-    const end = start + parseInt(limit);
-    const totalViewers = filteredViewers.length;
-    const paginatedViewers = filteredViewers.slice(start, end);
+    const pageNum = Math.max(parseInt(page) || 1, 1);
+    // Clamped: the page size decides how many User documents this loads.
+    const pageSize = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
+    const start = (pageNum - 1) * pageSize;
+    const end = start + pageSize;
+    const totalViewers = viewerIds.length;
+    const pageIds = viewerIds.slice(start, end);
+
+    // Only this page's viewers are loaded. populate() fetched a User document
+    // for every viewer in the array on every request, so page 2 of a story
+    // with 60,000 views still read all 60,000 profiles to return twenty.
+    //
+    // fullName as well as username: the list is rendered as a profile row, and
+    // a username alone is not who people recognise each other by.
+    const viewerDocs = await User.find({ _id: { $in: pageIds } })
+        .select("username fullName profileImageUrl")
+        .lean();
+    const viewerById = new Map(viewerDocs.map(u => [u._id.toString(), u]));
+    // Keep the order of the viewers array — $in comes back in index order.
+    const paginatedViewers = pageIds
+        .map(id => viewerById.get(id.toString()))
+        .filter(Boolean);
 
     res.status(200).json(new ApiResponse(200, {
         viewers: paginatedViewers,
         pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
+            page: pageNum,
+            limit: pageSize,
             total: totalViewers,
-            totalPages: Math.ceil(totalViewers / parseInt(limit)),
+            totalPages: Math.ceil(totalViewers / pageSize),
             hasNextPage: end < totalViewers,
             hasPrevPage: start > 0
         }

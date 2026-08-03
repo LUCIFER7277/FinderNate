@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Chat from '../../models/chat.models.js';
 import Message from '../../models/message.models.js';
 import { ApiResponse } from '../../utils/ApiResponse.js';
@@ -5,22 +6,39 @@ import { ApiError } from '../../utils/ApiError.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 
 export const debugUserChats = asyncHandler(async (req, res) => {
-    const currentUserId = req.user._id;
+    // This runs on the admin router, which populates req.admin and never
+    // req.user — reading req.user._id here made every call 500, so the tool has
+    // never worked. The user whose chats to inspect is now an explicit,
+    // optional query parameter.
+    const { userId } = req.query;
 
-    const allChats = await Chat.find({}).lean();
+    if (userId && !mongoose.isValidObjectId(userId)) {
+        throw new ApiError(400, "Invalid userId");
+    }
 
-    const userChats = allChats.filter(chat =>
-        chat.participants.some(p => p.toString() === currentUserId.toString())
-    );
+    // Only direct chats are analysed and only the fields the analysis reads are
+    // loaded; the whole collection used to come into Node memory to be filtered
+    // in JS.
+    const totalChatsInSystem = await Chat.countDocuments({});
 
-    const invalidDirectChats = allChats.filter(chat =>
-        chat.chatType === 'direct' && chat.participants.length !== 2
+    const directChats = await Chat.find({ chatType: 'direct' })
+        .select('participants chatType status createdAt')
+        .lean();
+
+    const userChats = userId
+        ? await Chat.find({ participants: userId })
+            .select('participants chatType status createdAt')
+            .lean()
+        : [];
+
+    const invalidDirectChats = directChats.filter(chat =>
+        chat.participants.length !== 2
     );
 
     const duplicateDirectChats = [];
     const directChatGroups = {};
 
-    allChats.filter(chat => chat.chatType === 'direct').forEach(chat => {
+    directChats.forEach(chat => {
         const sortedParticipants = chat.participants.map(p => p.toString()).sort().join(',');
         if (directChatGroups[sortedParticipants]) {
             directChatGroups[sortedParticipants].push(chat);
@@ -37,8 +55,8 @@ export const debugUserChats = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, {
-            currentUserId: currentUserId.toString(),
-            totalChatsInSystem: allChats.length,
+            currentUserId: userId || null,
+            totalChatsInSystem,
             userChatsCount: userChats.length,
             invalidDirectChatsCount: invalidDirectChats.length,
             duplicateDirectChatsCount: duplicateDirectChats.length,
@@ -72,9 +90,12 @@ export const cleanupProblematicChats = asyncHandler(async (req, res) => {
     const invalidDirectChats = await Chat.find({
         chatType: 'direct',
         $expr: { $gt: [{ $size: '$participants' }, 2] }
-    });
+    }).select('participants createdAt lastMessageAt');
 
-    const allDirectChats = await Chat.find({ chatType: 'direct' });
+    // Only the fields the grouping and the response read — the whole document
+    // for every direct chat on the platform used to be pulled into memory here.
+    const allDirectChats = await Chat.find({ chatType: 'direct' })
+        .select('participants createdAt lastMessageAt');
     const duplicateGroups = {};
 
     allDirectChats.forEach(chat => {

@@ -6,6 +6,7 @@ import SavedPost from '../models/savedPost.models.js';
 import { User } from '../models/user.models.js';
 import Post from '../models/userPost.models.js';
 import { batchIsLikedByUser, batchGetLikedByUsers, batchGetLikesCount } from '../utils/postEngagement.utils.js';
+import { assertCanViewPostById, createPostVisibilityChecker } from './post/visibility.js';
 
 /**
  * Save a post to the user's saved posts collection (Instagram-style: Always private)
@@ -21,12 +22,13 @@ const savePost = asyncHandler(async (req, res) => {
     }
 
     try {
-        // Check if the post exists
-        const post = await Post.findById(postId);
-
-        if (!post) {
-            throw new ApiError(404, "Post not found");
-        }
+        // Saving is a READ channel: GET /post/saved plays the row back with the
+        // caption, description, media and the whole customization object. So
+        // anything the caller may not view must not be savable either. This
+        // used to check existence and nothing else, which made
+        // save-then-read-saved a two-call bypass of every post-level rule —
+        // private posts, blocked authors and private accounts alike.
+        await assertCanViewPostById(postId, userId);
 
         // Check if post is already saved
         const existingSave = await SavedPost.findOne({ userId, postId });
@@ -50,6 +52,10 @@ const savePost = asyncHandler(async (req, res) => {
             new ApiResponse(201, savedPost, "Post saved successfully")
         );
     } catch (error) {
+        // Rethrow deliberate ApiErrors untouched. Without this the 404/403
+        // raised just above was caught here and re-labelled as a 500, so
+        // "post not found" reached the client as "Error saving post".
+        if (error instanceof ApiError) throw error;
         if (error.name === 'CastError') {
             throw new ApiError(400, "Invalid post ID format");
         }
@@ -114,7 +120,7 @@ const getSavedPosts = asyncHandler(async (req, res) => {
 
     try {
         // Find all saved posts for this user only
-        const savedPosts = await SavedPost.find({ userId })
+        const fetchedSavedPosts = await SavedPost.find({ userId })
             .sort({ savedAt: -1 })
             .skip(skip)
             .limit(parseInt(limit))
@@ -124,13 +130,26 @@ const getSavedPosts = asyncHandler(async (req, res) => {
                 // renders; without them a saved product post came back
                 // indistinguishable from a plain photo and lost its price,
                 // link and everything else. description is the body text for
-                // app-created posts.
-                select: 'caption description contentType postType media customization userId createdAt engagement',
+                // app-created posts. settings.privacy is not rendered — it is
+                // read by the visibility re-check below.
+                select: 'caption description contentType postType media customization userId createdAt engagement settings.privacy',
                 populate: {
                     path: 'userId',
                     select: 'username fullName profileImageUrl'
                 }
             });
+
+        // A save records permission as it stood the day it was made, and
+        // permission changes afterwards: the author can turn the post private,
+        // block the saver, or make their whole account private. Without this
+        // re-check the saved grid kept rendering content every other surface
+        // had already stopped showing. Rows whose post is simply gone are left
+        // alone — they were always returned with a null postId.
+        const canView = createPostVisibilityChecker(userId);
+        const visibilityFlags = await Promise.all(
+            fetchedSavedPosts.map(s => (s.postId ? canView(s.postId) : Promise.resolve(true)))
+        );
+        const savedPosts = fetchedSavedPosts.filter((_, i) => visibilityFlags[i]);
 
         // Get total count for pagination
         const totalSavedPosts = await SavedPost.countDocuments({ userId });

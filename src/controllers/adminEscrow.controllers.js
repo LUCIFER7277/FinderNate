@@ -179,6 +179,22 @@ const calculateFeeBreakdown = async (order) => {
     }
 
     const { gatewayFeeRate, platformFeeRate } = await getFeeRates();
+
+    // GATEWAY_FEE and PLATFORM_FEE are rates, not percentages: 0.02 means 2%.
+    // The settings endpoint accepts any non-negative number, so 2.5 (the
+    // natural reading of "2.5 percent") makes totalDeductions exceed the order
+    // and clamps every buyer refund to 0, while a non-numeric setting arrives
+    // here as NaN and slips past the minimum-refund check into the gateway
+    // call. Both used to surface as an unexplained "refund below the minimum"
+    // rather than pointing at the setting that caused it.
+    const invalidRate = (rate) => !Number.isFinite(rate) || rate < 0 || rate > 1;
+    if (invalidRate(gatewayFeeRate) || invalidRate(platformFeeRate)) {
+        throw new ApiError(500,
+            `Fee settings are invalid: GATEWAY_FEE=${gatewayFeeRate}, PLATFORM_FEE=${platformFeeRate}. ` +
+            `Both must be rates between 0 and 1 (0.02 = 2%). Correct them in admin settings before refunding.`
+        );
+    }
+
     const gatewayFee = Number((productPrice * gatewayFeeRate).toFixed(2));
     const platformFee = Number((productPrice * platformFeeRate).toFixed(2));
     const totalDeductions = shippingCharges + gatewayFee + platformFee;
@@ -196,6 +212,29 @@ const calculateFeeBreakdown = async (order) => {
         sellerSettlement,
         finerateEarnings
     };
+};
+
+// Records a money action against the admin who performed it.
+//
+// Payouts are made by hand from a banking app; the panel record IS the
+// accounting for them, so who moved which order, for how much and when has to
+// be recoverable afterwards. None of the escrow actions wrote an activity
+// entry, which left every release, refund and confirmation unattributable.
+//
+// Logging never fails the action: the balance movement is already committed by
+// the time this runs, and throwing here would only invite a retry that writes
+// the record a second time.
+const logMoneyAction = async (req, action, order, details) => {
+    try {
+        await req.admin?.logActivity(
+            action,
+            'order',
+            order?._id?.toString(),
+            details
+        );
+    } catch (error) {
+        console.error(`[escrow] activity log failed for ${action}:`, error?.message);
+    }
 };
 
 // Resolve dispute (Admin only)
@@ -219,6 +258,14 @@ export const resolveDispute = asyncHandler(async (req, res) => {
         }
         order.orderStatus = order.paymentStatus === 'released' ? 'confirmed' : 'refunded';
         await order.save();
+
+        await logMoneyAction(
+            req,
+            'escrow_dispute_closed',
+            order,
+            `Dispute closed on order ${order.orderNumber} (₹${order.amount}) - payment was already ${order.paymentStatus}. No escrow movement. Resolution: ${resolution || 'none'}`
+        );
+
         return res.status(200).json(
             new ApiResponse(200, { order }, `Dispute resolved - payment was already ${order.paymentStatus}`)
         );
@@ -300,8 +347,52 @@ export const resolveDispute = asyncHandler(async (req, res) => {
     }
 
     const session = await mongoose.startSession();
+    let resolvedOrder;
     try {
         await session.withTransaction(async () => {
+            // ── Atomic claim ──────────────────────────────────────────────────
+            // The status check above runs on a document read outside the
+            // transaction, so it is only a fast fail. This is the same
+            // compare-and-set guard manualReleasePayment and manualRefundPayment
+            // already carry: without it a double-clicked Resolve passed the
+            // read-only check twice, moved the escrow balance twice and wrote
+            // two payout rows for one order — and the payout worklist is built
+            // from those rows.
+            const disputeFields = order.dispute
+                ? {
+                    'dispute.status': 'resolved',
+                    'dispute.resolution': resolution || (insufficientBalance ? 'Force resolved - insufficient escrow balance' : 'Resolved by admin'),
+                    'dispute.resolvedAt': new Date()
+                }
+                : {};
+
+            const claimed = await Order.findOneAndUpdate(
+                { _id: order._id, orderStatus: 'disputed', paymentStatus: 'held' },
+                {
+                    $set: {
+                        ...(action === 'refund_buyer'
+                            ? {
+                                refundId,
+                                paymentStatus: 'refunded',
+                                orderStatus: 'refunded',
+                                platformFee: feeBreakdown.finerateEarnings,
+                                sellerAmount: feeBreakdown.sellerSettlement
+                            }
+                            : {
+                                paymentStatus: 'released',
+                                orderStatus: 'confirmed'
+                            }),
+                        paymentReleasedAt: new Date(),
+                        ...disputeFields
+                    }
+                },
+                { new: true, session }
+            );
+
+            if (!claimed) {
+                throw new ApiError(409, "Order status changed - dispute already resolved");
+            }
+
             if (action === 'refund_buyer') {
                 if (!insufficientBalance) {
                     // Fetch wallet inside transaction for a consistent view
@@ -309,55 +400,51 @@ export const resolveDispute = asyncHandler(async (req, res) => {
 
                     if (feeBreakdown.buyerRefund > 0) {
                         await wallet.refundFunds(
-                            order,
+                            claimed,
                             feeBreakdown.buyerRefund,
-                            `Dispute refund: ${resolution || 'resolved'} - Order ${order.orderNumber}`,
+                            `Dispute refund: ${resolution || 'resolved'} - Order ${claimed.orderNumber}`,
                             { session }
                         );
                     }
-                    const remaining = order.amount - feeBreakdown.buyerRefund;
+                    const remaining = claimed.amount - feeBreakdown.buyerRefund;
                     if (remaining > 0) {
                         await wallet.releaseFunds(
-                            order,
+                            claimed,
                             remaining,
                             feeBreakdown.finerateEarnings,
-                            `Fees & shipping settlement - Order ${order.orderNumber}`,
+                            `Fees & shipping settlement - Order ${claimed.orderNumber}`,
                             { session }
                         );
                     }
                 }
-
-                order.refundId = refundId;
-                order.paymentStatus = 'refunded';
-                order.orderStatus = 'refunded';
-                order.platformFee = feeBreakdown.finerateEarnings;
-                order.sellerAmount = feeBreakdown.sellerSettlement;
-
             } else {
                 // release_seller
                 const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).select('-transactions').session(session);
                 await wallet.releaseFunds(
-                    order,
-                    order.amount,
+                    claimed,
+                    claimed.amount,
                     0,
-                    `Payment released after dispute resolution - Order ${order.orderNumber}`,
+                    `Payment released after dispute resolution - Order ${claimed.orderNumber}`,
                     { session }
                 );
-                order.paymentStatus = 'released';
-                order.orderStatus = 'confirmed';
             }
 
-            if (order.dispute) {
-                order.dispute.status = 'resolved';
-                order.dispute.resolution = resolution || (insufficientBalance ? 'Force resolved - insufficient escrow balance' : 'Resolved by admin');
-                order.dispute.resolvedAt = new Date();
-            }
-            order.paymentReleasedAt = new Date();
-            await order.save({ session });
+            resolvedOrder = claimed;
         });
     } finally {
         await session.endSession();
     }
+
+    await logMoneyAction(
+        req,
+        action === 'refund_buyer' ? 'escrow_dispute_refunded' : 'escrow_dispute_released',
+        resolvedOrder,
+        `Dispute resolved (${action}) on order ${resolvedOrder.orderNumber} (₹${resolvedOrder.amount}): ` +
+        (action === 'refund_buyer'
+            ? `buyer refunded ₹${feeBreakdown.buyerRefund}, fees & shipping ₹${feeBreakdown.finerateEarnings}, Cashfree refund ${refundId} (${refundStatus})`
+            : `₹${resolvedOrder.amount} released to seller`) +
+        `${insufficientBalance ? ' [force resolved - no escrow movement recorded]' : ''}. Resolution: ${resolution || 'none'}`
+    );
 
     const warning = insufficientBalance
         ? 'Force resolved - escrow balance was insufficient; no escrow movement recorded'
@@ -365,7 +452,7 @@ export const resolveDispute = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200,
-            { order, feeBreakdown, refundStatus, ...(warning && { warning }) },
+            { order: resolvedOrder, feeBreakdown, refundStatus, ...(warning && { warning }) },
             "Dispute resolved successfully"
         )
     );
@@ -454,6 +541,13 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
 
     const populatedOrder = await Order.findById(releasedOrder._id)
         .populate('sellerId', 'fullName username profileImageUrl businessProfileId');
+
+    await logMoneyAction(
+        req,
+        'escrow_payment_released',
+        releasedOrder,
+        `Released ₹${releasedOrder.amount} to seller ${order.sellerId?.username || releasedOrder.sellerId} for order ${releasedOrder.orderNumber}. Reason: ${reason || 'none'}`
+    );
 
     return res.status(200).json(
         new ApiResponse(200, {
@@ -587,6 +681,14 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
 
     const refundedOrder = await Order.findById(order._id);
 
+    await logMoneyAction(
+        req,
+        'escrow_payment_refunded',
+        refundedOrder,
+        `Refunded ₹${feeBreakdown.buyerRefund} of ₹${refundedOrder.amount} to buyer for order ${refundedOrder.orderNumber} ` +
+        `(fees & shipping retained ₹${feeBreakdown.finerateEarnings}). Cashfree refund ${refundId} (${refundStatus}). Reason: ${reason || 'none'}`
+    );
+
     return res.status(200).json(
         new ApiResponse(200, { order: refundedOrder, feeBreakdown, refundStatus }, "Payment refunded manually")
     );
@@ -699,24 +801,65 @@ export const manualConfirmPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, `Cannot confirm payment. Current status: ${order.paymentStatus}. Only pending payments can be confirmed.`);
     }
 
-    const escrowWallet = await EscrowWallet.getWallet();
+    // Create the system wallet if this is the first movement ever recorded —
+    // getWallet() upserts, and an upsert does not belong inside the transaction
+    // below.
+    await EscrowWallet.getWallet();
 
-    // Simulate the complete payment flow: pending -> held -> released
-    // This is for demo/sandbox purposes only
+    // ── Atomic claim + ledger movement ────────────────────────────────────────
+    // The status check above is only a fast fail. The claim below is what stops
+    // a double-clicked Confirm from running the hold/release pair twice and
+    // crediting then releasing the order amount a second time, which would
+    // overstate both releasedBalance and the manual payout worklist.
+    const session = await mongoose.startSession();
+    let confirmedOrder;
+    try {
+        await session.withTransaction(async () => {
+            const claimed = await Order.findOneAndUpdate(
+                { _id: order._id, paymentStatus: 'pending' },
+                {
+                    $set: {
+                        paymentStatus: 'released',
+                        orderStatus: 'confirmed',
+                        paymentReleasedAt: new Date()
+                    }
+                },
+                { new: true, session }
+            );
 
-    // Step 1: Hold funds (simulate payment verification)
-    await escrowWallet.holdFunds(order, order.amount, `Manual confirmation - ${reason || 'Admin demo approval'}`);
+            if (!claimed) {
+                throw new ApiError(409, "Order payment status changed - payment already confirmed");
+            }
 
-    // Step 2: Release funds immediately (simulate buyer confirmation)
-    await escrowWallet.releaseFunds(order, order.amount, 0, `Instant release after manual confirmation - ${reason || 'Admin demo approval'}`);
+            const escrowWallet = await EscrowWallet.findOne({ isSystemWallet: true })
+                .select('-transactions')
+                .session(session);
 
-    // Update order status
-    order.paymentStatus = 'released';
-    order.orderStatus = 'confirmed';
-    order.paymentReleasedAt = new Date();
-    await order.save();
+            if (!escrowWallet) {
+                throw new ApiError(400, "Escrow wallet has not been initialised");
+            }
+
+            // Record the complete payment flow: pending -> held -> released
+            // Step 1: Hold funds (payment received outside the gateway callback)
+            await escrowWallet.holdFunds(claimed, claimed.amount, `Manual confirmation - ${reason || 'Admin approval'}`, { session });
+
+            // Step 2: Release funds immediately (buyer confirmation recorded)
+            await escrowWallet.releaseFunds(claimed, claimed.amount, 0, `Instant release after manual confirmation - ${reason || 'Admin approval'}`, { session });
+
+            confirmedOrder = claimed;
+        });
+    } finally {
+        await session.endSession();
+    }
+
+    await logMoneyAction(
+        req,
+        'escrow_payment_manually_confirmed',
+        confirmedOrder,
+        `Manually confirmed and released ₹${confirmedOrder.amount} on order ${confirmedOrder.orderNumber} without a gateway callback. Reason: ${reason || 'none'}`
+    );
 
     return res.status(200).json(
-        new ApiResponse(200, { order }, "Payment confirmed and released successfully")
+        new ApiResponse(200, { order: confirmedOrder }, "Payment confirmed and released successfully")
     );
 });

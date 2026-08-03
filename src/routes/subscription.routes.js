@@ -9,14 +9,6 @@ import {
     subscriptionWebhook,
     testUpgradeSubscription
 } from '../controllers/subscription/index.js';
-import {
-    getPaymentLogs,
-    getSubscriptionLogs,
-    getErrorLogs,
-    getMetrics,
-    testExpiryJob,
-    getDashboard
-} from '../controllers/monitoring.controllers.js';
 import { verifyJWT } from '../middlewares/auth.middleware.js';
 
 const router = Router();
@@ -44,14 +36,14 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // ===============================
-// MONITORING & ADMIN ROUTES
+// MONITORING & ADMIN ROUTES — MOVED
 // ===============================
-// These routes help monitor subscription system health
-router.get('/monitoring/dashboard', getDashboard);               // GET /api/v1/subscription/monitoring/dashboard
-router.get('/monitoring/payment-logs', getPaymentLogs);          // GET /api/v1/subscription/monitoring/payment-logs
-router.get('/monitoring/subscription-logs', getSubscriptionLogs); // GET /api/v1/subscription/monitoring/subscription-logs
-router.get('/monitoring/error-logs', getErrorLogs);              // GET /api/v1/subscription/monitoring/error-logs
-router.get('/monitoring/metrics', getMetrics);                   // GET /api/v1/subscription/monitoring/metrics
-router.post('/monitoring/test-expiry-job', testExpiryJob);       // POST /api/v1/subscription/monitoring/test-expiry-job
+// /monitoring/* used to be registered here, below `router.use(verifyJWT)`, which
+// is the ORDINARY user middleware: any signed-in account could read the platform
+// payment log, internal error stack traces and whole-business revenue metrics,
+// and could trigger the expiry job. The controllers already documented
+// themselves as /api/v1/admin/monitoring/*, and that is where they now live —
+// see routes/admin.routes.js, behind verifyAdminJWT + requirePermission.
+// Nothing in the app or the website called the subscription-router paths.
 
 export default router;

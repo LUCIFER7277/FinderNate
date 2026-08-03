@@ -8,6 +8,7 @@ import { createCommentNotification } from "./notification.controllers.js";
 import { addBadgesToNestedUsers } from "../utils/userBadge.utils.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import socketManager from "../config/socket.js";
+import { assertCanViewPostById } from "./post/visibility.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 
@@ -66,6 +67,17 @@ export const createComment = asyncHandler(async (req, res) => {
     const { postId, content, parentCommentId, replyToUserId } = req.body;
     if (!postId || !content) throw new ApiError(400, "postId and content are required");
 
+    // The post has to exist and the writer has to be allowed to see it.
+    //
+    // Nothing used to be checked here at all: Comment.create ran before the post
+    // was ever looked up, and the only Post read that followed was for picking a
+    // notification recipient, whose null result was ignored. So a blocked
+    // account could still write into the blocker's thread, and anyone could
+    // comment on a private account's post — the block/privacy boundary that
+    // getPostById defends was bypassed by commenting instead of reading.
+    // The post is fetched here anyway, so the notification below reuses it.
+    const targetPost = await assertCanViewPostById(postId, userId);
+
     // If replying to a comment, fetch parent info and set up thread structure
     let finalReplyToUserId = replyToUserId || null;
     let rootCommentId = null;
@@ -100,7 +112,7 @@ export const createComment = asyncHandler(async (req, res) => {
 
     // Send notification to post owner (if not commenting on own post)
     try {
-        const post = await Post.findById(postId).select("userId");
+        const post = targetPost;
         if (post && post.userId.toString() !== userId.toString()) {
             await createCommentNotification({
                 recipientId: post.userId,
@@ -150,6 +162,12 @@ export const getCommentsByPost = asyncHandler(async (req, res) => {
     const pageNum = parseInt(page) || 1;
     const pageLimit = parseInt(limit) || 20;
     const skip = (pageNum - 1) * pageLimit;
+
+    // Reading a thread is reading the post. This endpoint used to load no post
+    // at all — not even to check it existed — so a signed-out caller holding a
+    // postId got every comment on a private account's post, and a blocked user
+    // got the thread the post itself answers 404 for.
+    await assertCanViewPostById(postId, req.user?._id || null);
 
     // ✅ OPTIMIZED: Only fetch top-level comments (parentCommentId: null)
     const [comments, total] = await Promise.all([
@@ -276,6 +294,10 @@ export const getCommentById = asyncHandler(async (req, res) => {
         .populate('replyToUserId', 'username fullName profileImageUrl')
         .lean();
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
+
+    // Same gate as the thread list: a single comment and its replies are the
+    // post's content, so the post's visibility rules decide who may read them.
+    await assertCanViewPostById(comment.postId, req.user?._id || null);
 
     // ✅ FACEBOOK-STYLE THREADING: Fetch all descendants (recursively)
     let replies, totalReplies;

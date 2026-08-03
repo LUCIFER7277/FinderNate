@@ -5,6 +5,23 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 
 const VALID_DOCUMENT_TYPES = ['gst', 'aadhaar', 'pan', 'license', 'registration', 'other'];
 
+// An admin has to be able to open the file to verify it, and it lands on a
+// public pull zone. The QR upload in ./banking.js already checks its mimetype;
+// this route did not, so any file at all could be pushed into paid storage under
+// the "verification" name.
+const ALLOWED_DOCUMENT_MIME_TYPES = [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/webp',
+    'application/pdf'
+];
+
+// Verification needs a handful of documents (GST, Aadhaar, PAN, licence,
+// registration). Without a cap the array — and the storage behind it — grew
+// without limit, one Bunny object per request.
+const MAX_DOCUMENTS = 10;
+
 // POST /api/v1/business/upload-document
 export const uploadVerificationDocument = asyncHandler(async (req, res) => {
     const userId = req.user._id;
@@ -26,6 +43,14 @@ export const uploadVerificationDocument = asyncHandler(async (req, res) => {
 
     if (!VALID_DOCUMENT_TYPES.includes(documentType)) {
         throw new ApiError(400, `Invalid document type. Must be one of: ${VALID_DOCUMENT_TYPES.join(', ')}`);
+    }
+
+    if (!ALLOWED_DOCUMENT_MIME_TYPES.includes(req.file.mimetype)) {
+        throw new ApiError(400, "Document must be an image (JPEG, PNG, WebP) or a PDF");
+    }
+
+    if ((business.documents?.length || 0) >= MAX_DOCUMENTS) {
+        throw new ApiError(400, `You can upload at most ${MAX_DOCUMENTS} verification documents. Please contact support to replace an existing one.`);
     }
 
     const { uploadBufferToBunny } = await import('../../utils/bunny.js');

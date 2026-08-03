@@ -30,7 +30,6 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         const {
             page = 1,
             limit = 10,
-            userId,
             contentType,
             postType,
             sortBy = 'latest',
@@ -39,8 +38,17 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
             suggested = false
         } = req.query;
 
-        // ✅ FIXED: Handle both Mongoose document and plain object from cache
-        const currentUserIdRaw = req.user?._id || userId;
+        // The viewer is whoever the token says, and nothing else.
+        //
+        // This used to fall back to `req.query.userId` when there was no token,
+        // and the route is optionalVerifyJWT — so an anonymous caller could name
+        // any user id and be answered AS that user: the private accounts that
+        // user follows were added to the allow-list below, and their like
+        // history came back in isLikedBy. A non-ObjectId value also reached
+        // `new mongoose.Types.ObjectId(...)` further down and produced a 500.
+        //
+        // ✅ Handle both Mongoose document and plain object from cache
+        const currentUserIdRaw = req.user?._id;
         const currentUserId = currentUserIdRaw ? (typeof currentUserIdRaw === 'string' ? currentUserIdRaw : currentUserIdRaw.toString()) : null;
 
         // ✅ FIXED: Convert blocked user IDs to ObjectIds for MongoDB aggregation
@@ -59,9 +67,18 @@ export const getSuggestedReels = asyncHandler(async (req, res) => {
         // Not just from people you follow - this is different from the home feed
 
         // Get ALL public active users (exclude banned/deleted)
+        //
+        // `privacy` and `isFullPrivate` are two SEPARATE schema fields, and the
+        // rest of the codebase treats an account as private when EITHER is set
+        // (share.controllers.js:33, post/read.controllers.js, story.controllers.js,
+        // privacy.middleware.js). This query looked at `privacy` alone, so an
+        // account with isFullPrivate:true and a stale privacy:'public' — exactly
+        // the combination the privacy middleware's own comment says exists — had
+        // its reels served to the entire platform, anonymous callers included.
         const publicUsers = await User.find({
             accountStatus: 'active',
             isDeleted: { $ne: true },
+            isFullPrivate: { $ne: true },
             $or: [
                 { privacy: 'public' },
                 { privacy: { $exists: false } },

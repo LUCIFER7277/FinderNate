@@ -1,7 +1,14 @@
+import mongoose from 'mongoose';
+import Call from '../models/call.models.js';
 import { ApiError } from '../utils/ApiError.js';
 import { ApiResponse } from '../utils/ApiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import streamService from '../config/stream.config.js';
+
+// Stream identity tokens are stateless and cannot be revoked once signed, so
+// the lifetime is capped here regardless of what the client asks for. 24h is
+// the documented default and is far longer than any call.
+const MAX_TOKEN_LIFETIME_SECONDS = 86400;
 
 /**
  * POST /api/v1/stream/token
@@ -25,6 +32,14 @@ export const generateUserToken = asyncHandler(async (req, res) => {
         throw new ApiError(403, 'You can only generate tokens for yourself');
     }
 
+    // Clamp the requested lifetime: an unbounded value meant a banned or lapsed
+    // account could hold a Stream token for years, and a non-numeric one made
+    // NaN expiry maths that silently produced an unusable token.
+    const requestedLifetime = Number(expirationSeconds);
+    const tokenLifetimeSeconds = Number.isFinite(requestedLifetime) && requestedLifetime > 0
+        ? Math.min(Math.floor(requestedLifetime), MAX_TOKEN_LIFETIME_SECONDS)
+        : MAX_TOKEN_LIFETIME_SECONDS;
+
 
     // Check if Stream.io is configured
     if (!streamService.isConfigured()) {
@@ -40,7 +55,7 @@ export const generateUserToken = asyncHandler(async (req, res) => {
         }]);
 
         // Generate token
-        const tokenData = streamService.generateUserToken(targetUserId, expirationSeconds);
+        const tokenData = streamService.generateUserToken(targetUserId, tokenLifetimeSeconds);
 
         res.status(200).json(
             new ApiResponse(200, {
@@ -79,6 +94,36 @@ export const createStreamCall = asyncHandler(async (req, res) => {
 
     if (!['voice', 'video'].includes(callType)) {
         throw new ApiError(400, 'Call type must be voice or video');
+    }
+
+    // The Stream room id IS our Call id (both clients pass the id returned by
+    // /calls/initiate). Without this check any authenticated user could create
+    // a room for an arbitrary - and guessable, they are sequential ObjectIds -
+    // call id, become its created_by, dictate its settings and be sitting in
+    // the room the real participants later join. Every gate /calls/initiate
+    // performs (chat membership, blocking, self-call) was bypassed here.
+    if (!mongoose.Types.ObjectId.isValid(callId)) {
+        throw new ApiError(400, 'Invalid call ID format');
+    }
+
+    const call = await Call.findById(callId).select('participants').lean();
+    if (!call) {
+        throw new ApiError(404, 'Call not found');
+    }
+
+    const callParticipantIds = call.participants.map(p => p.toString());
+    if (!callParticipantIds.includes(currentUserId)) {
+        throw new ApiError(403, 'You are not a participant in this call');
+    }
+
+    if (!Array.isArray(members)) {
+        throw new ApiError(400, 'Members must be an array of user IDs');
+    }
+
+    // Members may only be the other people already on the call record
+    const outsider = members.find(id => !callParticipantIds.includes(String(id)));
+    if (outsider) {
+        throw new ApiError(403, 'Members must be participants of this call');
     }
 
     // Check if Stream.io is configured

@@ -520,15 +520,26 @@ const deleteAccount = asyncHandler(async (req, res) => {
         // urls and file names were all retained despite the erasure promise.
         Message.deleteMany({ sender: userId }),
         Activity.deleteMany({ userId }),
-        Activity.deleteMany({ targetUserId: userId }),
-        Notification.deleteMany({ userId }),
+        // Four more of the same class of bug as the two documented above: these
+        // filtered on field names that do not exist on their schemas, so every
+        // one of them matched nothing and silently deleted zero rows while the
+        // erasure reported success. Verified against the models:
+        //   Activity       -> targetId    (was targetUserId)
+        //   Notification   -> receiverId  (was userId)
+        //   FollowRequest  -> requesterId / recipientId  (was from / to)
+        //   ContactRequest -> requester / businessOwner  (was userId / contactUserId)
+        // The ContactRequest rows are the sharpest of these: they carry the
+        // phone number the user shared, and they were being served to the other
+        // party after the account was gone.
+        Activity.deleteMany({ targetId: userId }),
+        Notification.deleteMany({ receiverId: userId }),
         Notification.deleteMany({ senderId: userId }),
         Report.deleteMany({ reporterId: userId }),
         Feedback.deleteMany({ userId }),
-        FollowRequest.deleteMany({ from: userId }),
-        FollowRequest.deleteMany({ to: userId }),
-        ContactRequest.deleteMany({ userId }),
-        ContactRequest.deleteMany({ contactUserId: userId }),
+        FollowRequest.deleteMany({ requesterId: userId }),
+        FollowRequest.deleteMany({ recipientId: userId }),
+        ContactRequest.deleteMany({ requester: userId }),
+        ContactRequest.deleteMany({ businessOwner: userId }),
         Block.deleteMany({ blockerId: userId }),
         // Same class of bug as the message cleanup above: the field on
         // BlockSchema is `blockedId`, so blocks placed ON this user were never

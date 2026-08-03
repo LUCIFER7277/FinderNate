@@ -18,9 +18,14 @@ const router = Router();
 // Apply authentication middleware to all routes
 router.use(verifyJWT);
 
-// Call management routes - require calling access (paid users only)
+// Call management routes - PLACING a call requires calling access (paid users only)
 router.post('/initiate', verifyCallingAccess, initiateCall); // POST /api/v1/calls/initiate
-router.patch('/:callId/accept', verifyCallingAccess, acceptCall); // PATCH /api/v1/calls/:callId/accept
+
+// Answering is deliberately NOT gated: the paid feature is placing the call, and
+// a paid business account has to be able to reach ordinary (free) customers.
+// With verifyCallingAccess here a free receiver got 403 on Accept and could only
+// decline, so a seller could never actually be answered.
+router.patch('/:callId/accept', acceptCall); // PATCH /api/v1/calls/:callId/accept (no restriction)
 router.patch('/:callId/decline', declineCall); // PATCH /api/v1/calls/:callId/decline (no restriction)
 router.patch('/:callId/end', endCall);     // PATCH /api/v1/calls/:callId/end (no restriction)
 router.patch('/:callId/status', updateCallStatus); // PATCH /api/v1/calls/:callId/status (no restriction)

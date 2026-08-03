@@ -81,6 +81,10 @@ export const toggleLiveLocation = asyncHandler(async (req, res) => {
 // identical leak (bank account, IFSC, UPI id, payment QR, Aadhaar number and
 // the CDN links to uploaded Aadhaar/PAN/licence scans) because it is public
 // and previously only excluded gstNumber/aadhaarNumber via .select().
+// contact.phone / contact.email are stripped here too: this route has no auth
+// middleware at all, so leaving them in published every seller's personal mobile
+// number and email to anonymous callers, bypassing the contact-request approval
+// gate. website and socialMedia are published marketing links and stay.
 const stripPrivateBusinessFields = (business) => {
     const publicBusiness = { ...business };
 
@@ -88,6 +92,13 @@ const stripPrivateBusinessFields = (business) => {
     delete publicBusiness.aadhaarNumber;
     delete publicBusiness.bankDetails;
     delete publicBusiness.documents;
+
+    if (publicBusiness.contact) {
+        const publicContact = { ...publicBusiness.contact };
+        delete publicContact.phone;
+        delete publicContact.email;
+        publicBusiness.contact = publicContact;
+    }
 
     return publicBusiness;
 };

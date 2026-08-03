@@ -175,6 +175,23 @@ export const deleteBankDetails = asyncHandler(async (req, res) => {
         throw new ApiError(400, "No bank details to delete");
     }
 
+    // Payout is manual, and these are the instructions the admin reads at payout
+    // time: adminEscrow.controllers.js looks up Business.bankDetails when the
+    // release is actually performed, not when the order is placed. Removing them
+    // while money is still held leaves the admin with nowhere to send it, and
+    // the release still goes through and debits the escrow ledger.
+    const { default: Order } = await import("../../models/order.models.js");
+    const heldOrders = await Order.countDocuments({
+        sellerId: userId,
+        paymentStatus: { $in: ['held', 'paid'] }
+    });
+    if (heldOrders > 0) {
+        throw new ApiError(
+            409,
+            `You have ${heldOrders} order(s) with payment still in escrow. Your bank details are needed to pay you out and cannot be removed until those payouts are settled.`
+        );
+    }
+
     business.bankDetails = undefined;
     await business.save();
 

@@ -5,6 +5,7 @@ import { User } from "../models/user.models.js";
 import { AcceptanceLog } from "../models/acceptanceLog.models.js";
 import { LegalVersion } from "../models/legalVersion.models.js";
 import { LEGAL_VERSIONS, LEGAL_TITLES, DOC_TYPES } from "../constants/legalVersions.js";
+import { invalidateVersionCache } from "../middlewares/acceptanceCheck.middleware.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -33,10 +34,13 @@ async function getAllEffectiveVersions() {
 }
 
 function extractClientMeta(req) {
-  const ip =
-    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-    req.socket?.remoteAddress ||
-    null;
+  // `ip` is stored as LEGAL EVIDENCE — legalAcceptance.acceptanceIP and every
+  // AcceptanceLog row — so it must be `req.ip`, which express resolves through
+  // the `trust proxy` setting in app.js. The raw x-forwarded-for header this
+  // used to read is entirely caller-supplied: anyone could prepend an address
+  // and point their own consent record at a third party, or repudiate it later
+  // ("the IP in your log is not mine"). guestAccount.js states the same rule.
+  const ip = req.ip || req.socket?.remoteAddress || null;
   const userAgent = req.headers["user-agent"] || null;
   return { ip, userAgent };
 }
@@ -260,16 +264,15 @@ export const adminUpdateVersion = asyncHandler(async (req, res) => {
     { upsert: true, new: true }
   );
 
-  // Bulk-clear acceptance for this document so all users must re-accept
-  const fieldMap = {
-    TERMS:     "legalAcceptance.termsVersion",
-    PRIVACY:   "legalAcceptance.privacyVersion",
-    SELLER:    "legalAcceptance.sellerTermsVersion",
-    COMMUNITY: "legalAcceptance.communityVersion",
-  };
-
-  // We don't delete the field — we just leave the old version stored.
-  // The middleware detects the mismatch and forces re-acceptance.
+  // We don't clear the users' stored versions — we just leave the old version
+  // on the record. The acceptance middleware detects the mismatch and forces
+  // re-acceptance.
+  //
+  // That middleware caches the effective versions for 60 s per process, and this
+  // handler never invalidated it, so the new version was ignored until the TTL
+  // happened to lapse — and every process cached independently. Drop the cache
+  // here so the change takes effect the moment the admin saves it.
+  invalidateVersionCache();
 
   return res.status(200).json(
     new ApiResponse(

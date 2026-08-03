@@ -9,6 +9,7 @@ import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import { onPostLiked, onPostUnliked, batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 import { likeQueue } from "../queues/likeQueue.js";
 import socketManager from "../config/socket.js";
+import { assertCanViewPostById } from "./post/visibility.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
 
@@ -158,6 +159,13 @@ export const likePost = asyncHandler(async (req, res) => {
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
 
+    // Liking is only allowed on a post the caller is allowed to SEE. This used
+    // to check nothing beyond "postId is truthy" — not even that the post
+    // existed — so an account the author had blocked could alternate like and
+    // unlike to push a notification into the blocker's tray on every call, and
+    // like counters could be moved on posts the actor may not view.
+    const targetPost = await assertCanViewPostById(postId, userId);
+
     // Idempotent. Liking something already liked is not an error — it is a
     // client whose optimistic state drifted from the server's, which happens
     // routinely: the feed and Vibes render the same post from separate caches,
@@ -192,11 +200,9 @@ export const likePost = asyncHandler(async (req, res) => {
     }).catch(() => {});
 
     // Fire-and-forget notification (does not block response)
-    Post.findById(postId).select('userId').lean().then(post => {
-        if (post && post.userId.toString() !== userId.toString()) {
-            createLikeNotification({ recipientId: post.userId, sourceUserId: userId, postId }).catch(() => {});
-        }
-    }).catch(() => {});
+    if (targetPost.userId.toString() !== userId.toString()) {
+        createLikeNotification({ recipientId: targetPost.userId, sourceUserId: userId, postId }).catch(() => {});
+    }
 
     const [{ users: likedBy, hasMore }] = await Promise.all([
         getLikedByList(postId, { includeUser: result.ok ? req.user : null }),
@@ -219,6 +225,11 @@ export const unlikePost = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { postId } = req.body;
     if (!postId) throw new ApiError(400, "postId is required");
+
+    // Same gate as likePost: the unlike half of the like/unlike loop delivered
+    // its own notification, so leaving it unchecked would leave the abuse path
+    // open.
+    const targetPost = await assertCanViewPostById(postId, userId);
 
     // Idempotent, for the same reason as likePost above. This answered 404
     // "You have not liked this post", which the app showed as an error and
@@ -245,11 +256,9 @@ export const unlikePost = asyncHandler(async (req, res) => {
     }).catch(() => {});
 
     // Fire-and-forget notification
-    Post.findById(postId).select('userId').lean().then(post => {
-        if (post && post.userId.toString() !== userId.toString()) {
-            createUnlikeNotification({ recipientId: post.userId, sourceUserId: userId, postId }).catch(() => {});
-        }
-    }).catch(() => {});
+    if (targetPost.userId.toString() !== userId.toString()) {
+        createUnlikeNotification({ recipientId: targetPost.userId, sourceUserId: userId, postId }).catch(() => {});
+    }
 
     const [{ users: likedBy, hasMore }] = await Promise.all([
         getLikedByList(postId, { excludeUserId: result.ok ? userId : null }),
@@ -274,11 +283,16 @@ export const unlikePost = asyncHandler(async (req, res) => {
  * them at position 0 when isLikedByCurrentUser is true — avoids duplication
  * if their like has already been synced to DB.
  *
- * Auth: optional — unauthenticated callers receive the full list.
+ * Auth: optional — unauthenticated callers receive the list for any post they
+ * would be allowed to open.
  */
 export const getLikedByUsers = asyncHandler(async (req, res) => {
     const { postId, page = '1', limit = '20' } = req.query;
     if (!postId) throw new ApiError(400, "postId is required");
+
+    // Who liked a post is the post's data: it used to be enumerable for any
+    // postId, by anyone, including private posts and blocked-from authors.
+    await assertCanViewPostById(postId, req.user?._id || null);
 
     const currentUserId = req.user?._id?.toString();
     const parsedPage = Math.max(1, parseInt(page, 10) || 1);
@@ -299,6 +313,18 @@ export const likeComment = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { commentId } = req.body;
     if (!commentId) throw new ApiError(400, "commentId is required");
+
+    // The comment's POST decides who may see this thread. Without this gate the
+    // route was a hole straight through every other check on the post: a blocked
+    // account — one that 404s on the post itself and on getCommentsByPost — could
+    // still like a comment on it, and the 200 response returns `likedBy` with the
+    // username, full name and avatar of everyone in that private thread. It also
+    // wrote a Like row on unreadable content and fired a notification (socket +
+    // FCM push) at the person who had blocked them, repeatably via like/unlike.
+    // Same guard the sibling handlers in this file already use.
+    const target = await Comment.findById(commentId).select("postId");
+    if (!target) throw new ApiError(404, "Comment not found");
+    await assertCanViewPostById(target.postId, userId);
 
     try {
         await Like.create({ userId, commentId });
@@ -332,6 +358,13 @@ export const unlikeComment = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const { commentId } = req.body;
     if (!commentId) throw new ApiError(400, "commentId is required");
+
+    // Gated for the same reason as likeComment above: the response returns the
+    // thread's `likedBy` list, and the notification path is reachable from here
+    // too, so leaving unlike open would leave the whole like/unlike loop open.
+    const target = await Comment.findById(commentId).select("postId");
+    if (!target) throw new ApiError(404, "Comment not found");
+    await assertCanViewPostById(target.postId, userId);
 
     const like = await Like.findOneAndDelete({ userId, commentId });
     if (like) {

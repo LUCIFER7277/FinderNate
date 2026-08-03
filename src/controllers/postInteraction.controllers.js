@@ -1,7 +1,17 @@
+import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import PostInteraction from "../models/postInteraction.models.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+
+const VALID_INTERACTION_TYPES = ['view', 'like', 'comment', 'share', 'click', 'hide'];
+
+// Ceiling on one batch. The batch endpoint used to accept an array of any
+// length, so a single authenticated request could hand bulkWrite hundreds of
+// thousands of upserts and sit on a connection while it worked through them —
+// a cheap way to saturate the collection the feed and the TTL cleanup share.
+// Clients batch a screenful of view events at a time; 200 is far above that.
+const MAX_BATCH_INTERACTIONS = 200;
 
 export const trackPostInteraction = asyncHandler(async (req, res) => {
     const { postId, interactionType, viewDuration = 0 } = req.body;
@@ -11,8 +21,7 @@ export const trackPostInteraction = asyncHandler(async (req, res) => {
         throw new ApiError(400, "postId and interactionType are required");
     }
 
-    const validInteractionTypes = ['view', 'like', 'comment', 'share', 'click', 'hide'];
-    if (!validInteractionTypes.includes(interactionType)) {
+    if (!VALID_INTERACTION_TYPES.includes(interactionType)) {
         throw new ApiError(400, "Invalid interaction type");
     }
 
@@ -91,6 +100,10 @@ export const batchTrackInteractions = asyncHandler(async (req, res) => {
         throw new ApiError(400, "interactions array is required");
     }
 
+    if (interactions.length > MAX_BATCH_INTERACTIONS) {
+        throw new ApiError(400, `A batch may contain at most ${MAX_BATCH_INTERACTIONS} interactions, but ${interactions.length} were sent.`);
+    }
+
     try {
         const bulkOps = [];
 
@@ -98,6 +111,20 @@ export const batchTrackInteractions = asyncHandler(async (req, res) => {
             const { postId, interactionType, viewDuration } = interaction;
 
             if (!postId || !interactionType) continue;
+
+            // The same whitelist the single-interaction endpoint enforces. It
+            // was missing here, so anything at all became an upsert whose
+            // schema validation failure surfaced only as a 500 carrying the raw
+            // Mongo error.
+            if (!VALID_INTERACTION_TYPES.includes(interactionType)) {
+                throw new ApiError(400, "Invalid interaction type");
+            }
+
+            // A malformed id would otherwise reach bulkWrite and fail the whole
+            // batch with a CastError dressed up as a 500.
+            if (!mongoose.Types.ObjectId.isValid(postId)) {
+                throw new ApiError(400, "Invalid post ID format");
+            }
 
             // Reject viewDuration for non-view interactions
             if (interactionType !== 'view' && viewDuration !== undefined) {
@@ -156,6 +183,10 @@ export const batchTrackInteractions = asyncHandler(async (req, res) => {
             new ApiResponse(200, {}, `${bulkOps.length} interactions tracked successfully`)
         );
     } catch (error) {
+        // Rethrow the deliberate 400s above untouched — this catch used to
+        // relabel them as 500s, so "viewDuration is not allowed for like
+        // interactions" reached the client as a server error.
+        if (error instanceof ApiError) throw error;
         throw new ApiError(500, "Failed to track batch interactions: " + error.message);
     }
 });

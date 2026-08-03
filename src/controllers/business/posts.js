@@ -8,11 +8,18 @@ async function findOrCreateMinimalBusiness(businessId, userId) {
     let business = await Business.findById(businessId);
 
     if (!business) {
+        // 'pending', not 'active': the pre-save hook in business.models.js turns
+        // a transition into 'active' — including on a brand new document — into
+        // isVerified:true, which is the public verification badge an admin is
+        // supposed to grant only after reviewing the seller's ID. This row is a
+        // placeholder created so post settings have somewhere to live; it has
+        // been through no verification at all. Entitlements are unaffected, they
+        // all require plan !== 'plan1'.
         business = await Business.create({
             _id: businessId,
             userId,
             plan: 'plan1',
-            subscriptionStatus: 'active'
+            subscriptionStatus: 'pending'
         });
     }
 

@@ -1,10 +1,20 @@
 import { User } from "../../models/user.models.js";
 import Business from "../../models/business.models.js";
+import Subscription from "../../models/subscription.models.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 
 const ALL_PLANS = ['plan1', 'plan2', 'plan3', 'plan4'];
+
+// Which business tier a *paid* subscription entitles the account to. Mirrors
+// PLAN_TO_BUSINESS_PLAN in controllers/subscription/payment.js, which is the
+// only place a Subscription row is ever written, and only after Cashfree has
+// confirmed the payment.
+const SUBSCRIPTION_TO_BUSINESS_PLAN = {
+    small_business: 'plan2',
+    corporate: 'plan3'
+};
 
 const PLAN_ALLOWED_UPGRADES = {
     plan1: ['plan2', 'plan3', 'plan4'],
@@ -56,6 +66,36 @@ export const selectBusinessPlan = asyncHandler(async (req, res) => {
             : `Cannot upgrade from ${currentPlan} to ${plan}. Allowed upgrades: ${allowedUpgrades.join(', ')}`;
 
         throw new ApiError(400, errorMessage);
+    }
+
+    // A paid tier is only ever granted by a payment we verified ourselves.
+    //
+    // This endpoint used to write subscriptionStatus:'active' for whatever plan
+    // the caller named, behind nothing but verifyJWT — so one request with an
+    // ordinary app token bought the top tier (and, via the pre-save hook in
+    // business.models.js, the verified badge) for free and forever, with no
+    // Subscription row for subscriptionExpiry.job.js to ever expire it.
+    //
+    // The Subscription row is written in exactly one place — activateSubscription
+    // ForOrder in controllers/subscription/payment.js — and only after Cashfree
+    // has confirmed the order, the amount and the payer. Reading it here means
+    // this endpoint can only ever apply an entitlement that was actually bought.
+    const activeSubscription = await Subscription.findOne({
+        userId,
+        status: 'active',
+        endDate: { $gt: new Date() }
+    });
+
+    const entitledPlan = activeSubscription
+        ? SUBSCRIPTION_TO_BUSINESS_PLAN[activeSubscription.plan]
+        : null;
+
+    if (!entitledPlan) {
+        throw new ApiError(402, 'This plan requires an active subscription. Please complete payment first.');
+    }
+
+    if (entitledPlan !== plan) {
+        throw new ApiError(402, `Your active subscription entitles you to ${entitledPlan}, not ${plan}. Please pay for the higher plan first.`);
     }
 
     const previousPlan = currentPlan;

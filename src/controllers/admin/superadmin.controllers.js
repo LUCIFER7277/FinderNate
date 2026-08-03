@@ -150,3 +150,75 @@ export const updateAdminPermissions = asyncHandler(async (req, res) => {
         new ApiResponse(200, admin, "Admin permissions updated successfully")
     );
 });
+
+// PUT /api/v1/admin/:adminId/status
+/**
+ * Deactivate or reactivate a staff admin.
+ *
+ * There was no way to switch an admin off through the API at all: no delete
+ * route, no isActive route, and updateAdminPermissions refuses to touch a super
+ * admin — so offboarding anyone, compromised or merely departed, meant a DBA
+ * editing the admins collection in production. `isActive: false` is already
+ * enforced on both paths that matter (verifyAdminJWT rejects the account on
+ * every request, adminLogin refuses a fresh sign-in), so flipping it here is a
+ * complete revocation, including for a token that has not expired yet — which
+ * is currently the ONLY way to invalidate one.
+ *
+ * A super admin cannot be deactivated, for the same reason its permissions
+ * cannot be rewritten: whoever is inside one super-admin session must not be
+ * able to lock the other holders out of the platform. Revoking the root account
+ * itself stays a deliberate, out-of-band operation.
+ */
+export const setAdminActiveStatus = asyncHandler(async (req, res) => {
+    if (!isSuperAdmin(req.admin)) {
+        throw new ApiError(403, "Only a super admin can activate or deactivate an admin");
+    }
+
+    const { adminId } = req.params;
+    const { isActive } = req.body;
+
+    if (typeof isActive !== 'boolean') {
+        throw new ApiError(400, "isActive must be true or false");
+    }
+
+    // No self-service lockout, and no way to strand the account you are in.
+    if (adminId === req.admin._id.toString()) {
+        throw new ApiError(403, "You cannot change your own account status");
+    }
+
+    const target = await Admin.findById(adminId).select('_id createdBy role fullName');
+    if (!target) {
+        throw new ApiError(404, "Admin not found");
+    }
+
+    if (isSuperAdmin(target)) {
+        throw new ApiError(403, "A super admin's account status cannot be changed");
+    }
+
+    // Dropping the refresh token as well, so a deactivated admin cannot mint a
+    // fresh access token if they are ever reactivated under a stolen session.
+    const update = isActive
+        ? { $set: { isActive: true } }
+        : { $set: { isActive: false }, $unset: { refreshToken: 1 } };
+
+    const admin = await Admin.findByIdAndUpdate(
+        adminId,
+        update,
+        { new: true }
+    ).select('-password -refreshToken');
+
+    if (!admin) {
+        throw new ApiError(404, "Admin not found");
+    }
+
+    await req.admin.logActivity(
+        isActive ? 'admin_activated' : 'admin_deactivated',
+        'admin',
+        adminId,
+        `${isActive ? 'Activated' : 'Deactivated'} admin: ${admin.fullName}`
+    );
+
+    return res.status(200).json(
+        new ApiResponse(200, admin, `Admin ${isActive ? 'activated' : 'deactivated'} successfully`)
+    );
+});

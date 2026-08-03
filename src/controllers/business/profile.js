@@ -29,12 +29,18 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         subcategory,
         contact,
         location,
-        rating,
         tags,
         website,
         gstNumber,
         aadhaarNumber
     } = req.body;
+
+    // `rating` is deliberately NOT read from the body. It used to be, on both
+    // branches below, and BusinessSchema puts no bounds on it — so a brand new
+    // seller could post {"rating": 5} (or 99) about themselves and have it
+    // served to buyers by searchAllContent/searchSuggestion, which select the
+    // stored field directly. The only number that belongs here is the average
+    // recomputed from real BusinessRating rows in ./rating.js.
 
     if (category && !BUSINESS_CATEGORIES.includes(category)) {
         throw new ApiError(400, `Invalid category. Must be one of: ${BUSINESS_CATEGORIES.join(', ')}`);
@@ -124,7 +130,6 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         if (normalizedSubcategory) existingBusiness.subcategory = normalizedSubcategory;
         if (contact) existingBusiness.contact = contact;
         if (resolvedLocation) existingBusiness.location = resolvedLocation;
-        if (rating) existingBusiness.rating = rating;
         existingBusiness.tags = uniqueTags;
         if (website) existingBusiness.website = website;
 
@@ -168,7 +173,6 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
             subcategory: normalizedSubcategory,
             contact,
             location: resolvedLocation,
-            rating,
             tags: uniqueTags,
             website,
             plan: businessPlan,
@@ -205,16 +209,33 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
     );
 });
 
-// GET /api/v1/business/profile
+// GET /api/v1/business/profile[?userId=]
+//
+// `?userId=` used to be read by nobody: the controller was scoped entirely to
+// req.user._id, so the website — which appends it when it needs another
+// account's business (src/api/business.ts) — was handed back the VIEWER's own
+// Business document. The viewer's business id then drove the rating widget on a
+// stranger's profile, showing the viewer's own stars and totals there and
+// making the rate button 403 with "Cannot rate your own business".
+//
+// Callers that send no userId (the mobile app, the owner screens) are unchanged.
 export const getBusinessProfile = asyncHandler(async (req, res) => {
-    const userId = req.user._id;
+    const callerId = req.user._id;
+    const { userId: requestedUserId } = req.query;
+
+    if (requestedUserId && !mongoose.isValidObjectId(requestedUserId)) {
+        throw new ApiError(400, "Invalid userId");
+    }
+
+    const userId = requestedUserId || callerId;
+    const isOwner = userId.toString() === callerId.toString();
 
     const business = await Business.findOne({ userId }).lean();
     if (!business) {
         throw new ApiError(404, "Business profile not found");
     }
 
-    const businessObj = { ...business };
+    const businessObj = isOwner ? { ...business } : stripPrivateBusinessFields(business);
     if (businessObj.rating !== undefined) {
         delete businessObj.rating;
     }
@@ -243,6 +264,14 @@ export const getBusinessProfile = asyncHandler(async (req, res) => {
 // and the id is handed out by GET /users/profile/other. Only the owner (and the
 // admin panel, which has its own /admin/businesses/:businessId/details route)
 // may see them.
+//
+// contact.phone and contact.email go too. They are the seller's personal mobile
+// number and email, and the whole contact-request feature (model, four
+// endpoints, an inbox screen) exists to gate them: getRequestStatus returns
+// contactInfo only once the owner has APPROVED the asker. Shipping them in the
+// public business payload handed them to anyone — including callers with no
+// token — and made every denial the owner recorded meaningless. website and
+// socialMedia stay: they are published marketing links, not PII.
 const stripPrivateBusinessFields = (business) => {
     const publicBusiness = { ...business };
 
@@ -250,6 +279,13 @@ const stripPrivateBusinessFields = (business) => {
     delete publicBusiness.aadhaarNumber;
     delete publicBusiness.bankDetails;
     delete publicBusiness.documents;
+
+    if (publicBusiness.contact) {
+        const publicContact = { ...publicBusiness.contact };
+        delete publicContact.phone;
+        delete publicContact.email;
+        publicBusiness.contact = publicContact;
+    }
 
     return publicBusiness;
 };
@@ -353,7 +389,22 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
         business.businessName = trimmedBusinessName;
     }
 
+    // Changing an identity number invalidates the approval that was granted
+    // against the OLD one.
+    //
+    // admin/aadhaar.controllers.js sets isVerified / verificationStatus /
+    // verifiedAt / verifiedBy after an admin has personally read the scan that
+    // matches the number on file. Rewriting the number afterwards left every one
+    // of those flags in place, so a seller could earn the badge with a genuine
+    // Aadhaar and then point the record at an identity nobody checked — and the
+    // pending-verification queue would never resurface them, because it filters
+    // on isVerified:false. banking.js already does exactly this reset when the
+    // bank account changes; the KYC fields were simply missed.
+    let kycIdentityChanged = false;
+
     if (gstNumber !== undefined) {
+        let gstChanged = false;
+
         if (gstNumber && gstNumber.trim() !== '') {
             if (gstNumber.length < 15) {
                 throw new ApiError(400, "GST number must be at least 15 characters long");
@@ -366,17 +417,53 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
             if (existingGST) {
                 throw new ApiError(409, "GST number already registered");
             }
+            if (business.gstNumber !== gstNumber) gstChanged = true;
             business.gstNumber = gstNumber;
         } else {
+            if (business.gstNumber) gstChanged = true;
             business.gstNumber = undefined;
+        }
+
+        if (gstChanged) {
+            kycIdentityChanged = true;
+            business.gstVerified = false;
+            business.gstVerifiedAt = null;
+            business.gstVerifiedBy = null;
         }
     }
 
     if (aadhaarNumber !== undefined) {
+        let aadhaarChanged = false;
+
         if (aadhaarNumber && aadhaarNumber.trim() !== '') {
+            if (business.aadhaarNumber !== aadhaarNumber) aadhaarChanged = true;
             business.aadhaarNumber = aadhaarNumber;
         } else {
+            if (business.aadhaarNumber) aadhaarChanged = true;
             business.aadhaarNumber = undefined;
+        }
+
+        if (aadhaarChanged) {
+            kycIdentityChanged = true;
+            business.aadhaarVerified = false;
+            business.aadhaarVerifiedAt = null;
+            business.aadhaarVerifiedBy = null;
+        }
+    }
+
+    if (kycIdentityChanged) {
+        business.verificationStatus = 'pending';
+        business.verificationRemarks = undefined;
+        business.verifiedAt = null;
+        business.verifiedBy = null;
+
+        // isVerified is overloaded: an admin KYC approval sets it, and so does a
+        // paid subscription (subscription/payment.js). Only the KYC-derived
+        // badge is being revoked here, so a paying subscriber keeps the badge
+        // they bought while still going back through the admin queue.
+        const hasPaidPlan = business.subscriptionStatus === 'active' && business.plan !== 'plan1';
+        if (!hasPaidPlan) {
+            business.isVerified = false;
         }
     }
 
@@ -491,6 +578,29 @@ export const deleteBusinessProfile = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Business profile not found");
     }
 
+    // Money still in escrow blocks the delete.
+    //
+    // Payout is manual: an admin opens the order, reads THIS document's
+    // bankDetails and transfers the money by hand. adminEscrow.controllers.js
+    // resolves the destination at release time from
+    // order.sellerId.businessProfileId -> Business.bankDetails, so deleting the
+    // row (and clearing user.businessProfileId below) leaves the admin with
+    // sellerBankDetails:null — and manualReleasePayment still flips the order to
+    // 'released' and debits the escrow ledger, after which the order matches
+    // neither RELEASABLE_PAYMENT_STATUSES nor the refund path. The seller's money
+    // is marked paid out with no record of where to send it.
+    const { default: Order } = await import("../../models/order.models.js");
+    const heldOrders = await Order.countDocuments({
+        sellerId: userId,
+        paymentStatus: { $in: ['held', 'paid'] }
+    });
+    if (heldOrders > 0) {
+        throw new ApiError(
+            409,
+            `You have ${heldOrders} order(s) with payment still in escrow. Your business profile cannot be deleted until those payouts are settled.`
+        );
+    }
+
     // Business posts are removed WITH everything that points at them.
     //
     // This was a bare deleteMany — a second, parallel delete path that skipped
@@ -521,6 +631,20 @@ export const deleteBusinessProfile = asyncHandler(async (req, res) => {
                 if (extra.thumbnailUrl) mediaUrls.push(extra.thumbnailUrl);
             }
         }
+    }
+
+    // The Business row carries two more Bunny assets of its own: the uploaded
+    // verification scans (documents[].documentUrl — Aadhaar, PAN, licence) and
+    // the payment QR image. Only post media was being collected, so those
+    // survived the delete on a public pull zone with no token auth, while
+    // Business.deleteOne destroyed the only record of their URLs — nobody could
+    // even enumerate what was left behind. Government ID scans are the last
+    // thing that should outlive an account deletion request.
+    for (const doc of business.documents || []) {
+        if (doc.documentUrl) mediaUrls.push(doc.documentUrl);
+    }
+    if (business.bankDetails?.paymentQRCode) {
+        mediaUrls.push(business.bankDetails.paymentQRCode);
     }
 
     // Rows first, then media — a failed Bunny call leaves orphaned files, which
@@ -593,12 +717,23 @@ export const updateBusinessCategory = asyncHandler(async (req, res) => {
     let business = await Business.findOne({ userId });
 
     if (!business) {
+        // subscriptionStatus starts 'pending', NOT 'active'.
+        //
+        // The pre-save hook in business.models.js turns any transition into
+        // 'active' — including the one on a freshly created document — into
+        // isVerified:true, so picking a category was minting the public
+        // verification badge before a name, address, GST, Aadhaar or a single
+        // document existed, and admin/aadhaar.controllers.js would never queue
+        // the row for review because that filter requires isVerified:false.
+        // Nothing is lost by starting at 'pending': every entitlement gate reads
+        // `subscriptionStatus === 'active' && plan !== 'plan1'`, and the plan
+        // here is plan1, so content visibility is unchanged either way.
         business = await Business.create({
             userId,
             category: category.trim(),
             subcategory: subcategory ? subcategory.trim() : undefined,
             plan: 'plan1',
-            subscriptionStatus: 'active'
+            subscriptionStatus: 'pending'
         });
 
         const user = await User.findById(userId);

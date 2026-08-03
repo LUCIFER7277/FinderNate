@@ -8,6 +8,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import socketManager from '../config/socket.js';
 import mongoose from 'mongoose';
 import { sendNotification } from '../config/firebase-admin.config.js';
+import { isBlockedBetween } from '../middlewares/blocking.middleware.js';
 
 // Constants for call management
 const CALL_TIMEOUT_MINUTES = 2; // Calls timeout after 2 minutes if not answered
@@ -25,6 +26,28 @@ const safeEmitToUser = (userId, event, data) => {
 // Helper function to validate ObjectId
 const isValidObjectId = (id) => {
     return mongoose.Types.ObjectId.isValid(id);
+};
+
+/**
+ * Tear down the Stream.io room for a call.
+ *
+ * The room is created on initiate and outlives the Call document: marking the
+ * call ended/declined/missed in Mongo only changes our record, so without this
+ * both parties' already-issued tokens keep working against a live room and
+ * Stream keeps billing for anyone who stays in it.
+ *
+ * Never throws and is not awaited by the request path — a Stream outage must
+ * not stop us recording that the call ended, and the room type is always
+ * 'default' (see createCall in the initiate/accept paths).
+ */
+const endStreamRoom = async (callId) => {
+    try {
+        const streamService = (await import('../config/stream.config.js')).default;
+        if (!streamService.isConfigured()) return;
+        await streamService.endCall('default', callId.toString());
+    } catch (streamError) {
+        console.warn('⚠️ Failed to end Stream.io room (non-critical):', streamError.message);
+    }
 };
 
 // Helper function to cleanup stale calls
@@ -45,6 +68,9 @@ const cleanupStaleCalls = async () => {
             call.endedAt = new Date();
             call.endReason = 'timeout';
             await call.save();
+
+            // Close the Stream.io room too - the DB status alone leaves it live
+            endStreamRoom(call._id);
 
             // Notify participants
             const participantIds = call.participants.map(p => p.toString());
@@ -115,14 +141,23 @@ export const initiateCall = asyncHandler(async (req, res) => {
 
     try {
         // Validate chat permissions and fetch receiver in parallel (optimize)
-        const [chat, receiver] = await Promise.all([
+        const [chat, receiver, isBlocked] = await Promise.all([
             validateChatPermissions(chatId, currentUserId, receiverId),
-            User.findById(receiverId).lean() // Use lean() for faster query
+            User.findById(receiverId).lean(), // Use lean() for faster query
+            isBlockedBetween(currentUserId, receiverId)
         ]);
 
         if (!receiver) {
             console.error('❌ Receiver not found:', receiverId);
             throw new ApiError(404, 'Receiver not found');
+        }
+
+        // Blocking has to cover calling as well as messaging. The chat document
+        // survives a block, so chat membership alone let a blocked user keep
+        // ringing their victim's phone (FCM + full-screen incoming call UI).
+        if (isBlocked) {
+            console.warn('⚠️ Call blocked between users:', { currentUserId: currentUserId.toString(), receiverId });
+            throw new ApiError(403, 'You cannot call this user');
         }
 
         // Check if user is trying to call themselves
@@ -192,7 +227,10 @@ export const initiateCall = asyncHandler(async (req, res) => {
             .lean();
 
         // Create Stream.io call and generate tokens for both participants (BEFORE notifications)
+        // streamData is what the CALLER receives; the receiver's token is kept
+        // separate and only ever travels on the receiver's own socket event.
         let streamData = null;
+        let receiverStreamToken = null;
         try {
             const streamService = (await import('../config/stream.config.js')).default;
 
@@ -228,12 +266,16 @@ export const initiateCall = asyncHandler(async (req, res) => {
                 const callerToken = streamService.generateUserToken(currentUserId.toString());
                 const receiverToken = streamService.generateUserToken(receiver._id.toString());
 
+                // The receiver's token is a 24h Stream identity token for THEIR
+                // user id and cannot be revoked once minted - it must never be
+                // returned to the caller, only pushed to the receiver below.
+                receiverStreamToken = receiverToken.token;
+
                 streamData = {
                     apiKey: streamService.getApiKey(),
                     callId: newCall._id.toString(),
                     streamCallType,
                     callerToken: callerToken.token,
-                    receiverToken: receiverToken.token,
                     expiresAt: callerToken.expiresAt
                 };
 
@@ -322,7 +364,7 @@ export const initiateCall = asyncHandler(async (req, res) => {
                 },
                 stream: streamData ? {
                     apiKey: streamData.apiKey,
-                    token: streamData.receiverToken,
+                    token: receiverStreamToken,
                     callId: streamData.callId,
                     streamCallType: streamData.streamCallType
                 } : null,
@@ -580,6 +622,10 @@ export const declineCall = asyncHandler(async (req, res) => {
         await session.endSession();
     }
 
+    // The room was created on initiate - close it, or the caller's token keeps
+    // working against a live Stream room after the call was refused.
+    endStreamRoom(callId);
+
     // Fetch populated call data after transaction
     const populatedCall = await Call.findById(callId)
         .populate('participants', 'username fullName profileImageUrl')
@@ -660,16 +706,21 @@ export const endCall = asyncHandler(async (req, res) => {
                 return; // Exit transaction early, proceed to response
             }
 
+            // A call that was never answered (no startedAt - it was hung up or
+            // cancelled while still ringing) is a MISSED call, not a completed
+            // one. It used to be stored as 'ended' with startedAt back-filled to
+            // endedAt, which made wasAnswered true and counted it in
+            // answeredCalls (call.models.js) - so the receiver never saw a
+            // missed call and the stats showed calls nobody picked up as
+            // answered. Duration stays 0 because the pre-save hook needs both
+            // timestamps, which is correct for a call that never connected.
+            const wasAnswered = !!call.startedAt;
+
             // Update call status
-            call.status = 'ended';
+            call.status = wasAnswered ? 'ended' : 'missed';
             call.endedAt = new Date();
             call.endReason = endReason;
             call.endedBy = currentUserId; // Track who ended the call
-
-            // If call was never started (e.g., ended during ringing), set startedAt to now for duration calculation
-            if (!call.startedAt) {
-                call.startedAt = call.endedAt;
-            }
 
             await call.save({ session });
             updatedCall = call;
@@ -680,6 +731,10 @@ export const endCall = asyncHandler(async (req, res) => {
     } finally {
         await session.endSession();
     }
+
+    // End the media room as well - without this the DB says the call is over
+    // while the Stream room stays live and both parties' tokens still join it.
+    endStreamRoom(callId);
 
     // Fetch populated call data after transaction
     const populatedCall = await Call.findById(callId)
@@ -942,11 +997,17 @@ export const forceEndActiveCalls = asyncHandler(async (req, res) => {
             }
 
             // Update status
+            // endReason must stay inside the schema enum (call.models.js) -
+            // 'force_cleanup' is not in it, so the save threw a ValidationError
+            // that this loop swallowed and the stuck call was never cleared.
             call.status = call.startedAt ? 'ended' : 'missed';
-            call.endReason = 'force_cleanup';
+            call.endReason = call.startedAt ? 'normal' : 'cancelled';
             call.endedBy = currentUserId;
 
             await call.save();
+
+            // Close the media room as well, not just our record of it
+            endStreamRoom(call._id);
 
             // Notify other participants
             const otherParticipants = call.participants

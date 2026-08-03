@@ -159,6 +159,17 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
         };
     }
 
+    // Nothing on the server ever checked availability, so a sold-out product
+    // could be paid for in full: the buyer is charged, an order is created, and
+    // the seller has nothing to ship. The listing page disables its own Buy
+    // button when inStock is false, but that is a client-side courtesy and the
+    // create-order route is reachable directly. Checked here, against the Post
+    // the price was just derived from, so the two can never disagree.
+    // `availability` is the seller-facing free-text field; inStock is the flag.
+    if (post.customization?.product?.inStock === false) {
+        throw new ApiError(400, "This product is out of stock");
+    }
+
     if (basePrice <= 0) {
         throw new ApiError(400, "This product does not have a valid price set");
     }

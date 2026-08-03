@@ -56,12 +56,22 @@ const ReportSchema = new mongoose.Schema({
 
 // Prevent duplicate reports from same user for the same specific target.
 // Each index ensures a user can only report the same specific content once.
+//
+// The "this target is the one that is set" clause is written as
+// `{ $type: 'objectId' }`, not `{ $exists: true, $ne: null }`: MongoDB only
+// accepts equality, $exists:true, $gt/$gte/$lt/$lte, $type, $and/$or and $in
+// inside a partialFilterExpression. With $ne in there, createIndex rejected the
+// whole specification, autoIndex swallowed the failure on the unlistened
+// 'index' event, and the collection ended up with no index at all — so the
+// E11000 branch in reportContent was guarding a constraint that did not exist
+// and the same user could file the same report several times. Same operator
+// like.models.js uses for the identical "which target is set" shape.
 ReportSchema.index(
     { reporterId: 1, reportedPostId: 1 },
     {
         unique: true,
         partialFilterExpression: {
-            reportedPostId: { $exists: true, $ne: null },
+            reportedPostId: { $type: 'objectId' },
             reportedUserId: null,
             reportedCommentId: null,
             reportedStoryId: null
@@ -73,7 +83,7 @@ ReportSchema.index(
     {
         unique: true,
         partialFilterExpression: {
-            reportedUserId: { $exists: true, $ne: null },
+            reportedUserId: { $type: 'objectId' },
             reportedPostId: null,
             reportedCommentId: null,
             reportedStoryId: null
@@ -85,7 +95,7 @@ ReportSchema.index(
     {
         unique: true,
         partialFilterExpression: {
-            reportedCommentId: { $exists: true, $ne: null },
+            reportedCommentId: { $type: 'objectId' },
             reportedPostId: null,
             reportedUserId: null,
             reportedStoryId: null
@@ -97,7 +107,7 @@ ReportSchema.index(
     {
         unique: true,
         partialFilterExpression: {
-            reportedStoryId: { $exists: true, $ne: null },
+            reportedStoryId: { $type: 'objectId' },
             reportedPostId: null,
             reportedUserId: null,
             reportedCommentId: null

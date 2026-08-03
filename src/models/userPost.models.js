@@ -414,4 +414,44 @@ PostSchema.pre('save', function (next) {
     next();
 });
 
+/**
+ * 🗂 Indexes
+ *
+ * This collection had none, so every read on the two screens the app opens with
+ * was a full collection scan followed by a blocking in-memory sort. Each entry
+ * below matches a query the controllers actually run; the sort key is the last
+ * field so the index can supply the ordering instead of Mongo sorting the whole
+ * result in memory.
+ */
+
+// Profile grid / getMyPosts / countDocuments — Post.find({ userId }).sort({ createdAt: -1 })
+// (post/read.controllers.js:219,225 and the searchAllContent per-user counts).
+PostSchema.index({ userId: 1, createdAt: -1 });
+
+// Profile tabs — switch.controllers.js filters { userId, postType, status } and
+// getMyPosts adds ?postType=, both sorted by createdAt desc.
+PostSchema.index({ userId: 1, postType: 1, createdAt: -1 });
+
+// Business profile posts ({ userId, contentType: 'business' }, business/profile.js:617)
+// and the online store ({ userId: STORE_USER_ID, contentType: 'product' },
+// onlineStoreProducts.controllers.js:94).
+PostSchema.index({ userId: 1, contentType: 1, createdAt: -1 });
+
+// Home feed and explore both filter userId with a large $in / $nin and sort by
+// createdAt desc; this lets those walk the index in order rather than sorting
+// the whole matched set.
+PostSchema.index({ createdAt: -1 });
+
+// Vibes / reels scroller — matchCriteria carries postType: { $in: ['reel','video'] }
+// (reel.controllers.js:110-247) and explore filters postType when asked.
+PostSchema.index({ postType: 1, createdAt: -1 });
+
+// Explore's contentType filter (explore.controllers.js:38-45) and the home feed's
+// contentType $in, both newest-first.
+PostSchema.index({ contentType: 1, createdAt: -1 });
+
+// getTrendingPosts (post/read.controllers.js:563) sorts the whole collection by
+// engagement before taking 100.
+PostSchema.index({ 'engagement.likes': -1, 'engagement.comments': -1, createdAt: -1 });
+
 export default mongoose.model('Post', PostSchema);

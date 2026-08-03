@@ -2,12 +2,23 @@ import Report from "../../models/report.models.js";
 import Post from "../../models/userPost.models.js";
 import Story from "../../models/story.models.js";
 import Comment from "../../models/comment.models.js";
+import Like from "../../models/like.models.js";
+import SavedPost from "../../models/savedPost.models.js";
+import PostInteraction from "../../models/postInteraction.models.js";
 import { User } from "../../models/user.models.js";
 import { invalidateAuthCache } from "../../middlewares/auth.middleware.js";
+import { deleteFromBunny, deleteMultipleFromBunny } from "../../utils/bunny.js";
+import { invalidatePostCaches } from "../post/helpers.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { notifyStatusChange } from "./helpers.js";
+
+// Statuses a report can be listed by or moved to. 'under_review' is set by the
+// escalation in report.controllers.js once enough complaints accumulate; it was
+// missing from both lists, so the most-reported content dropped out of the
+// Pending queue and could not be filtered for or set back by hand.
+const REPORT_STATUSES = ['pending', 'under_review', 'reviewed', 'resolved', 'dismissed'];
 
 // GET /api/v1/admin/reports
 export const getAllReports = asyncHandler(async (req, res) => {
@@ -15,7 +26,7 @@ export const getAllReports = asyncHandler(async (req, res) => {
 
     let filter = {};
 
-    if (status && ['pending', 'reviewed', 'resolved', 'dismissed'].includes(status)) {
+    if (status && REPORT_STATUSES.includes(status)) {
         filter.status = status;
     }
 
@@ -51,12 +62,10 @@ export const getAllReports = asyncHandler(async (req, res) => {
         }
     ]);
 
-    const reportStats = {
-        pending: 0,
-        reviewed: 0,
-        resolved: 0,
-        dismissed: 0
-    };
+    const reportStats = REPORT_STATUSES.reduce((acc, key) => {
+        acc[key] = 0;
+        return acc;
+    }, {});
 
     stats.forEach(stat => {
         reportStats[stat._id] = stat.count;
@@ -77,13 +86,85 @@ export const getAllReports = asyncHandler(async (req, res) => {
     );
 });
 
+// A moderation takedown has to do what the author's own delete does
+// (controllers/post/delete.controllers.js): drop the media from Bunny, unlink
+// the post from its author, clear the rows that point at it and invalidate the
+// caches. Deleting the row alone left the media publicly retrievable at its CDN
+// URL and left the cached copies — including fn:share:preview:<id>, which
+// serves an already-shared link to logged-out visitors — still handing it out.
+//
+// Reports are deliberately NOT deleted here: this handler is in the middle of
+// resolving one, and the report is the record of the takedown.
+const takeDownPost = async (post) => {
+    const mediaUrls = [];
+    (post.media || []).forEach(media => {
+        if (media.url) mediaUrls.push(media.url);
+        if (media.thumbnailUrl) mediaUrls.push(media.thumbnailUrl);
+        (media.additionalMedia || []).forEach(additionalMedia => {
+            if (additionalMedia.url) mediaUrls.push(additionalMedia.url);
+            if (additionalMedia.thumbnailUrl) mediaUrls.push(additionalMedia.thumbnailUrl);
+        });
+    });
+
+    // Row first, then the media: failing on Bunny leaves orphaned files, which
+    // is recoverable, while the reverse leaves a live post pointing at files
+    // that no longer exist.
+    await Post.findByIdAndDelete(post._id);
+    await User.findByIdAndUpdate(post.userId, { $pull: { posts: post._id } });
+
+    if (mediaUrls.length > 0) {
+        try {
+            await deleteMultipleFromBunny(mediaUrls);
+        } catch (error) {
+            console.error("Bunny.net deletion error:", error);
+        }
+    }
+
+    await Promise.allSettled([
+        Like.deleteMany({ postId: post._id }),
+        Comment.deleteMany({ postId: post._id }),
+        SavedPost.deleteMany({ postId: post._id }),
+        PostInteraction.deleteMany({ postId: post._id }),
+    ]);
+
+    await invalidatePostCaches(post._id.toString(), post.userId);
+};
+
+const takeDownStory = async (story) => {
+    await Story.findByIdAndDelete(story._id);
+
+    if (story.mediaUrl) {
+        try {
+            await deleteFromBunny(story.mediaUrl);
+        } catch (error) {
+            console.error("Bunny.net deletion error:", error);
+        }
+    }
+
+    await invalidatePostCaches(story._id.toString(), story.userId);
+};
+
 // PUT /api/v1/admin/reports/:reportId/status
 export const updateReportStatus = asyncHandler(async (req, res) => {
     const { reportId } = req.params;
     const { status, action, remarks } = req.body;
 
-    if (!['pending', 'reviewed', 'resolved', 'dismissed'].includes(status)) {
+    if (!REPORT_STATUSES.includes(status)) {
         throw new ApiError(400, "Invalid status");
+    }
+
+    // The route is gated on manageReports only. Taking content down and banning
+    // an account are separate permissions on the Admin schema, and a super
+    // admin who created a triage-only moderator without them recorded an
+    // explicit intent that this account cannot do either — reaching them
+    // through the reports screen bypassed that.
+    if (status === 'resolved') {
+        if (action === 'delete_content' && !req.admin.permissions.deleteContent) {
+            throw new ApiError(403, "Insufficient permissions: deleteContent required");
+        }
+        if ((action === 'ban_user' || action === 'suspend_user') && !req.admin.permissions.banUsers) {
+            throw new ApiError(403, "Insufficient permissions: banUsers required");
+        }
     }
 
     const report = await Report.findById(reportId)
@@ -104,11 +185,11 @@ export const updateReportStatus = asyncHandler(async (req, res) => {
     if (action && status === 'resolved') {
         if (action === 'delete_content') {
             if (report.reportedPostId) {
-                await Post.findByIdAndDelete(report.reportedPostId._id);
+                await takeDownPost(report.reportedPostId);
             } else if (report.reportedCommentId) {
                 await Comment.findByIdAndDelete(report.reportedCommentId._id);
             } else if (report.reportedStoryId) {
-                await Story.findByIdAndDelete(report.reportedStoryId._id);
+                await takeDownStory(report.reportedStoryId);
             }
         } else if (action === 'ban_user' && report.reportedUserId) {
             await User.findByIdAndUpdate(report.reportedUserId._id, {

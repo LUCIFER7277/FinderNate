@@ -230,6 +230,43 @@ export const loginRateLimit = rateLimit({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ADMIN SIGN-IN. Separate from loginRateLimit on purpose, and it is the one
+// limiter in this file that FAILS CLOSED.
+//
+// /admin/login had nothing in front of it but generalRateLimit (50,000/minute),
+// which is no limit at all against a wordlist, and unlike /users/login there was
+// no per-account throttle behind it either. It is the highest-value credential
+// on the platform — escrow bookkeeping, seller bank details, user bans — and it
+// is used by a handful of staff a few times a day, so the budget can be small
+// enough to actually stop a walk without ever inconveniencing a real admin.
+//
+// FAILS CLOSED (`passOnStoreError: false`) because the reasoning that makes
+// /users/login fail open does not carry over. There, failing open costs bounded
+// credential stuffing and failing closed costs every user on both clients their
+// sign-in; here, failing open removes a brute-force control on the one account
+// that can move money, and failing closed costs a few staff the admin panel for
+// the length of a Redis blip. The cheaper mistake is the second one.
+// ADMIN_LOGIN_MAX_FAILURES in controllers/admin/auth.controllers.js adds the
+// per-ACCOUNT half of this (an IP-keyed bucket alone is bypassed by rotating
+// `x-forwarded-for`); that one is DB-of-record-free and fails open, so this
+// limiter has to be the half that holds when Redis is unhealthy.
+export const adminLoginRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10,
+    message: {
+        error: 'Too many admin sign-in attempts. Please try again later.',
+        retryAfter: 900
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+    // A successful sign-in should not spend the budget a failed one does.
+    skipSuccessfulRequests: true,
+    skip: (req) => req.method === 'OPTIONS',
+    passOnStoreError: false,
+    store: new RedisStore({ prefix: 'rl:adminlogin:', windowMs: 15 * 60 * 1000 })
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GUEST CHECKOUT (shareable product payment links)
 //
 // ONE LIMITER, KEYED ON THE IP. There used to be a second one keyed on the

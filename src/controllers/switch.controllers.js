@@ -127,7 +127,22 @@ export const getProfileTabContent = asyncHandler(async (req, res) => {
             // so the account-level check above does not cover it. Filter on the
             // posts' own privacy flag instead; a full per-author visibility
             // check would need one lookup per post.
-            const taggedFilter = { _id: { $in: postIds }, ...privacyFilter };
+            //
+            // privacyFilter is NOT usable here: it is {} on your own profile,
+            // which is correct for your own posts but wrong for a tagged one —
+            // it dropped the AUTHOR's settings.privacy:'private' flag, so
+            // tagging someone in a private post handed them the post (and its
+            // public CDN media URL) the moment they opened their Tagged tab.
+            // A private post of your OWN that you were tagged in still shows.
+            const taggedPrivacyFilter = currentUserId
+                ? {
+                    $or: [
+                        { "settings.privacy": { $ne: "private" } },
+                        { userId: currentUserId }
+                    ]
+                }
+                : { "settings.privacy": { $ne: "private" } };
+            const taggedFilter = { _id: { $in: postIds }, ...taggedPrivacyFilter };
             total = await Post.countDocuments(taggedFilter);
             data = await Post.find(taggedFilter, postProjection)
                 .populate("userId", "username profileImageUrl")

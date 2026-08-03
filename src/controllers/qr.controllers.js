@@ -2,7 +2,15 @@ import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.models.js";
 import dynamicQR from "../utils/dynamicQR.js";
-const { generateStyledQR, generateOwnStyledQR, isValidUsername } = dynamicQR;
+const { generateStyledQR, isValidUsername } = dynamicQR;
+
+// The three "my QR" handlers below build the caller's QR from their own
+// username via generateStyledQR, which encodes
+// https://findernate.com/userprofile/<username>.
+//
+// They used to call generateOwnStyledQR, which encodes the RELATIVE path
+// https://findernate.com/profile — scanning that QR opened the scanner's own
+// profile and identified nobody, so "share my profile" shared nothing.
 
 
 const getStyledQRCode = asyncHandler(async (req, res) => {
@@ -53,11 +61,11 @@ const getMyQRCode = asyncHandler(async (req, res) => {
         logoSize: 0.15               // Fixed logo size (15%)
     };
     
-    const styledQRBuffer = await generateOwnStyledQR(styling);
-    
+    const styledQRBuffer = await generateStyledQR(username, styling);
+
     res.set({
         'Content-Type': 'image/png',
-        'Cache-Control': 'private, max-age=1800', 
+        'Cache-Control': 'private, max-age=1800',
         'Content-Disposition': `inline; filename="my-qr-${username}.png"`,
         'X-Style': 'instagram',
         'X-Generated-At': new Date().toISOString()
@@ -122,15 +130,15 @@ const shareMyQRCode = asyncHandler(async (req, res) => {
         backgroundColor: '#FFFEF7'
     };
     
-    const qrBuffer = await generateOwnStyledQR(styling);
+    const qrBuffer = await generateStyledQR(username, styling);
     const qrDataURL = `data:image/png;base64,${qrBuffer.toString('base64')}`;
-    
+
     res.status(200).json({
         success: true,
         data: {
             qrCode: {
                 dataURL: qrDataURL,
-                shareableURL: `https://findernate.com/profile`,
+                shareableURL: `https://findernate.com/userprofile/${username}`,
                 size: 256,
                 style: 'gold-yellow'
             },
@@ -194,8 +202,8 @@ const shareMyQRForChat = asyncHandler(async (req, res) => {
         backgroundColor: '#FFFEF7'
     };
     
-    const qrBuffer = await generateOwnStyledQR(styling);
-    
+    const qrBuffer = await generateStyledQR(username, styling);
+
     // Set headers for chat image sharing
     res.set({
         'Content-Type': 'image/png',

@@ -15,6 +15,33 @@ import {
 } from "../utils/shareUtils.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
 import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
+import { createPostVisibilityChecker } from "./post/visibility.js";
+
+/**
+ * Second gate behind canViewPost, which only knows about `isFullPrivate`.
+ *
+ * `privacy` and `isFullPrivate` are two separate schema fields, and an author
+ * who is private by `privacy` alone fell straight through canViewPost's "post
+ * is public, show it" branch — on an endpoint that answers anonymous callers.
+ * Mirrors filterPostsByAccountPrivacy in post/read.controllers.js: the viewer
+ * must be the author, or follow / be followed by them.
+ */
+const assertAuthorAccountVisible = (post, viewer, viewerFollowing, viewerFollowers, message) => {
+  const author = post.userId;
+  if (!author) return;
+
+  const isPrivateAuthor = author.privacy === "private" || author.isFullPrivate === true;
+  if (!isPrivateAuthor) return;
+
+  const authorId = (author._id ?? author).toString();
+  if (viewer && authorId === viewer._id.toString()) return;
+
+  const related =
+    !!viewer &&
+    (viewerFollowing.includes(authorId) || viewerFollowers.includes(authorId));
+
+  if (!related) throw new ApiError(403, message);
+};
 
 /**
  * Generate shareable link for a post
@@ -166,20 +193,7 @@ export const getSharedPost = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid post ID");
   }
 
-  // Check cache first
   const cacheKey = `fn:share:post:${postId}`;
-  const cachedData = await redisClient.get(cacheKey);
-
-  if (cachedData) {
-    const parsed = JSON.parse(cachedData);
-    if (viewer) {
-      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
-      parsed.post.isLikedBy = likedSet.has(postId.toString());
-    }
-    return res
-      .status(200)
-      .json(new ApiResponse(200, parsed, "Post fetched from cache"));
-  }
 
   // Find post with user details
   const post = await Post.findById(postId)
@@ -243,6 +257,33 @@ export const getSharedPost = asyncHandler(async (req, res) => {
     }
   }
 
+  assertAuthorAccountVisible(
+    post,
+    viewer,
+    viewerFollowing,
+    viewerFollowers,
+    "This account is private. Follow to see their posts."
+  );
+
+  // Cache is read only AFTER the block check and the privacy gate above.
+  //
+  // It used to be read first, and the key holds nothing about the viewer — so
+  // the moment one permitted viewer opened a share link, the next five minutes
+  // of requests were answered from that entry without any authorization at
+  // all: anonymous callers, and users the author had blocked, both got the
+  // post body and media back.
+  const cachedData = await redisClient.get(cacheKey);
+  if (cachedData) {
+    const parsed = JSON.parse(cachedData);
+    if (viewer) {
+      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+      parsed.post.isLikedBy = likedSet.has(postId.toString());
+    }
+    return res
+      .status(200)
+      .json(new ApiResponse(200, parsed, "Post fetched from cache"));
+  }
+
   if (viewer) {
     const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
     post.isLikedBy = likedSet.has(postId.toString());
@@ -298,20 +339,7 @@ export const getSharedReel = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid post ID");
   }
 
-  // Check cache first
   const cacheKey = `fn:share:reel:${postId}`;
-  const cachedData = await redisClient.get(cacheKey);
-
-  if (cachedData) {
-    const parsed = JSON.parse(cachedData);
-    if (viewer) {
-      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
-      parsed.post.isLikedBy = likedSet.has(postId.toString());
-    }
-    return res
-      .status(200)
-      .json(new ApiResponse(200, parsed, "Reel fetched from cache"));
-  }
 
   // Find post with user details
   const post = await Post.findById(postId)
@@ -380,6 +408,28 @@ export const getSharedReel = asyncHandler(async (req, res) => {
     }
   }
 
+  assertAuthorAccountVisible(
+    post,
+    viewer,
+    viewerFollowing,
+    viewerFollowers,
+    "This account is private. Follow to see their reels."
+  );
+
+  // Cache is read only AFTER the block check and the privacy gate above — see
+  // getSharedPost for why reading it first handed the reel to anyone.
+  const cachedData = await redisClient.get(cacheKey);
+  if (cachedData) {
+    const parsed = JSON.parse(cachedData);
+    if (viewer) {
+      const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
+      parsed.post.isLikedBy = likedSet.has(postId.toString());
+    }
+    return res
+      .status(200)
+      .json(new ApiResponse(200, parsed, "Reel fetched from cache"));
+  }
+
   if (viewer) {
     const likedSet = await batchIsLikedByUser(viewer._id, [postId]);
     post.isLikedBy = likedSet.has(postId.toString());
@@ -433,13 +483,7 @@ export const getPostPreviewPage = asyncHandler(async (req, res) => {
     return res.status(404).type("html").send(generateErrorHTML("Invalid post ID"));
   }
 
-  // Check cache first
   const cacheKey = `fn:share:preview:${postId}`;
-  const cachedHTML = await redisClient.get(cacheKey);
-
-  if (cachedHTML) {
-    return res.status(200).type("html").send(cachedHTML);
-  }
 
   // Find post with user details
   const post = await Post.findById(postId)
@@ -456,6 +500,27 @@ export const getPostPreviewPage = asyncHandler(async (req, res) => {
   if (!shareCheck.canShare) {
     const errorHTML = generateErrorHTML(shareCheck.reason);
     return res.status(403).type("html").send(errorHTML);
+  }
+
+  // This page carries no authentication, so the only viewer it can serve is an
+  // anonymous one — which means the author's account has to be public.
+  //
+  // canSharePost only reads the POST-level privacy flag, and switching an
+  // account to private deliberately does not rewrite that flag on existing
+  // posts, so every post made before the switch still read "public" here and
+  // was served — with the raw CDN URL in the og:image tag — to anyone holding
+  // the id, including accounts the author had blocked.
+  const isPubliclyViewable = await createPostVisibilityChecker(null)(post);
+  if (!isPubliclyViewable) {
+    const errorHTML = generateErrorHTML("Post Not Found");
+    return res.status(404).type("html").send(errorHTML);
+  }
+
+  // Cache is read only after the checks above, so turning an account private
+  // takes effect on the next request rather than ten minutes later.
+  const cachedHTML = await redisClient.get(cacheKey);
+  if (cachedHTML) {
+    return res.status(200).type("html").send(cachedHTML);
   }
 
   // Generate preview HTML
@@ -480,13 +545,7 @@ export const getReelPreviewPage = asyncHandler(async (req, res) => {
     return res.status(404).type("html").send(generateErrorHTML("Invalid reel ID"));
   }
 
-  // Check cache first
   const cacheKey = `fn:share:preview:reel:${postId}`;
-  const cachedHTML = await redisClient.get(cacheKey);
-
-  if (cachedHTML) {
-    return res.status(200).type("html").send(cachedHTML);
-  }
 
   // Find post with user details
   const post = await Post.findById(postId)
@@ -509,6 +568,20 @@ export const getReelPreviewPage = asyncHandler(async (req, res) => {
   if (!shareCheck.canShare) {
     const errorHTML = generateErrorHTML(shareCheck.reason);
     return res.status(403).type("html").send(errorHTML);
+  }
+
+  // Anonymous page — the author's account has to be public. See
+  // getPostPreviewPage for why canSharePost alone is not enough.
+  const isPubliclyViewable = await createPostVisibilityChecker(null)(post);
+  if (!isPubliclyViewable) {
+    const errorHTML = generateErrorHTML("Reel Not Found");
+    return res.status(404).type("html").send(errorHTML);
+  }
+
+  // Cache is read only after the checks above.
+  const cachedHTML = await redisClient.get(cacheKey);
+  if (cachedHTML) {
+    return res.status(200).type("html").send(cachedHTML);
   }
 
   // Generate preview HTML

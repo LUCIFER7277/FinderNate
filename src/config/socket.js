@@ -5,6 +5,21 @@ import { User } from '../models/user.models.js';
 import { redisPubSub, redisPublisher, redisClient } from './redis.config.js';
 import mongoose from 'mongoose';
 
+// How long a user may be gone before their active calls are torn down. Mobile
+// clients disconnect constantly (screen lock, network handoff, backgrounding)
+// and reconnect within a couple of seconds — ending the call immediately turned
+// every one of those into a dropped call.
+const CALL_DISCONNECT_GRACE_MS = 20 * 1000;
+
+// Per-socket chat authorization cache. Positive results are kept for the life of
+// the connection; denials expire so a chat created mid-session is not blocked.
+const CHAT_ACCESS_CACHE_LIMIT = 200;
+const CHAT_ACCESS_DENY_TTL_MS = 30 * 1000;
+
+// Upper bounds on client-supplied arrays so one emit cannot fan out unboundedly
+const MAX_MESSAGE_IDS = 200;
+const MAX_FORWARD_TARGETS = 20;
+
 class SocketManager {
     constructor() {
         this.io = null;
@@ -104,6 +119,21 @@ class SocketManager {
                         return next(new Error('Authentication error: User not found'));
                     }
 
+                    // Mirror the HTTP guard (auth.middleware.js:61-71) — a deleted,
+                    // banned or deactivated account must not hold a real-time
+                    // connection either, otherwise moderation stops at REST.
+                    if (user.isDeleted) {
+                        return next(new Error('Authentication error: Account deleted'));
+                    }
+
+                    if (user.accountStatus === 'banned') {
+                        return next(new Error('Authentication error: Account banned'));
+                    }
+
+                    if (user.accountStatus === 'deactivated') {
+                        return next(new Error('Authentication error: Account deactivated'));
+                    }
+
                     socket.userId = user._id.toString();
                     socket.user = user;
                     next();
@@ -119,8 +149,165 @@ class SocketManager {
         }
     }
 
+    /**
+     * Client payloads are untrusted — only ever hand Mongoose a real ObjectId string.
+     * @param {*} value - candidate id from a socket payload
+     * @returns {boolean}
+     */
+    isValidId(value) {
+        return typeof value === 'string' && value.length === 24 && mongoose.Types.ObjectId.isValid(value);
+    }
+
+    /**
+     * Load a chat only if the given user is one of its participants.
+     * @returns {Promise<Object|null>} the chat (_id + admins) or null when not a member
+     */
+    async loadChatForUser(chatId, userId) {
+        if (!this.isValidId(chatId)) {
+            return null;
+        }
+
+        try {
+            const Chat = (await import('../models/chat.models.js')).default;
+            return await Chat.findOne({ _id: chatId, participants: userId })
+                .select('_id admins')
+                .lean();
+        } catch (error) {
+            console.error(`Error loading chat ${chatId} for user ${userId}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Authorization gate for every chat-scoped socket event. Without this a socket
+     * could emit into `chat:<anyId>` — socket.to() does not require membership.
+     * Results are cached per socket so an open chat costs at most one lookup, and
+     * denials are cached too so a hostile client cannot turn emits into DB load.
+     */
+    async isChatParticipant(socket, chatId) {
+        if (!this.isValidId(chatId)) {
+            return false;
+        }
+
+        // Rooms are only joined after this same check, so membership implies access
+        if (socket.chatRooms?.has(chatId)) {
+            return true;
+        }
+
+        if (!socket.chatAccess) {
+            socket.chatAccess = new Map();
+        }
+
+        const cached = socket.chatAccess.get(chatId);
+        if (cached && (cached.allowed || Date.now() - cached.at < CHAT_ACCESS_DENY_TTL_MS)) {
+            return cached.allowed;
+        }
+
+        // Bound the cache — a client emitting random ids must not grow it forever
+        if (socket.chatAccess.size >= CHAT_ACCESS_CACHE_LIMIT) {
+            socket.chatAccess.clear();
+        }
+
+        const chat = await this.loadChatForUser(chatId, socket.userId);
+        socket.chatAccess.set(chatId, { allowed: Boolean(chat), at: Date.now() });
+        return Boolean(chat);
+    }
+
+    /**
+     * Load a message only if it belongs to the given chat AND the user is allowed to
+     * act on it — mirrors the HTTP rules in message.deletion.controllers.js:32-35
+     * (sender or chat admin) and message.features.controllers.js:131-140 (sender only).
+     */
+    async loadOwnMessage(chat, messageId, userId, allowAdmin = true) {
+        if (!this.isValidId(messageId)) {
+            return null;
+        }
+
+        try {
+            const Message = (await import('../models/message.models.js')).default;
+            const message = await Message.findOne({ _id: messageId, chatId: chat._id })
+                .select('sender')
+                .lean();
+
+            if (!message) {
+                return null;
+            }
+
+            if (message.sender?.toString() === userId) {
+                return message;
+            }
+
+            const isAdmin = (chat.admins || []).some(adminId => adminId?.toString() === userId);
+            return (allowAdmin && isAdmin) ? message : null;
+        } catch (error) {
+            console.error(`Error loading message ${messageId} for user ${userId}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Load a call only if the given user is one of its participants. Recipients are
+     * then taken from the stored document, never from the client payload.
+     */
+    async loadCallForUser(callId, userId) {
+        if (!this.isValidId(callId)) {
+            return null;
+        }
+
+        try {
+            const Call = (await import('../models/call.models.js')).default;
+            return await Call.findOne({ _id: callId, participants: userId })
+                .select('_id participants initiator')
+                .lean();
+        } catch (error) {
+            console.error(`Error loading call ${callId} for user ${userId}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Does this user still have another live socket anywhere in the fleet?
+     * fetchSockets() goes through the Redis adapter, so other instances count too.
+     */
+    async hasOtherSockets(userId, excludeSocketId) {
+        if (!this.io) {
+            return false;
+        }
+
+        const userRoom = `user_${userId}`;
+
+        // Cheap local check first — no adapter round-trip when the user is still
+        // connected to this instance
+        const localRoom = this.io.sockets.adapter.rooms.get(userRoom);
+        if (localRoom && Array.from(localRoom).some(socketId => socketId !== excludeSocketId)) {
+            return true;
+        }
+
+        try {
+            const sockets = await this.io.in(userRoom).fetchSockets();
+            return sockets.some(remoteSocket => remoteSocket.id !== excludeSocketId);
+        } catch (error) {
+            console.error(`Error checking remaining sockets for user ${userId}:`, error);
+            return false;
+        }
+    }
+
     setupEventHandlers() {
         this.io.on('connection', async (socket) => {
+            // Every listener below is registered through this wrapper. Socket.IO does
+            // not wrap listener invocation, so a throw inside one escapes as an
+            // uncaughtException — and index.js exits the process on those. One
+            // malformed emit would otherwise take the whole backend down.
+            const on = (event, handler) => {
+                socket.on(event, async (...args) => {
+                    try {
+                        await handler(...args);
+                    } catch (error) {
+                        console.error(`❌ Socket '${event}' handler error (user ${socket.userId}):`, error);
+                    }
+                });
+            };
+
             // Store user connection locally AND in Redis for cross-process access
             this.connectedUsers.set(socket.userId, socket.id);
             this.userSockets.set(socket.id, socket.userId);
@@ -128,14 +315,12 @@ class SocketManager {
             // Track user's chat rooms for cleanup on disconnect
             socket.chatRooms = new Set();
 
-            // Update lastSeenAt in database when user comes online
-            try {
-                await User.findByIdAndUpdate(socket.userId, {
-                    lastSeenAt: new Date()
-                });
-            } catch (err) {
-                console.error('Error updating lastSeenAt on connect:', err);
-            }
+            // Update lastSeenAt in database when user comes online.
+            // Not awaited: awaiting here delayed listener registration below, so
+            // events the client emits immediately on connect (join_chat) were lost.
+            User.findByIdAndUpdate(socket.userId, {
+                lastSeenAt: new Date()
+            }).catch(err => console.error('Error updating lastSeenAt on connect:', err));
 
             // Store in Redis with 24-hour expiry (auto-cleanup for stale connections)
             const PROCESS_ID = process.env.INSTANCE_ID || process.env.pm_id || `process-${process.pid}`;
@@ -180,21 +365,37 @@ class SocketManager {
 
             // Note: No Redis pattern subscriptions needed - Socket.IO rooms handle routing
 
-            // Handle joining chat rooms
-            socket.on('join_chat', (chatId) => {
+            // Handle joining chat rooms — the caller must actually be a participant,
+            // otherwise any logged-in account could subscribe to any conversation
+            on('join_chat', async (chatId) => {
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed) {
+                    console.warn(`Blocked join_chat from user ${socket.userId} for chat ${typeof chatId === 'string' ? chatId : typeof chatId}`);
+                    return;
+                }
+
                 socket.join(`chat:${chatId}`);
                 socket.chatRooms.add(chatId); // Track for cleanup
             });
 
             // Handle leaving chat rooms
-            socket.on('leave_chat', (chatId) => {
+            on('leave_chat', (chatId) => {
+                if (typeof chatId !== 'string') {
+                    return;
+                }
+
                 socket.leave(`chat:${chatId}`);
                 socket.chatRooms.delete(chatId); // Remove from tracking
             });
 
             // Handle typing events
-            socket.on('typing_start', (data) => {
-                const { chatId } = data;
+            on('typing_start', async (data) => {
+                const { chatId } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed) {
+                    return;
+                }
 
                 // Emit to chat room - Socket.IO adapter syncs across processes
                 socket.to(`chat:${chatId}`).emit('user_typing', {
@@ -205,8 +406,14 @@ class SocketManager {
                 });
             });
 
-            socket.on('typing_stop', (data) => {
-                const { chatId } = data;
+            on('typing_stop', async (data) => {
+                const { chatId } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('user_stopped_typing', {
                     userId: socket.userId,
                     chatId
@@ -214,8 +421,13 @@ class SocketManager {
             });
 
             // Handle message events
-            socket.on('send_message', (data) => {
-                const { chatId, message, messageType = 'text', replyTo } = data;
+            on('send_message', async (data) => {
+                const { chatId, message, messageType = 'text', replyTo } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed) {
+                    return;
+                }
 
                 // Emit to all users in the chat (except sender)
                 socket.to(`chat:${chatId}`).emit('new_message', {
@@ -236,8 +448,13 @@ class SocketManager {
             });
 
             // Handle message read events
-            socket.on('mark_read', (data) => {
-                const { chatId, messageIds } = data;
+            on('mark_read', async (data) => {
+                const { chatId, messageIds } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed || !Array.isArray(messageIds)) {
+                    return;
+                }
 
                 // Emit to message senders that their messages were read
                 socket.to(`chat:${chatId}`).emit('messages_read', {
@@ -252,9 +469,18 @@ class SocketManager {
             });
 
             // Handle message delivery confirmation
-            socket.on('confirm_delivery', async (data) => {
-                const { messageIds } = data;
+            on('confirm_delivery', async (data) => {
+                const { messageIds } = data || {};
                 const userId = socket.userId;
+
+                // Only real ids, and a bounded number of them
+                const ids = Array.isArray(messageIds)
+                    ? messageIds.filter(id => this.isValidId(id)).slice(0, MAX_MESSAGE_IDS)
+                    : [];
+
+                if (ids.length === 0) {
+                    return;
+                }
 
                 try {
                     const Message = (await import('../models/message.models.js')).default;
@@ -262,7 +488,7 @@ class SocketManager {
                     // Update delivery status to 'delivered' using positional operator $
                     await Message.updateMany(
                         {
-                            _id: { $in: messageIds },
+                            _id: { $in: ids },
                             'deliveryStatus.userId': userId,
                             'deliveryStatus.status': 'sent'
                         },
@@ -274,8 +500,12 @@ class SocketManager {
                         }
                     );
 
-                    // Notify senders that messages were delivered
-                    const messages = await Message.find({ _id: { $in: messageIds } })
+                    // Notify senders that messages were delivered. Scoped to messages
+                    // actually addressed to this user so arbitrary ids cannot be probed.
+                    const messages = await Message.find({
+                        _id: { $in: ids },
+                        'deliveryStatus.userId': userId
+                    })
                         .select('sender chatId')
                         .lean();
 
@@ -308,32 +538,60 @@ class SocketManager {
             // Handle message deletion
             // NOTE: It's recommended to use HTTP API (DELETE /chats/:chatId/messages/:messageId) instead
             // This socket event is kept for backward compatibility
-            socket.on('delete_message', (data) => {
-                const { chatId, messageId, deleteType = 'for_everyone' } = data;
+            on('delete_message', async (data) => {
+                const { chatId, messageId, deleteType = 'for_everyone' } = data || {};
 
                 if (deleteType === 'for_me') {
+                    const allowed = await this.isChatParticipant(socket, chatId);
+                    if (!allowed || !this.isValidId(messageId)) {
+                        return;
+                    }
+
                     // Only emit to the user who deleted it
                     socket.emit('message_deleted_for_me', {
                         chatId,
                         messageId
                     });
-                } else {
-                    // Emit to all participants in the chat
-                    socket.to(`chat:${chatId}`).emit('message_deleted_for_everyone', {
-                        chatId,
-                        messageId,
-                        deletedBy: {
-                            _id: socket.userId,
-                            username: socket.user.username,
-                            fullName: socket.user.fullName
-                        }
-                    });
+                    return;
                 }
+
+                // Same rule as the HTTP delete: participant, and sender or chat admin.
+                // Without it any account could erase any message on both clients' screens.
+                const chat = await this.loadChatForUser(chatId, socket.userId);
+                if (!chat) {
+                    return;
+                }
+
+                const message = await this.loadOwnMessage(chat, messageId, socket.userId);
+                if (!message) {
+                    return;
+                }
+
+                // Emit to all participants in the chat
+                socket.to(`chat:${chatId}`).emit('message_deleted_for_everyone', {
+                    chatId,
+                    messageId,
+                    deletedBy: {
+                        _id: socket.userId,
+                        username: socket.user.username,
+                        fullName: socket.user.fullName
+                    }
+                });
             });
 
             // Handle message restoration
-            socket.on('restore_message', (data) => {
-                const { chatId, messageId, restoredMessage } = data;
+            on('restore_message', async (data) => {
+                const { chatId, messageId, restoredMessage } = data || {};
+
+                const chat = await this.loadChatForUser(chatId, socket.userId);
+                if (!chat) {
+                    return;
+                }
+
+                const message = await this.loadOwnMessage(chat, messageId, socket.userId);
+                if (!message) {
+                    return;
+                }
 
                 socket.to(`chat:${chatId}`).emit('message_restored', {
                     chatId,
@@ -350,27 +608,40 @@ class SocketManager {
             // ===== ENHANCED MESSAGING EVENTS =====
 
             // Handle message reaction events (real-time sync)
-            socket.on('add_reaction', (data) => {
-                const { chatId, messageId, emoji, reaction } = data;
-                
+            on('add_reaction', async (data) => {
+                const { chatId, messageId, emoji, reaction } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed || !this.isValidId(messageId)) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('message_reaction_added', {
                     chatId,
                     messageId,
                     emoji,
-                    reaction: reaction || {
+                    // Identity always comes from the socket, never from the payload,
+                    // so a reaction cannot be attributed to someone else
+                    reaction: {
+                        ...(reaction && typeof reaction === 'object' ? reaction : {}),
                         emoji,
                         userId: socket.userId,
                         username: socket.user.username,
                         fullName: socket.user.fullName,
                         profileImageUrl: socket.user.profileImageUrl,
-                        createdAt: new Date()
+                        createdAt: reaction?.createdAt || new Date()
                     }
                 });
             });
 
-            socket.on('remove_reaction', (data) => {
-                const { chatId, messageId, emoji } = data;
-                
+            on('remove_reaction', async (data) => {
+                const { chatId, messageId, emoji } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed || !this.isValidId(messageId)) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('message_reaction_removed', {
                     chatId,
                     messageId,
@@ -380,9 +651,25 @@ class SocketManager {
             });
 
             // Handle message edit events (real-time sync)
-            socket.on('edit_message', (data) => {
-                const { chatId, messageId, newContent, editedAt, originalContent } = data;
-                
+            on('edit_message', async (data) => {
+                const { chatId, messageId, newContent, editedAt, originalContent } = data || {};
+
+                if (typeof newContent !== 'string' || newContent.trim().length === 0) {
+                    return;
+                }
+
+                // Same rule as the HTTP edit: only the sender may rewrite a message.
+                // Relaying this unchecked let anyone rewrite any line on both screens.
+                const chat = await this.loadChatForUser(chatId, socket.userId);
+                if (!chat) {
+                    return;
+                }
+
+                const message = await this.loadOwnMessage(chat, messageId, socket.userId, false);
+                if (!message) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('message_edited', {
                     chatId,
                     messageId,
@@ -398,11 +685,24 @@ class SocketManager {
             });
 
             // Handle message forward events (real-time notification)
-            socket.on('forward_message', (data) => {
-                const { targetChatIds, originalMessage, newMessages } = data;
-                
-                // Emit to each target chat
-                targetChatIds.forEach((targetChatId, index) => {
+            on('forward_message', async (data) => {
+                const { targetChatIds, originalMessage, newMessages } = data || {};
+
+                if (!Array.isArray(targetChatIds)) {
+                    return;
+                }
+
+                // Emit to each target chat the sender actually belongs to
+                const targets = targetChatIds.slice(0, MAX_FORWARD_TARGETS);
+
+                for (let index = 0; index < targets.length; index++) {
+                    const targetChatId = targets[index];
+
+                    const allowed = await this.isChatParticipant(socket, targetChatId);
+                    if (!allowed) {
+                        continue;
+                    }
+
                     socket.to(`chat:${targetChatId}`).emit('message_forwarded', {
                         chatId: targetChatId,
                         originalMessage,
@@ -415,13 +715,18 @@ class SocketManager {
                         },
                         timestamp: new Date()
                     });
-                });
+                }
             });
 
             // Handle message pin events (real-time sync)
-            socket.on('pin_message', (data) => {
-                const { chatId, messageId, isPinned, pinnedMessage } = data;
-                
+            on('pin_message', async (data) => {
+                const { chatId, messageId, isPinned, pinnedMessage } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed || !this.isValidId(messageId)) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('message_pin_toggled', {
                     chatId,
                     messageId,
@@ -437,9 +742,14 @@ class SocketManager {
             });
 
             // Handle voice message recording notification (optional UX enhancement)
-            socket.on('recording_voice', (data) => {
-                const { chatId, isRecording } = data;
-                
+            on('recording_voice', async (data) => {
+                const { chatId, isRecording } = data || {};
+
+                const allowed = await this.isChatParticipant(socket, chatId);
+                if (!allowed) {
+                    return;
+                }
+
                 socket.to(`chat:${chatId}`).emit('user_recording_voice', {
                     chatId,
                     userId: socket.userId,
@@ -453,7 +763,11 @@ class SocketManager {
             // ===== END ENHANCED MESSAGING EVENTS =====
 
             // Handle online status
-            socket.on('set_online_status', (status) => {
+            on('set_online_status', (status) => {
+                if (typeof status !== 'string') {
+                    return;
+                }
+
                 socket.to(`user_${socket.userId}`).emit('user_status_changed', {
                     userId: socket.userId,
                     status,
@@ -462,7 +776,7 @@ class SocketManager {
             });
 
             // 🚀 NEW: Handle request for initial unread counts (alternative to HTTP polling)
-            socket.on('request_unread_counts', async () => {
+            on('request_unread_counts', async () => {
                 try {
                     const notificationCache = (await import('../utils/notificationCache.utils.js')).default;
                     const counts = await notificationCache.getUnreadCounts(socket.userId);
@@ -499,8 +813,20 @@ class SocketManager {
 
             // OPTIONAL: Handle call acceptance signaling (for real-time UI updates)
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/accept
-            socket.on('call_accept', async (data) => {
-                const { callId, callerId } = data;
+            on('call_accept', async (data) => {
+                const { callId } = data || {};
+
+                // The emitter must be a participant, and the recipient is taken from
+                // the stored call — a client-supplied id could target any user
+                const call = await this.loadCallForUser(callId, socket.userId);
+                if (!call) {
+                    return;
+                }
+
+                const callerId = call.initiator?.toString();
+                if (!callerId || callerId === socket.userId) {
+                    return;
+                }
 
                 // Real-time notification only - HTTP endpoint handles DB update
                 this.emitToUser(callerId, 'call_accepted', {
@@ -518,8 +844,18 @@ class SocketManager {
 
             // OPTIONAL: Handle call decline signaling (for real-time UI updates)
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/decline
-            socket.on('call_decline', (data) => {
-                const { callId, callerId } = data;
+            on('call_decline', async (data) => {
+                const { callId } = data || {};
+
+                const call = await this.loadCallForUser(callId, socket.userId);
+                if (!call) {
+                    return;
+                }
+
+                const callerId = call.initiator?.toString();
+                if (!callerId || callerId === socket.userId) {
+                    return;
+                }
 
                 // Real-time notification only - HTTP endpoint handles DB update
                 this.emitToUser(callerId, 'call_declined', {
@@ -536,12 +872,23 @@ class SocketManager {
 
             // OPTIONAL: Handle call end signaling (for real-time UI updates)
             // Main logic is in HTTP PATCH /api/v1/calls/:callId/end
-            socket.on('call_end', (data) => {
-                const { callId, participants, endReason = 'normal' } = data;
+            on('call_end', async (data) => {
+                const { callId, endReason = 'normal' } = data || {};
+
+                // The emitter must be a participant of the call, and the recipients
+                // come from the stored document — the client's `participants` array
+                // let any account tear down any other user's call UI
+                const call = await this.loadCallForUser(callId, socket.userId);
+                if (!call) {
+                    return;
+                }
+
+                const reason = typeof endReason === 'string' ? endReason : 'normal';
 
                 // Real-time notification only - HTTP endpoint handles DB update
-                participants
-                    .filter(participantId => participantId !== socket.userId)
+                (call.participants || [])
+                    .map(participantId => participantId?.toString())
+                    .filter(participantId => participantId && participantId !== socket.userId)
                     .forEach(participantId => {
                         this.emitToUser(participantId, 'call_ended', {
                             callId,
@@ -551,7 +898,7 @@ class SocketManager {
                                 fullName: socket.user.fullName,
                                 profileImageUrl: socket.user.profileImageUrl
                             },
-                            endReason,
+                            endReason: reason,
                             timestamp: new Date()
                         });
                     });
@@ -559,13 +906,13 @@ class SocketManager {
 
 
             // Handle disconnect
-            socket.on('disconnect', async () => {
+            on('disconnect', async () => {
                 const userId = socket.userId;
 
-                // Clean up local tracking
-                if (userId) {
-                    this.connectedUsers.delete(userId);
-                }
+                // Captured before the rooms are cleared so the offline notice can be
+                // scoped to the people this user actually talks to
+                const joinedChatRooms = socket.chatRooms ? Array.from(socket.chatRooms) : [];
+
                 this.userSockets.delete(socket.id);
 
                 // Clean up all chat rooms the user was in
@@ -576,134 +923,172 @@ class SocketManager {
                     socket.chatRooms.clear();
                 }
 
-                // Remove from Redis cross-process tracking
-                if (userId) {
-                    // Update lastSeenAt in database when user goes offline
-                    try {
-                        await User.findByIdAndUpdate(userId, {
-                            lastSeenAt: new Date()
-                        });
-                    } catch (err) {
-                        console.error('Error updating lastSeenAt on disconnect:', err);
-                    }
-
-                    redisClient.hdel('fn:online_users', userId)
-                        .catch(err => console.error('Redis user removal error:', err));
-
-                    // Emit offline status to relevant users with lastSeenAt
-                    this.emitUserOffline(userId);
-                }
-
-                // 🚨 CRITICAL: End all active calls for the disconnected user
-                // This prevents "already in a call" errors after disconnection
                 if (!userId) {
-                    console.warn('Socket disconnected without userId, skipping call cleanup');
+                    console.warn('Socket disconnected without userId, skipping presence and call cleanup');
                     return;
                 }
 
-                try {
-                    const Call = (await import('../models/call.models.js')).default;
-
-                    // Find all active calls where this user is a participant
-                    const activeCalls = await Call.find({
-                        participants: userId,
-                        status: { $in: ['initiated', 'ringing', 'connecting', 'active'] }
-                    }).select('_id participants'); // Only get IDs for efficiency
-
-                    if (activeCalls.length > 0) {
-
-                        for (const call of activeCalls) {
-                            const callId = call._id;
-                            const session = await mongoose.startSession();
-
-                            try {
-                                await session.withTransaction(async () => {
-                                    // Re-fetch call within transaction to get latest state
-                                    const callToUpdate = await Call.findById(callId).session(session);
-
-                                    if (!callToUpdate) {
-                                        console.warn(`Call ${callId} not found, skipping`);
-                                        return;
-                                    }
-
-                                    // Skip if already ended (race condition protection)
-                                    if (['ended', 'declined', 'missed', 'failed'].includes(callToUpdate.status)) {
-                                        return;
-                                    }
-
-                                    // Update call status - following same pattern as endCall controller
-                                    callToUpdate.status = 'ended';
-                                    callToUpdate.endedAt = new Date();
-                                    callToUpdate.endReason = 'network_error';
-                                    callToUpdate.endedBy = userId;
-
-                                    // If call was never started, set startedAt to endedAt for duration calculation
-                                    if (!callToUpdate.startedAt) {
-                                        callToUpdate.startedAt = callToUpdate.endedAt;
-                                    }
-
-                                    await callToUpdate.save({ session });
-                                });
-                            } catch (callError) {
-                                console.error(`❌ Error ending call ${callId} on disconnect:`, callError);
-                                // Continue with other calls even if one fails
-                            } finally {
-                                // Always end session
-                                await session.endSession().catch(err =>
-                                    console.error(`Error ending session for call ${callId}:`, err)
-                                );
-                            }
-
-                            // Fetch populated call data after transaction to get correct duration and notify participants
-                            try {
-                                const populatedCall = await Call.findById(callId)
-                                    .populate('participants', 'username fullName profileImageUrl')
-                                    .populate('initiator', 'username fullName profileImageUrl');
-
-                                if (!populatedCall) {
-                                    console.warn(`Call ${callId} not found after transaction, skipping notification`);
-                                    continue;
-                                }
-
-                                // Skip notification if call is not in ended state (might have been ended by another process)
-                                if (populatedCall.status !== 'ended') {
-                                    continue;
-                                }
-
-                                // Get other participants (excluding the disconnected user)
-                                const participantIds = populatedCall.participants.map(p => p._id.toString());
-                                const otherParticipants = participantIds.filter(id => id !== userId);
-
-                                // Notify other participants via socket
-                                if (otherParticipants.length > 0) {
-                                    otherParticipants.forEach(participantId => {
-                                        this.emitToUser(participantId, 'call_ended', {
-                                            callId: callId.toString(),
-                                            endedBy: {
-                                                _id: userId,
-                                                username: socket.user?.username || 'User',
-                                                fullName: socket.user?.fullName || 'User',
-                                                profileImageUrl: socket.user?.profileImageUrl
-                                            },
-                                            endReason: 'network_error',
-                                            duration: populatedCall.duration || 0,
-                                            timestamp: new Date()
-                                        });
-                                    });
-                                }
-                            } catch (notificationError) {
-                                console.error(`❌ Error notifying participants about call ${callId} ending:`, notificationError);
-                                // Continue with other calls even if notification fails
-                            }
-                        }
-                    }
-                } catch (error) {
-                    console.error(`❌ Error handling call cleanup on disconnect for user ${userId}:`, error);
-                    // Don't block disconnect cleanup if call ending fails
+                // The same account can hold several sockets (phone + web). Only treat
+                // it as gone — and only touch its calls — once the last one has left.
+                const stillConnected = await this.hasOtherSockets(userId, socket.id);
+                if (stillConnected) {
+                    return;
                 }
 
+                // Clean up local tracking (only if this socket is the one recorded)
+                if (this.connectedUsers.get(userId) === socket.id) {
+                    this.connectedUsers.delete(userId);
+                }
+
+                // Update lastSeenAt in database when user goes offline
+                try {
+                    await User.findByIdAndUpdate(userId, {
+                        lastSeenAt: new Date()
+                    });
+                } catch (err) {
+                    console.error('Error updating lastSeenAt on disconnect:', err);
+                }
+
+                // Remove from Redis cross-process tracking
+                redisClient.hdel('fn:online_users', userId)
+                    .catch(err => console.error('Redis user removal error:', err));
+
+                // Emit offline status to relevant users with lastSeenAt
+                this.emitUserOffline(userId, joinedChatRooms)
+                    .catch(err => console.error('Error emitting user offline:', err));
+
+                // 🚨 End all active calls for the disconnected user, so they do not
+                // hit "already in a call" later — but only after a grace period, and
+                // only if they have not reconnected. Mobile sockets drop on every
+                // screen lock and network handoff; ending immediately killed live calls.
+                const endedByProfile = {
+                    _id: userId,
+                    username: socket.user?.username || 'User',
+                    fullName: socket.user?.fullName || 'User',
+                    profileImageUrl: socket.user?.profileImageUrl
+                };
+
+                const cleanupTimer = setTimeout(() => {
+                    this.hasOtherSockets(userId, socket.id)
+                        .then(reconnected => {
+                            if (reconnected) {
+                                return null;
+                            }
+                            return this.endActiveCallsForUser(userId, endedByProfile);
+                        })
+                        .catch(error => console.error(`❌ Error handling call cleanup on disconnect for user ${userId}:`, error));
+                }, CALL_DISCONNECT_GRACE_MS);
+
+                if (typeof cleanupTimer.unref === 'function') {
+                    cleanupTimer.unref();
+                }
             });
         });
+    }
+
+    /**
+     * End every call the user is still listed as active in, and tell the other
+     * participants. Called from the disconnect path after the reconnect grace period.
+     * @param {string} userId
+     * @param {Object} endedByProfile - identity snapshot for the 'call_ended' payload
+     */
+    async endActiveCallsForUser(userId, endedByProfile) {
+        try {
+            const Call = (await import('../models/call.models.js')).default;
+
+            // Find all active calls where this user is a participant
+            const activeCalls = await Call.find({
+                participants: userId,
+                status: { $in: ['initiated', 'ringing', 'connecting', 'active'] }
+            }).select('_id participants'); // Only get IDs for efficiency
+
+            if (activeCalls.length === 0) {
+                return;
+            }
+
+            for (const call of activeCalls) {
+                const callId = call._id;
+                const session = await mongoose.startSession();
+
+                try {
+                    await session.withTransaction(async () => {
+                        // Re-fetch call within transaction to get latest state
+                        const callToUpdate = await Call.findById(callId).session(session);
+
+                        if (!callToUpdate) {
+                            console.warn(`Call ${callId} not found, skipping`);
+                            return;
+                        }
+
+                        // Skip if already ended (race condition protection)
+                        if (['ended', 'declined', 'missed', 'failed'].includes(callToUpdate.status)) {
+                            return;
+                        }
+
+                        // Update call status - following same pattern as endCall controller
+                        callToUpdate.status = 'ended';
+                        callToUpdate.endedAt = new Date();
+                        callToUpdate.endReason = 'network_error';
+                        callToUpdate.endedBy = userId;
+
+                        // If call was never started, set startedAt to endedAt for duration calculation
+                        if (!callToUpdate.startedAt) {
+                            callToUpdate.startedAt = callToUpdate.endedAt;
+                        }
+
+                        await callToUpdate.save({ session });
+                    });
+                } catch (callError) {
+                    console.error(`❌ Error ending call ${callId} on disconnect:`, callError);
+                    // Continue with other calls even if one fails
+                } finally {
+                    // Always end session
+                    await session.endSession().catch(err =>
+                        console.error(`Error ending session for call ${callId}:`, err)
+                    );
+                }
+
+                // Fetch populated call data after transaction to get correct duration and notify participants
+                try {
+                    const populatedCall = await Call.findById(callId)
+                        .populate('participants', 'username fullName profileImageUrl')
+                        .populate('initiator', 'username fullName profileImageUrl');
+
+                    if (!populatedCall) {
+                        console.warn(`Call ${callId} not found after transaction, skipping notification`);
+                        continue;
+                    }
+
+                    // Skip notification if call is not in ended state (might have been ended by another process)
+                    if (populatedCall.status !== 'ended') {
+                        continue;
+                    }
+
+                    // Get other participants (excluding the disconnected user)
+                    const participantIds = populatedCall.participants.map(p => p._id.toString());
+                    const otherParticipants = participantIds.filter(id => id !== userId);
+
+                    // Notify other participants via socket
+                    if (otherParticipants.length > 0) {
+                        otherParticipants.forEach(participantId => {
+                            this.emitToUser(participantId, 'call_ended', {
+                                callId: callId.toString(),
+                                endedBy: endedByProfile,
+                                endReason: 'network_error',
+                                duration: populatedCall.duration || 0,
+                                timestamp: new Date()
+                            });
+                        });
+                    }
+                } catch (notificationError) {
+                    console.error(`❌ Error notifying participants about call ${callId} ending:`, notificationError);
+                    // Continue with other calls even if notification fails
+                }
+            }
+        } catch (error) {
+            console.error(`❌ Error handling call cleanup on disconnect for user ${userId}:`, error);
+            // Don't block disconnect cleanup if call ending fails
+        }
     }
 
     // Utility methods
@@ -792,11 +1177,30 @@ class SocketManager {
         });
     }
 
-    async emitUserOffline(userId) {
+    /**
+     * Tell the people who care that a user went offline.
+     * @param {string} userId
+     * @param {string[]} chatRoomIds - chats the user was in; presence is only sent there.
+     *   Broadcasting to every connected socket cost O(all sockets) per disconnect and
+     *   told the whole platform when any account went offline.
+     */
+    async emitUserOffline(userId, chatRoomIds = []) {
         if (!this.io) {
             console.warn('Socket.IO not initialized, skipping emitUserOffline');
             return;
         }
+
+        const rooms = Array.from(new Set(
+            (Array.isArray(chatRoomIds) ? chatRoomIds : [])
+                .filter(chatId => typeof chatId === 'string' && chatId.length > 0)
+                .map(chatId => `chat:${chatId}`)
+        ));
+
+        // io.to([]) would broadcast to everyone — nothing to do if there is no audience
+        if (rooms.length === 0) {
+            return;
+        }
+
         // Get user's last seen timestamp
         let lastSeenAt = new Date();
         try {
@@ -807,8 +1211,8 @@ class SocketManager {
         } catch (err) {
             console.error('Error fetching lastSeenAt for offline emit:', err);
         }
-        // Emit to all users who might be interested in this user's status
-        this.io.emit('user_offline', {
+        // Emit to the user's chat rooms only — the participants who display presence
+        this.io.to(rooms).emit('user_offline', {
             userId,
             timestamp: new Date(),
             lastSeenAt

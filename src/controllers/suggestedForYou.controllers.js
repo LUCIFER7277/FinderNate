@@ -21,6 +21,36 @@ function shuffleArray(array) {
     }
 }
 
+// The signed-out ranking is the same for every visitor, so it is computed once
+// and reused.
+//
+// The aggregation below has no $match in front of its $group, so MongoDB has to
+// read every document in the Follower collection and build the whole group
+// before $sort/$limit can apply. It sat uncached and unrated behind an
+// optionalVerifyJWT route on the most-hit public page: every logged-out visitor
+// — or one scripted loop against the public URL — triggered a full collection
+// scan, and the connection pool it saturates is the same one checkout, chat and
+// signed-in feeds use. A short TTL keeps "most followed" fresh enough for a
+// discovery panel while collapsing a burst of anonymous traffic into one scan.
+const POPULAR_RANKING_TTL_MS = 5 * 60 * 1000;
+const _popularRanking = { data: null, expiry: 0 };
+
+const getPopularRanking = async () => {
+    if (_popularRanking.data && Date.now() < _popularRanking.expiry) {
+        return _popularRanking.data;
+    }
+
+    const ranked = await Follower.aggregate([
+        { $group: { _id: "$userId", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 200 },
+    ]);
+
+    _popularRanking.data = ranked;
+    _popularRanking.expiry = Date.now() + POPULAR_RANKING_TTL_MS;
+    return ranked;
+};
+
 /**
  * Signed-out visitors get the accounts most people follow.
  *
@@ -41,12 +71,8 @@ const sendPopularSuggestions = async (req, res) => {
     // Follower counts are not denormalised onto User, so ranking by popularity
     // means aggregating. Capped well above one page: the sort has to happen
     // before the cut or "most followed" would mean "most followed out of an
-    // arbitrary slice".
-    const ranked = await Follower.aggregate([
-        { $group: { _id: "$userId", count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 200 },
-    ]);
+    // arbitrary slice". Cached — see getPopularRanking above.
+    const ranked = await getPopularRanking();
 
     const rankedIds = ranked.map(r => r._id);
     const countById = new Map(ranked.map(r => [r._id.toString(), r.count]));

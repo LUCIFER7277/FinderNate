@@ -88,6 +88,46 @@ connectDB()
             console.error('❌ Server error:', error);
             process.exit(1);
         });
+
+        // ── Graceful shutdown ────────────────────────────────────────────────
+        //
+        // Without this, the container platform's SIGTERM killed the process
+        // outright, so EVERY routine deploy severed whatever was in flight —
+        // including a Cashfree verification that had already charged the card
+        // but had not yet bound the transaction to the order. The payment
+        // succeeds at the gateway and the order stays 'pending' forever, which
+        // is the hardest class of failure to reconcile after the fact.
+        //
+        // Stop accepting new connections, let the in-flight ones finish, then
+        // exit. The timeout is a backstop: if something will not drain we still
+        // have to go before the platform's own SIGKILL lands (usually 30s), and
+        // exiting a little early is better than being killed mid-write.
+        const SHUTDOWN_GRACE_MS = 15_000;
+        let shuttingDown = false;
+
+        const shutdown = (signal) => {
+            // A second signal must not start a second drain.
+            if (shuttingDown) return;
+            shuttingDown = true;
+            console.log(`⏻ ${signal} received — draining in-flight requests…`);
+
+            const forced = setTimeout(() => {
+                console.error('⏻ Drain timed out — exiting anyway.');
+                process.exit(0);
+            }, SHUTDOWN_GRACE_MS);
+            // Do not let this timer alone hold the process open.
+            forced.unref();
+
+            server.close((err) => {
+                if (err) console.error('⏻ Error while closing server:', err);
+                clearTimeout(forced);
+                console.log('⏻ Drained cleanly.');
+                process.exit(0);
+            });
+        };
+
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => shutdown('SIGINT'));
     })
     .catch((err) => {
         console.error("❌ MONGODB connection error:", err);

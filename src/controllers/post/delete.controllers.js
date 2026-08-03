@@ -9,8 +9,37 @@ import Comment from "../../models/comment.models.js";
 import SavedPost from "../../models/savedPost.models.js";
 import PostInteraction from "../../models/postInteraction.models.js";
 import Report from "../../models/report.models.js";
+import Order from "../../models/order.models.js";
 import { deleteMultipleFromBunny, deleteFromBunny } from "../../utils/bunny.js";
 import { invalidatePostCaches } from "./helpers.js";
+
+/**
+ * A post whose money is still in flight cannot be deleted.
+ *
+ * Deleting one used to be allowed at any time, and Order.postId was left
+ * pointing at an id that no longer resolves. That is not just a blank product
+ * card in the buyer's order history: the dispute path reads figures back off
+ * the post, so a seller could change the outcome of a live money dispute by
+ * deleting the listing underneath it.
+ *
+ * Only orders where the platform is actually holding the buyer's money block
+ * the delete — 'paid' and 'held'. Once an order is released, refunded, failed
+ * or still unpaid, nothing further is computed from the post and the listing
+ * can go.
+ */
+const assertNoLiveOrders = async (postId) => {
+    const liveOrder = await Order.exists({
+        postId,
+        paymentStatus: { $in: ['paid', 'held'] },
+    });
+
+    if (liveOrder) {
+        throw new ApiError(
+            409,
+            "This post has an order with payment still in progress. It can't be deleted until that order is completed or refunded."
+        );
+    }
+};
 
 export const deletePost = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -24,6 +53,8 @@ export const deletePost = asyncHandler(async (req, res) => {
     if (post.userId.toString() !== userId.toString()) {
         throw new ApiError(403, "You can only delete your own posts");
     }
+
+    await assertNoLiveOrders(id);
 
     let bunnyDeletionResult = { totalDeleted: 0, errors: [] };
 
@@ -204,6 +235,8 @@ export const deleteContent = asyncHandler(async (req, res) => {
             if (content.userId.toString() !== userId.toString()) {
                 throw new ApiError(403, "You can only delete your own posts");
             }
+
+            await assertNoLiveOrders(postId);
 
             if (content.media && content.media.length > 0) {
                 content.media.forEach(media => {

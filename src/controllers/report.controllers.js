@@ -10,6 +10,14 @@ import { User } from "../models/user.models.js";
 /** Reports needed before content is queued for an admin to look at. */
 const REPORT_ESCALATION_THRESHOLD = 3;
 
+// Must include 'under_review' — that is the status reportContent escalates to
+// once REPORT_ESCALATION_THRESHOLD reports exist. It was missing from both the
+// list filter and the status-update whitelist, so the most-reported content on
+// the platform disappeared from the 'pending' queue with no filter value that
+// could select it, and a moderator could not put a report back into the review
+// queue either. The value has always been in the model enum.
+const REPORT_STATUSES = ['pending', 'under_review', 'reviewed', 'resolved', 'dismissed'];
+
 export const reportContent = asyncHandler(async (req, res) => {
     const userId = req.user?._id;
     if (!userId) throw new ApiError(401, "Authentication required");
@@ -159,7 +167,7 @@ export const getReports = asyncHandler(async (req, res) => {
 
     // Otherwise return all reports with filters
     const filter = {};
-    if (status && ['pending', 'reviewed', 'resolved', 'dismissed'].includes(status)) {
+    if (status && REPORT_STATUSES.includes(status)) {
         filter.status = status;
     }
 
@@ -196,9 +204,8 @@ export const updateReportStatus = asyncHandler(async (req, res) => {
     if (!reportId) throw new ApiError(400, "Report ID is required");
     if (!status) throw new ApiError(400, "Status is required");
 
-    const validStatuses = ['pending', 'reviewed', 'resolved', 'dismissed'];
-    if (!validStatuses.includes(status)) {
-        throw new ApiError(400, `Status must be one of: ${validStatuses.join(', ')}`);
+    if (!REPORT_STATUSES.includes(status)) {
+        throw new ApiError(400, `Status must be one of: ${REPORT_STATUSES.join(', ')}`);
     }
 
     const report = await Report.findById(reportId);

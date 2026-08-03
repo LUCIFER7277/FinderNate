@@ -2,9 +2,95 @@
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { uploadBufferToBunny } from "../utils/bunny.js";
+import { uploadBufferToBunny, isBunnyUrl, isStreamUrl } from "../utils/bunny.js";
 import { User } from "../models/user.models.js";
+import Post from "../models/userPost.models.js";
+import Reel from "../models/reels.models.js";
+import Story from "../models/story.models.js";
+import Message from "../models/message.models.js";
 import { POST_MEDIA_LIMITS_MB, tooLargeMessage } from "../constants/uploadLimits.js";
+
+// How many URLs one /delete-multiple call may carry. Each URL now costs a few
+// lookups to establish ownership, so the batch has to be bounded — an unbounded
+// array was also what let the mass deletion described below happen in a single
+// request.
+const MAX_DELETE_BATCH = 20;
+
+/**
+ * Who owns a stored media file.
+ *
+ * Nothing in the storage path encodes an uploader — generateFilePath writes
+ * `<folder>/<timestamp>-<uuid>.<ext>` — so the only trustworthy record of who
+ * a file belongs to is the document that references it. This resolves that
+ * document and returns its owner.
+ *
+ * Returns null when no document references the URL. That is deliberately
+ * treated as "cannot prove ownership" by the callers rather than as "free to
+ * delete": an unreferenced file may be someone else's upload that has not been
+ * attached to a post yet, and there is no way to tell from the URL alone.
+ *
+ * None of the url fields below is indexed, which is why the batch route is
+ * capped. Indexes on Post.media.url, Reel.videoUrl, Story.mediaUrl and
+ * Message.mediaUrl belong in the schemas and would make this cheap.
+ *
+ * @returns {Promise<mongoose.Types.ObjectId|null>}
+ */
+const findMediaOwnerId = async (url) => {
+    // CDN transform params (?width=300&...) are decoration on the same file.
+    const bareUrl = String(url).split('?')[0];
+    const match = { $in: [url, bareUrl] };
+
+    const post = await Post.findOne({
+        $or: [
+            { 'media.url': match },
+            { 'media.thumbnailUrl': match },
+            { 'media.additionalMedia.url': match },
+            { 'media.additionalMedia.thumbnailUrl': match },
+            { 'productDetails.images': match },
+        ]
+    }).select('userId').lean();
+    if (post) return post.userId;
+
+    const reel = await Reel.findOne({
+        $or: [{ videoUrl: match }, { thumbnailUrl: match }]
+    }).select('userId').lean();
+    if (reel) return reel.userId;
+
+    const story = await Story.findOne({ mediaUrl: match }).select('userId').lean();
+    if (story) return story.userId;
+
+    const message = await Message.findOne({ mediaUrl: match }).select('sender').lean();
+    if (message) return message.sender;
+
+    const user = await User.findOne({ profileImageUrl: match }).select('_id').lean();
+    if (user) return user._id;
+
+    return null;
+};
+
+/**
+ * Throws unless `userId` may delete `url`.
+ *
+ * Both delete routes previously handed a caller-supplied URL straight to
+ * deleteFromBunny(), which issues the DELETE with the master storage key — so
+ * any logged-in account could wipe any file in the zone just by copying media
+ * URLs out of a public profile.
+ */
+const assertCanDeleteMedia = async (url, userId) => {
+    if (typeof url !== 'string' || (!isBunnyUrl(url) && !isStreamUrl(url))) {
+        throw new ApiError(400, "Invalid media URL");
+    }
+
+    const ownerId = await findMediaOwnerId(url);
+    if (!ownerId) {
+        // 404, not 403: telling an unrelated caller "that isn't yours" would
+        // confirm the file exists.
+        throw new ApiError(404, "Media not found");
+    }
+    if (ownerId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You are not authorized to delete this media");
+    }
+};
 
 // Upload single media file (image, video, audio, document)
 const uploadSingleMedia = asyncHandler(async (req, res) => {
@@ -213,6 +299,10 @@ const deleteMedia = asyncHandler(async (req, res) => {
         throw new ApiError(401, "User authentication required");
     }
 
+    // Ownership is settled before the try block: an ApiError raised inside it
+    // would be swallowed by the catch and re-reported as a 500.
+    await assertCanDeleteMedia(url, userId);
+
     try {
         const { deleteFromBunny } = await import("../utils/bunny.js");
         const result = await deleteFromBunny(url);
@@ -235,6 +325,8 @@ const deleteMedia = asyncHandler(async (req, res) => {
             throw new ApiError(400, "Failed to delete media from Bunny.net");
         }
     } catch (error) {
+        // Keep a deliberate status (the 400 above) instead of relabelling it 500.
+        if (error instanceof ApiError) throw error;
         throw new ApiError(500, "Error deleting media from Bunny.net", [error.message]);
     }
 });
@@ -252,9 +344,33 @@ const deleteMultipleMedia = asyncHandler(async (req, res) => {
         throw new ApiError(401, "User authentication required");
     }
 
+    if (urls.length > MAX_DELETE_BATCH) {
+        throw new ApiError(400, `A maximum of ${MAX_DELETE_BATCH} URLs can be deleted in one request`);
+    }
+
+    // Same ownership gate as the single-file route, per URL. A URL the caller
+    // does not own is reported as a failure for that entry and never reaches
+    // Bunny — one bad entry does not fail the whole batch.
+    const deletableUrls = [];
+    const rejected = [];
+    for (const url of urls) {
+        try {
+            await assertCanDeleteMedia(url, userId);
+            deletableUrls.push(url);
+        } catch (error) {
+            rejected.push({
+                url,
+                deleted: false,
+                deleted_by: null,
+                deleted_at: null,
+                error: error.message
+            });
+        }
+    }
+
     try {
         const { deleteMultipleFromBunny } = await import("../utils/bunny.js");
-        const deletionResult = await deleteMultipleFromBunny(urls);
+        const deletionResult = await deleteMultipleFromBunny(deletableUrls);
 
         const results = deletionResult.results.map(result => ({
             url: result.url,
@@ -271,14 +387,15 @@ const deleteMultipleMedia = asyncHandler(async (req, res) => {
 
         return res.status(200).json(
             new ApiResponse(200, {
-                deleted_files: results,
+                deleted_files: [...results, ...rejected],
                 total_files: urls.length,
                 successful_deletions: deletionResult.totalDeleted,
-                failed_deletions: deletionResult.errors.length,
+                failed_deletions: deletionResult.errors.length + rejected.length,
                 skipped_deletions: deletionResult.totalSkipped
             }, "Multiple media deletion completed")
         );
     } catch (error) {
+        if (error instanceof ApiError) throw error;
         throw new ApiError(500, "Error deleting multiple media from Bunny.net", [error.message]);
     }
 });
