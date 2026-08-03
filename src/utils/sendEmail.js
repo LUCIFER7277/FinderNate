@@ -13,20 +13,70 @@ import nodemailer from 'nodemailer';
  *
  * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
  */
+// Host and port are configurable, with Zoho's SMTP as the default because that
+// is what this deployment uses. They were previously hardcoded while .env
+// carried EMAIL_HOST and EMAIL_PORT that nothing read — so changing either had
+// no effect and cost real debugging time.
+//
+// Port drives the transport mode and the two must agree: 465 is implicit TLS
+// (secure: true), 587 is STARTTLS (secure: false). Deriving `secure` from the
+// port rather than taking it as a third setting removes the combination that
+// silently fails to connect.
+const DEFAULT_SMTP_HOST = 'smtp.zoho.com';
+
+// EMAIL_HOST is validated, not trusted, because the deployed .env currently
+// holds `EMAIL_HOST=FindeNate` — a (misspelled) display name someone put in a
+// hostname slot. That was harmless while the host was hardcoded, but the moment
+// this file started honouring the variable it would have pointed every SMTP
+// connection at a name that does not resolve, breaking password resets, OTPs and
+// the guest-checkout claim link platform-wide. A value with no dot in it cannot
+// be a public mail host, so it is rejected in favour of the working default and
+// reported loudly rather than obeyed silently.
+const resolveSmtpHost = () => {
+    const configured = process.env.EMAIL_HOST?.trim();
+    if (!configured) return DEFAULT_SMTP_HOST;
+
+    const looksLikeHostname = /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(configured);
+    if (!looksLikeHostname) {
+        console.warn(
+            `⚠️  EMAIL_HOST="${configured}" is not a hostname — ignoring it and using ` +
+            `${DEFAULT_SMTP_HOST}. If you meant to set the sender's display name, ` +
+            `use EMAIL_FROM_NAME. If you meant the mail server, use something like ` +
+            `smtp.zoho.com.`
+        );
+        return DEFAULT_SMTP_HOST;
+    }
+    return configured;
+};
+
+const SMTP_HOST = resolveSmtpHost();
+const SMTP_PORT = Number(process.env.EMAIL_PORT) || 465;
+
+// The address mail is sent AS. Defaults to the authenticating mailbox, but can
+// differ when the SMTP account is allowed to send on behalf of another address.
+const FROM_ADDRESS = process.env.EMAIL_FROM?.trim() || process.env.EMAIL_USER;
+const FROM_NAME = process.env.EMAIL_FROM_NAME?.trim() || 'FinderNate';
+
 export const sendEmail = async ({ to, subject, html }) => {
-    // ⚠ SENDER DOMAIN MISMATCH — needs aligning.
-    // Mail is sent as EMAIL_USER over Zoho, and that address is not on
-    // findernate.com. A From: domain that does not match the product's domain
-    // (and has no SPF/DKIM/DMARC alignment for it) is scored as spoofing by
-    // Gmail and Outlook, so these messages land in spam or are rejected
-    // outright — which for the guest-checkout claim link means the buyer never
-    // learns how to set their password. Move sending to a findernate.com
-    // mailbox and publish SPF + DKIM + DMARC for it.
+    // The From: domain must match the product's domain and have SPF + DKIM
+    // published for it, or Gmail and Outlook score the message as spoofing and
+    // file it as spam — which for the guest-checkout claim link means the buyer
+    // never learns how to set their password on the account we made for them.
+    // Set EMAIL_USER (and EMAIL_FROM if they differ) to a findernate.com mailbox.
+    if (FROM_ADDRESS && !/@findernate\.com$/i.test(FROM_ADDRESS)) {
+        console.warn(
+            `⚠️  Email is being sent from ${FROM_ADDRESS}, which is not on findernate.com. ` +
+            `SPF/DKIM will not align with the "FinderNate" sender name and these ` +
+            `messages will be filtered as spam. Point EMAIL_USER/EMAIL_FROM at a ` +
+            `findernate.com mailbox.`
+        );
+    }
+
     try {
         const transporter = nodemailer.createTransport({
-            host: "smtp.zoho.com",
-            port: 465,
-            secure: true,
+            host: SMTP_HOST,
+            port: SMTP_PORT,
+            secure: SMTP_PORT === 465,
             auth: {
                 user: process.env.EMAIL_USER,
                 pass: process.env.EMAIL_PASS,
@@ -34,7 +84,7 @@ export const sendEmail = async ({ to, subject, html }) => {
         });
 
         const info = await transporter.sendMail({
-            from: `"FinderNate" <${process.env.EMAIL_USER}>`,
+            from: `"${FROM_NAME}" <${FROM_ADDRESS}>`,
             to,
             subject,
             html,
