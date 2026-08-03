@@ -34,7 +34,10 @@ const feedPostAuthorId = (post) => {
  * Sorting Rules:
  * 1. Paid business posts (plan2/plan3/plan4) appear at the TOP, sorted by newest first
  * 2. All other posts appear below, sorted by newest first (date descending)
- * 3. Only business/product/service CONTENT TYPE posts from unpaid business accounts are HIDDEN
+ * 3. business/product/service CONTENT TYPE posts from unpaid business accounts are
+ *    hidden from DISCOVERY only — i.e. from public accounts the viewer does not
+ *    follow. The viewer's OWN posts and posts from accounts they follow are always
+ *    shown (see the note on `commercialExemptIds` below)
  * 4. Normal content (photos, tweets, videos) from ALL accounts always shows
  * 5. Reels from ALL accounts always show regardless of content type or payment status
  *
@@ -52,6 +55,7 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const blockedUsers = blockedUsersRaw.map(id =>
             typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
         );
+        const blockedUserIdSet = new Set(blockedUsersRaw.map(id => id.toString()));
         const page = parseInt(req.query.page, 10) || 1;
         const MAX_LIMIT = 100; // Prevent excessive data requests
         const requestedLimit = parseInt(req.query.limit, 10) || 20;
@@ -64,47 +68,68 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         const cachedRaw = await redisClient.get(FEED_CACHE_KEY);
         if (cachedRaw) {
             const cached = JSON.parse(cachedRaw);
-            if (cached?.data?.feed?.length) {
-                const cachedPosts = cached.data.feed;
-                const cachedPostIds = cachedPosts.map(p => p._id);
-                const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
-                    userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
-                    batchGetLikesCount(cachedPosts),
-                    // Comments were the one engagement metric NOT resolved live
-                    // here, so the feed served the stored engagement.comments —
-                    // which nothing maintained and was 0 on every post.
-                    batchGetCommentsCount(cachedPosts),
-                    batchGetLikedByUsers(cachedPostIds),
-                    batchSharedCount(cachedPosts),
-                    // Follow state is resolved live for the same reason isLikedBy
-                    // is: it is per-viewer and changes the moment they tap Follow,
-                    // so a cached value would show a stale "Follow" pill.
-                    getFollowingIdSet(userId),
-                    getPendingFollowRequestIdSet(userId)
-                ]);
+            //* Re-apply blocking to the CACHED page.
+            //*
+            //* The block itself only clears the blocked-users cache
+            //* (blockUser -> invalidateBlockedUsersCache); nothing touches this
+            //* viewer's feed key, so for the rest of its TTL the person they had
+            //* just blocked kept appearing in their feed — the block looked like
+            //* it had not worked, and the only way out was to wait. The live
+            //* query below already excludes them; this makes the cache-hit path
+            //* agree with it instead of serving a page built before the block.
+            const cachedFeed = Array.isArray(cached?.data?.feed) ? cached.data.feed : [];
+            const visibleCachedFeed = blockedUserIdSet.size
+                ? cachedFeed.filter(post => !blockedUserIdSet.has(feedPostAuthorId(post) || ''))
+                : cachedFeed;
 
-                cached.data.feed = cachedPosts.map(post => {
-                    const idStr = post._id.toString();
-                    const likedByUsers = likedByUsersMap.get(idStr) || [];
-                    const preview = getLikedByPreview(likedByUsers, userId);
-                    const authorId = feedPostAuthorId(post);
-                    return {
-                        ...post,
-                        engagement: {
-                            ...post.engagement,
-                            likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
-                            comments: commentCountMap.get(idStr) ?? post.engagement?.comments ?? 0,
-                            shares: sharedCountMap.get(idStr) ?? post.engagement?.shares ?? 0
-                        },
-                        isLikedBy: likedSet.has(idStr),
-                        likedBy: likedByUsers,
-                        likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
-                        isFollowing: !!authorId && followingSet.has(authorId),
-                        isFollowRequested: !!authorId && requestedSet.has(authorId),
-                    };
-                });
+            //* A page that emptied out ENTIRELY because of a block is not worth
+            //* serving — fall through and rebuild it live so the viewer gets a
+            //* full page rather than a blank home screen.
+            const cacheStillUsable = visibleCachedFeed.length > 0 || cachedFeed.length === 0;
+            if (cacheStillUsable) {
+                if (cached?.data) cached.data.feed = visibleCachedFeed;
+                if (visibleCachedFeed.length) {
+                    const cachedPosts = visibleCachedFeed;
+                    const cachedPostIds = cachedPosts.map(p => p._id);
+                    const [likedSet, likeCountMap, commentCountMap, likedByUsersMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
+                        userId ? batchIsLikedByUser(userId, cachedPostIds) : Promise.resolve(new Set()),
+                        batchGetLikesCount(cachedPosts),
+                        // Comments were the one engagement metric NOT resolved live
+                        // here, so the feed served the stored engagement.comments —
+                        // which nothing maintained and was 0 on every post.
+                        batchGetCommentsCount(cachedPosts),
+                        batchGetLikedByUsers(cachedPostIds),
+                        batchSharedCount(cachedPosts),
+                        // Follow state is resolved live for the same reason isLikedBy
+                        // is: it is per-viewer and changes the moment they tap Follow,
+                        // so a cached value would show a stale "Follow" pill.
+                        getFollowingIdSet(userId),
+                        getPendingFollowRequestIdSet(userId)
+                    ]);
+
+                    cached.data.feed = cachedPosts.map(post => {
+                        const idStr = post._id.toString();
+                        const likedByUsers = likedByUsersMap.get(idStr) || [];
+                        const preview = getLikedByPreview(likedByUsers, userId);
+                        const authorId = feedPostAuthorId(post);
+                        return {
+                            ...post,
+                            engagement: {
+                                ...post.engagement,
+                                likes: likeCountMap.get(idStr) ?? post.engagement?.likes ?? 0,
+                                comments: commentCountMap.get(idStr) ?? post.engagement?.comments ?? 0,
+                                shares: sharedCountMap.get(idStr) ?? post.engagement?.shares ?? 0
+                            },
+                            isLikedBy: likedSet.has(idStr),
+                            likedBy: likedByUsers,
+                            likedByPreview: preview.likedByText ? { text: preview.likedByText, previewUser: preview.previewUser, othersCount: preview.othersCount } : null,
+                            isFollowing: !!authorId && followingSet.has(authorId),
+                            isFollowRequested: !!authorId && requestedSet.has(authorId),
+                        };
+                    });
+                }
+                return res.status(200).json(cached);
             }
-            return res.status(200).json(cached);
         }
 
         const FEED_LIMIT = 50; // Reduced from 100
@@ -134,6 +159,28 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
         // Get all business user IDs
         const businessUsers = await User.find({ isBusinessProfile: true }).select('_id').lean();
         const businessUserIdsSet = new Set(businessUsers.map(u => u._id.toString()));
+
+        //* Accounts whose commercial posts (product/service/business) are NEVER
+        //* hidden by the unpaid-business rule: the viewer themselves and everyone
+        //* they follow.
+        //*
+        //* The rule exists to stop a free business account SELLING through
+        //* discovery — businessPlan.utils.js documents it as a discovery-only
+        //* filter applied by explore and search. The home feed re-implemented it
+        //* inline and applied it to everybody, so a seller's own product post was
+        //* missing from their own feed and from their followers' feeds the moment
+        //* they were on the free plan. They had published it, it rendered on their
+        //* profile, and the feed silently dropped it — which is exactly what the
+        //* tester saw. Public strangers still don't get it, so the paid tier keeps
+        //* its value.
+        //*
+        //* Resolved before the aggregation because the pipeline needs the list;
+        //* the same Set is reused for the per-post `isFollowing` flag further down
+        //* instead of asking Redis for it twice.
+        const followingSet = await getFollowingIdSet(userId);
+        const commercialExemptIds = [...followingSet];
+        if (userId) commercialExemptIds.push(userId.toString());
+        const commercialExemptSet = new Set(commercialExemptIds);
 
 
         // ✅ 3. OPTIMIZED: Single aggregation query with privacy filtering
@@ -212,6 +259,9 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                             { $in: ['$userIdString', activePlanUserIdsStrings] },
                             // Keep ALL posts from non-business accounts
                             { $eq: ['$isBusinessAccount', false] },
+                            // Keep ALL posts from the viewer and the accounts they follow —
+                            // this is a feed of people they chose, not discovery.
+                            { $in: ['$userIdString', commercialExemptIds] },
                             // Keep ALL reels regardless of content type or business status
                             { $eq: ['$postType', 'reel'] },
                             // For unpaid business accounts: only keep normal content type posts
@@ -328,13 +378,12 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
 
         // ✅ 3. Get user like status + likedBy from Redis (Hash-based)
         const postIds = posts.map(post => post._id);
-        const [likedPostIds, likesByPost, likeCountMap, commentCountMap, sharedCountMap, followingSet, requestedSet] = await Promise.all([
+        const [likedPostIds, likesByPost, likeCountMap, commentCountMap, sharedCountMap, requestedSet] = await Promise.all([
             userId ? batchIsLikedByUser(userId, postIds) : Promise.resolve(new Set()),
             batchGetLikedByUsers(postIds),
             batchGetLikesCount(posts),
             batchGetCommentsCount(posts),
             batchSharedCount(posts),
-            getFollowingIdSet(userId),
             getPendingFollowRequestIdSet(userId)
         ]);
 
@@ -426,6 +475,9 @@ export const getHomeFeed = asyncHandler(async (req, res) => {
                     // Keep all posts from non-business accounts
                     const isBusiness = businessUserIdsSet.has(userIdStr);
                     if (!isBusiness) return true;
+                    // Same exemption as the pipeline above — self + followed accounts.
+                    // Without it the count disagrees with the page it is counting.
+                    if (commercialExemptSet.has(userIdStr)) return true;
                     // Always keep reels regardless of content type or business status
                     if (post.postType === 'reel') return true;
                     // For unpaid business accounts, only keep normal content type

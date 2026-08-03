@@ -113,12 +113,17 @@ export const importDocs = async (collection, docs) => {
 const exact = (field, value) => `${field}:=\`${String(value).replace(/`/g, '')}\``;
 
 /**
- * Build a `&& id:!=[...]` clause to exclude blocked users at the engine level so
- * `found` stays accurate and pages aren't short. Capped to keep the filter sane.
+ * Build a `&& <field>:!=[...]` clause to exclude blocked users at the engine level
+ * so `found` stays accurate and pages aren't short. Capped to keep the filter sane.
+ *
+ * The field differs by collection: a blocked person is the DOCUMENT in "users"
+ * (`id`) but the AUTHOR in "posts" (`userId`). Product searches used no clause at
+ * all, so a blocked seller's listings kept showing up in instant search and in the
+ * product tab even though their profile was correctly hidden.
  */
-const blockedClause = (ids) => {
+const blockedClause = (ids, field = 'id') => {
     const list = (ids || []).map(String).filter((s) => /^[a-fA-F0-9]{24}$/.test(s)).slice(0, 500);
-    return list.length ? ` && id:!=[${list.join(',')}]` : '';
+    return list.length ? ` && ${field}:!=[${list.join(',')}]` : '';
 };
 
 /** Throw if any sub-search in a multi_search returned a per-search error (HTTP 200 masks these). */
@@ -175,7 +180,7 @@ export const instantSearch = async ({ q, blockedUserIds = [], userLimit = 6, pro
             prefix: true,
             num_typos: 1,
             per_page: productLimit,
-            filter_by: 'isPublic:=true && contentType:=product',
+            filter_by: 'isPublic:=true && contentType:=product' + blockedClause(blockedUserIds, 'userId'),
             sort_by: '_text_match:desc,engagementScore:desc',
             include_fields: PRODUCT_CARD_FIELDS,
         },
@@ -240,11 +245,15 @@ export const searchProfiles = async ({ q, blockedUserIds = [], page = 1, perPage
  */
 export const searchContent = async ({
     q, contentType = 'product', filters = {}, geo = null, page = 1, perPage = 20, sortBy = 'relevance',
+    blockedUserIds = [],
 }) => {
     if (!isTypesenseEnabled) return null;
     const query = (q || '').trim() || '*';
 
     const filterClauses = ['isPublic:=true'];
+    // Blocked in either direction — neither party sees the other's listings.
+    const blocked = blockedClause(blockedUserIds, 'userId');
+    if (blocked) filterClauses.push(blocked.replace(/^ && /, ''));
     if (contentType) filterClauses.push(exact('contentType', contentType));
     if (filters.category) filterClauses.push(exact('category', filters.category));
     if (filters.subcategory) filterClauses.push(exact('subcategory', filters.subcategory));

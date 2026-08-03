@@ -12,6 +12,45 @@ import { getLikedByPreview } from "../../utils/likedByPreview.utils.js";
 import { batchIsLikedByUser, batchGetLikesCount, batchGetLikedByUsers, stitchEngagement } from "../../utils/postEngagement.utils.js";
 import { hasActivePaymentPlan } from "../../utils/businessPlan.utils.js";
 import { getFollowStatus } from '../../utils/followEngagement.utils.js';
+import { isBlockedBetween, getBlockedUserIds } from "../../middlewares/blocking.middleware.js";
+import { checkContentVisibility, getViewableUserIds } from "../../middlewares/privacy.middleware.js";
+
+/**
+ * Is this post's author a private account?
+ *
+ * `privacy` and `isFullPrivate` are two separate schema fields written
+ * together by the privacy toggle but read independently everywhere else —
+ * postPrivacy.canViewPost keys off isFullPrivate ALONE, so an account whose
+ * `privacy` says 'private' while isFullPrivate is still false (a legacy row,
+ * or one written before the toggle set both) fell through to the "post is
+ * public, show it" branch and published every post to the whole platform.
+ * Either flag being set means private.
+ */
+const isPrivateAuthor = (author) =>
+    !!author && (author.privacy === 'private' || author.isFullPrivate === true);
+
+/**
+ * Second gate behind postPrivacy.filterPostsByPrivacy, covering the case that
+ * helper cannot see: an author who is private by `privacy` only.
+ *
+ * Viewer must be the author, or follow / be followed by them — the same
+ * relationship filterPostsByPrivacy accepts for isFullPrivate accounts.
+ */
+const filterPostsByAccountPrivacy = (posts, viewer, viewerFollowing = [], viewerFollowers = []) => {
+    const viewerId = viewer?._id?.toString() || null;
+
+    return posts.filter(post => {
+        const author = post.userId;
+        if (!author) return false;
+
+        const authorId = (author._id ?? author).toString();
+        if (viewerId && authorId === viewerId) return true;
+        if (!isPrivateAuthor(author)) return true;
+        if (!viewerId) return false;
+
+        return viewerFollowing.includes(authorId) || viewerFollowers.includes(authorId);
+    });
+};
 
 export const getAllPosts = asyncHandler(async (req, res) => {
     const filter = { ...req.query };
@@ -33,6 +72,20 @@ export const getAllPosts = asyncHandler(async (req, res) => {
     }
 
     let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+    visiblePosts = filterPostsByAccountPrivacy(visiblePosts, currentUser, viewerFollowing, viewerFollowers);
+
+    // Blocked in either direction — neither side's posts are returned.
+    if (currentUser) {
+        const blockedIds = await getBlockedUserIds(currentUser._id);
+        if (blockedIds.length) {
+            const blockedSet = new Set(blockedIds);
+            visiblePosts = visiblePosts.filter(post => {
+                const authorId = (post.userId?._id ?? post.userId)?.toString();
+                return !authorId || !blockedSet.has(authorId);
+            });
+        }
+    }
+
     visiblePosts = await enrichWithRatings(visiblePosts, 'userId');
     const postsWithBadges = await addBadgesToNestedUsers(visiblePosts);
 
@@ -55,6 +108,16 @@ export const getPostById = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Post not found");
     }
 
+    const postAuthorIdForChecks = post.userId?._id || post.userId;
+
+    // A block in EITHER direction hides the post outright. 404 rather than
+    // 403: whether a given post exists is itself information the blocked
+    // party should not get, and it matches how a deleted author is answered
+    // just above.
+    if (currentUser && await isBlockedBetween(currentUser._id, postAuthorIdForChecks)) {
+        throw new ApiError(404, "Post not found");
+    }
+
     const isFollowing = await getFollowStatus(currentUser?._id, post.userId?._id || post.userId);
 
     let viewerFollowing = [];
@@ -70,6 +133,12 @@ export const getPostById = asyncHandler(async (req, res) => {
 
     if (!canViewPost(post, post.userId, currentUser, viewerFollowing, viewerFollowers)) {
         throw new ApiError(403, "You don't have permission to view this post");
+    }
+
+    // canViewPost only knows about isFullPrivate; this covers an author who is
+    // private by the `privacy` field alone.
+    if (!filterPostsByAccountPrivacy([post], currentUser, viewerFollowing, viewerFollowers).length) {
+        throw new ApiError(403, "This account is private. Follow to see their posts.");
     }
 
     const postAuthorId = post.userId?._id || post.userId;
@@ -254,6 +323,27 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invalid User ID format");
     }
 
+    const currentUserForGate = req.user;
+    const isOwnProfileRequest = currentUserForGate
+        && currentUserForGate._id.toString() === userId.toString();
+
+    // SERVER-SIDE privacy and blocking gate, before a single post is read.
+    //
+    // This endpoint used to answer for any caller and lean entirely on
+    // postPrivacy.filterPostsByPrivacy afterwards, which (a) only understands
+    // isFullPrivate, so an account private by the `privacy` field alone was
+    // fully readable, and (b) knows nothing about blocking, so a blocked
+    // user's whole profile grid came back — the route does not even mount the
+    // getBlockedUsers middleware. checkContentVisibility settles all three
+    // questions together: block in either direction, account privacy by
+    // either flag, and whether the viewer follows.
+    if (!isOwnProfileRequest) {
+        const canView = await checkContentVisibility(currentUserForGate?._id, userId);
+        if (!canView) {
+            throw new ApiError(403, "This account is private. Follow to see their posts.");
+        }
+    }
+
     const currentPage = parseInt(page) || 1;
     const pageLimit = parseInt(limit) || 20;
     const skip = (currentPage - 1) * pageLimit;
@@ -265,6 +355,15 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
         userId,
         status: { $in: ['published', 'scheduled'] }
     };
+
+    // Posts the author marked private stay with the author. Applied in the
+    // QUERY, not only in the post-fetch filter, so `totalPosts` and the page
+    // boundaries agree with what is actually returned — filtering after the
+    // .limit() left visitors with short or empty pages and a count that
+    // promised posts they were never going to be shown.
+    if (!isOwnProfileRequest) {
+        filter['settings.privacy'] = { $ne: 'private' };
+    }
 
     if (postType) {
         const validPostTypes = ['photo', 'reel', 'video'];
@@ -303,9 +402,10 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
             viewerFollowers = followerRecords.map(f => f.followerId.toString());
         }
 
-        const visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+        let visiblePosts = filterPostsByPrivacy(posts, currentUser, viewerFollowing, viewerFollowers);
+        visiblePosts = filterPostsByAccountPrivacy(visiblePosts, currentUser, viewerFollowing, viewerFollowers);
 
-        const isViewingOwnProfile = currentUser && currentUser._id.toString() === userId.toString();
+        const isViewingOwnProfile = isOwnProfileRequest;
 
         let postsAfterBusinessFilter;
         let upgradeMessage = null;
@@ -404,6 +504,33 @@ export const getUserProfilePosts = asyncHandler(async (req, res) => {
     }
 });
 
+/**
+ * Restricts a set of posts to authors the viewer is allowed to see.
+ *
+ * getViewableUserIds resolves to "followers + own + public accounts" for a
+ * signed-in viewer and "public accounts only" for an anonymous one, so it is
+ * the same account-privacy rule the home feed applies; the blocked list then
+ * removes both directions of any block. The two aggregate feeds below had
+ * NEITHER, and returned private accounts' and blocked users' posts verbatim.
+ */
+const restrictToViewableAuthors = async (posts, viewerId) => {
+    if (!posts.length) return posts;
+
+    const [viewableIds, blockedIds] = await Promise.all([
+        getViewableUserIds(viewerId ? viewerId.toString() : null),
+        getBlockedUserIds(viewerId)
+    ]);
+
+    const viewableSet = new Set(viewableIds.map(id => id.toString()));
+    const blockedSet = new Set(blockedIds.map(id => id.toString()));
+
+    return posts.filter(post => {
+        const authorId = (post.userId?._id ?? post.userId)?.toString();
+        if (!authorId) return false;
+        return viewableSet.has(authorId) && !blockedSet.has(authorId);
+    });
+};
+
 export const getNearbyPosts = asyncHandler(async (req, res) => {
     const { latitude, longitude, distance = 1000 } = req.query;
     if (!latitude || !longitude) {
@@ -419,25 +546,32 @@ export const getNearbyPosts = asyncHandler(async (req, res) => {
                 },
                 $maxDistance: parseInt(distance)
             }
-        }
-    });
+        },
+        "settings.privacy": { $ne: "private" }
+    }).lean();
 
-    return res.status(200).json(new ApiResponse(200, posts, "Nearby posts fetched successfully"));
+    const visible = await restrictToViewableAuthors(posts, req.user?._id ?? null);
+
+    return res.status(200).json(new ApiResponse(200, visible, "Nearby posts fetched successfully"));
 });
 
 export const getTrendingPosts = asyncHandler(async (req, res) => {
     const currentUser = req.user ?? null;
 
-    const posts = await Post.find()
+    // Over-fetch, then gate, then trim: filtering after a .limit(20) would
+    // hand back fewer than 20 whenever anything was removed.
+    const posts = await Post.find({ "settings.privacy": { $ne: "private" } })
         .sort({ "engagement.likes": -1, "engagement.comments": -1, createdAt: -1 })
-        .limit(20)
+        .limit(100)
         .lean();
 
-    if (!posts.length) {
-        return res.status(200).json(new ApiResponse(200, posts, "Trending posts fetched successfully"));
+    const visible = (await restrictToViewableAuthors(posts, currentUser?._id ?? null)).slice(0, 20);
+
+    if (!visible.length) {
+        return res.status(200).json(new ApiResponse(200, visible, "Trending posts fetched successfully"));
     }
 
-    const stitched = await stitchEngagement(currentUser?._id ?? null, posts);
+    const stitched = await stitchEngagement(currentUser?._id ?? null, visible);
 
     return res.status(200).json(new ApiResponse(200, stitched, "Trending posts fetched successfully"));
 });

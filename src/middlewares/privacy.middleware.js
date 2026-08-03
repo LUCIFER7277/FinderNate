@@ -28,13 +28,31 @@ export const checkContentVisibility = async (viewerId, targetUserId) => {
     }
 
     // Get the target user's privacy setting
-    const targetUser = await User.findById(targetUserId).select('privacy');
+    const targetUser = await User.findById(targetUserId)
+        .select('privacy isFullPrivate accountStatus isDeleted')
+        .lean();
     if (!targetUser) {
         return false;
     }
 
+    // Nothing belonging to a removed or banned account is viewable.
+    if (targetUser.isDeleted || ['deactivated', 'banned'].includes(targetUser.accountStatus)) {
+        return false;
+    }
+
+    // BOTH flags decide privacy, not just `privacy`.
+    //
+    // toggleFullPrivateAccount writes them together, but they are two separate
+    // schema fields and the rest of the codebase reads them independently
+    // (postPrivacy.js keys off isFullPrivate alone, this used to key off
+    // `privacy` alone). Any account where they disagree — one written by an
+    // older client, by guestAccount.js, or by a partial update — leaked
+    // through whichever check it did not match. Treating either flag as
+    // "private" makes the two agree everywhere.
+    const isPrivateAccount = targetUser.privacy === 'private' || targetUser.isFullPrivate === true;
+
     // If target user has public account, allow viewing
-    if (targetUser.privacy === 'public') {
+    if (!isPrivateAccount) {
         return true;
     }
 
@@ -130,9 +148,15 @@ export const getViewableUserIds = async (viewerId) => {
     // Use $nin instead of exact 'active' match so users without the field set (legacy records) are included
     const activeUserFilter = { accountStatus: { $nin: ['deactivated', 'banned'] }, isDeleted: { $ne: true } };
 
+    // "Public" means public by BOTH flags. isFullPrivate is a separate schema
+    // field from `privacy`, and an account carrying isFullPrivate:true with a
+    // stale privacy:'public' (guestAccount.js writes exactly that shape) was
+    // being handed to every feed as a public account.
+    const publicUserFilter = { ...activeUserFilter, privacy: 'public', isFullPrivate: { $ne: true } };
+
     if (!viewerId) {
         // Anonymous users can only see public content
-        const publicUsers = await User.find({ ...activeUserFilter, privacy: 'public' }).select('_id').lean();
+        const publicUsers = await User.find(publicUserFilter).select('_id').lean();
         viewableUserIds = publicUsers.map(u => u._id.toString());
     } else {
         // Get users the viewer follows
@@ -144,8 +168,7 @@ export const getViewableUserIds = async (viewerId) => {
 
         // Get all public active users not already in the following list
         const publicUsers = await User.find({
-            ...activeUserFilter,
-            privacy: 'public',
+            ...publicUserFilter,
             _id: { $nin: followingIds }
         }).select('_id').lean();
 

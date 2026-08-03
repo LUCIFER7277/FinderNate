@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { User } from '../models/user.models.js';
 import Business from '../models/business.models.js';
 import Post from '../models/userPost.models.js';
@@ -6,6 +7,7 @@ import { ApiResponse } from '../utils/ApiResponse.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { isTypesenseEnabled } from '../config/typesense.config.js';
+import { getBlockedUsersFilter } from '../middlewares/blocking.middleware.js';
 import {
     instantSearch as tsInstantSearch,
     searchProfiles as tsSearchProfiles,
@@ -13,6 +15,24 @@ import {
 } from '../services/typesense/index.js';
 
 /* --------------------------------- helpers -------------------------------- */
+
+/**
+ * Blocked-user ids for this request, whichever way the route was wired.
+ *
+ * /search/instant and /search/profiles run getBlockedUsers, so req.blockedUsers
+ * is already there. /search/products does NOT — and the controller ignored
+ * blocking entirely, so a blocked seller's products stayed in the results even
+ * though the same person's profile was correctly filtered out of the profile
+ * search two lines away. Reuses the existing cached helper rather than adding a
+ * second definition of "blocked".
+ */
+const resolveBlockedUsers = async (req) => {
+    if (Array.isArray(req.blockedUsers)) return req.blockedUsers;
+    const userId = req.user?._id;
+    if (!userId) return [];
+    const filter = await getBlockedUsersFilter(userId);
+    return filter?._id?.$nin || [];
+};
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const toInt = (v, d) => {
@@ -34,11 +54,13 @@ const PUBLIC_POST_FILTER = {
 /**
  * Canonical product-card shape. BOTH the Typesense path (via the service) and these
  * Mongo fallbacks must return the exact same keys so the frontend renders identically
- * whether or not Typesense is up. (Fallback can't cheaply join the author, so the
- * seller fields are null.)
+ * whether or not Typesense is up. Seller fields are filled when the caller joined the
+ * author into `_author` (searchProducts does); the cheap typeahead fallback does not,
+ * and leaves them null.
  */
 const postToProductCard = (p) => {
     const prod = p.customization?.product || {};
+    const author = Array.isArray(p._author) ? p._author[0] : p._author;
     return {
         _id: p._id,
         name: prod.name || null,
@@ -50,11 +72,26 @@ const postToProductCard = (p) => {
         brand: prod.brand || null,
         tags: Array.isArray(prod.tags) ? prod.tags : [],
         locationCity: prod.location?.city || null,
-        username: null,
-        userProfileImageUrl: null,
+        username: author?.username || null,
+        userProfileImageUrl: author?.profileImageUrl || null,
         contentType: p.contentType || null,
     };
 };
+
+/**
+ * Typesense answered, but with nothing.
+ *
+ * The read helpers return null only when the integration is switched off; a
+ * live-but-EMPTY collection answers `found: 0` and the controllers used to hand
+ * that straight back as "no results". Nothing keeps the index populated on its
+ * own — `ensureCollections()` creates the collections empty at boot and the
+ * backfill/sync scripts are run by hand — so an un-backfilled or half-synced
+ * deployment reported "no products" for every query while the same products sat
+ * in MongoDB, reachable by the fallback two lines below. Treating an empty
+ * engine result as "ask MongoDB too" costs one extra query on genuinely empty
+ * searches and removes that whole class of silent blank screen.
+ */
+const isEmptyTsResult = (r) => !r || !r.found;
 
 /* --------------------------- MongoDB fallbacks ----------------------------- */
 
@@ -137,7 +174,10 @@ export const instantSearch = asyncHandler(async (req, res) => {
             console.error('instantSearch: Typesense failed, falling back to Mongo:', err.message);
         }
     }
-    if (!data) data = await mongoInstantFallback(query, blockedUsers, limit);
+    // Empty on BOTH sides means the index has nothing to say — see isEmptyTsResult.
+    if (!data || (data.users.length === 0 && data.products.length === 0)) {
+        data = await mongoInstantFallback(query, blockedUsers, limit);
+    }
 
     const keywords = await keywordsPromise;
 
@@ -161,7 +201,7 @@ export const searchProfiles = asyncHandler(async (req, res) => {
     if (isTypesenseEnabled) {
         try {
             const r = await tsSearchProfiles({ q: query, blockedUserIds: blockedUsers, page, perPage: limit });
-            if (r) {
+            if (!isEmptyTsResult(r)) {
                 const users = r.docs.map((d) => ({
                     _id: d.id,
                     username: d.username,
@@ -244,6 +284,8 @@ export const searchProducts = asyncHandler(async (req, res) => {
         ? { lat, lng, radiusKm: toFloat(req.query.radius) || 25 }
         : null;
 
+    const blockedUsers = await resolveBlockedUsers(req);
+
     if (isTypesenseEnabled) {
         try {
             const r = await tsSearchContent({
@@ -254,8 +296,9 @@ export const searchProducts = asyncHandler(async (req, res) => {
                 page,
                 perPage: limit,
                 sortBy: req.query.sort || 'relevance',
+                blockedUserIds: blockedUsers,
             });
-            if (r) {
+            if (!isEmptyTsResult(r)) {
                 return res.status(200).json(new ApiResponse(200, {
                     products: r.products,
                     facets: r.facets,
@@ -268,27 +311,107 @@ export const searchProducts = asyncHandler(async (req, res) => {
     }
 
     // Mongo fallback (no facets/typo tolerance) — same product-card shape + privacy guard.
-    const filter = { contentType: 'product', ...PUBLIC_POST_FILTER };
-    if (query) {
-        const rx = new RegExp(escapeRegex(query), 'i');
+    //* $match inside an aggregation does NOT run mongoose's caster, so a blocked
+    //* id left as a string would compare unequal to every ObjectId and quietly
+    //* exclude nobody. Cast up front; countDocuments below is happy either way.
+    const blockedObjectIds = blockedUsers
+        .map((id) => {
+            try { return typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id; }
+            catch { return null; }
+        })
+        .filter(Boolean);
+    const filter = { contentType: 'product', ...PUBLIC_POST_FILTER, userId: { $nin: blockedObjectIds } };
+    const rx = query ? new RegExp(escapeRegex(query), 'i') : null;
+    if (rx) {
         filter.$or = [
             { 'customization.product.name': rx },
             { 'customization.product.brand': rx },
             { 'customization.product.category': rx },
+            { 'customization.product.subcategory': rx },
             { 'customization.product.tags': rx },
+            { 'customization.product.description': rx },
             { caption: rx },
         ];
     }
     if (filters.category) filter['customization.product.category'] = filters.category;
+    if (filters.subcategory) filter['customization.product.subcategory'] = filters.subcategory;
     if (filters.brand) filter['customization.product.brand'] = filters.brand;
+    // Parity with the Typesense clauses above — these were accepted as query
+    // params and then silently dropped whenever Typesense was unavailable.
+    if (filters.city) filter['customization.product.location.city'] = filters.city;
+    if (filters.country) filter['customization.product.location.country'] = filters.country;
     if (Number.isFinite(filters.minPrice) || Number.isFinite(filters.maxPrice)) {
         filter['customization.product.price'] = {};
         if (Number.isFinite(filters.minPrice)) filter['customization.product.price'].$gte = filters.minPrice;
         if (Number.isFinite(filters.maxPrice)) filter['customization.product.price'].$lte = filters.maxPrice;
     }
+
+    // Sort mirrors the Typesense sortMap. `relevance` has no _text_match here, so
+    // it is approximated with a name/brand/tag hit ranked above a caption-only or
+    // description-only hit. Without this the fallback returned natural collection
+    // order — for "shirt" that meant whatever happened to be inserted first, which
+    // read as "product search is broken" on any environment without Typesense.
+    const sortKey = req.query.sort || 'relevance';
+    const relevanceStage = rx
+        ? [{
+            $addFields: {
+                _relevance: {
+                    $switch: {
+                        branches: [
+                            { case: { $regexMatch: { input: { $ifNull: ['$customization.product.name', ''] }, regex: rx } }, then: 4 },
+                            { case: { $regexMatch: { input: { $ifNull: ['$customization.product.brand', ''] }, regex: rx } }, then: 3 },
+                            {
+                                case: {
+                                    $gt: [{
+                                        $size: {
+                                            $filter: {
+                                                input: { $ifNull: ['$customization.product.tags', []] },
+                                                as: 't',
+                                                cond: { $regexMatch: { input: '$$t', regex: rx } },
+                                            }
+                                        }
+                                    }, 0]
+                                }, then: 3
+                            },
+                            { case: { $regexMatch: { input: { $ifNull: ['$customization.product.category', ''] }, regex: rx } }, then: 2 },
+                            { case: { $regexMatch: { input: { $ifNull: ['$customization.product.subcategory', ''] }, regex: rx } }, then: 2 },
+                        ],
+                        default: 1,
+                    }
+                }
+            }
+        }]
+        : [{ $addFields: { _relevance: 0 } }];
+
+    const sortStage = {
+        price_asc: { 'customization.product.price': 1 },
+        price_desc: { 'customization.product.price': -1 },
+        newest: { createdAt: -1 },
+        popular: { 'engagement.likes': -1, createdAt: -1 },
+    }[sortKey] || { _relevance: -1, 'engagement.likes': -1, createdAt: -1 };
+
     const [posts, total] = await Promise.all([
-        Post.find(filter).skip((page - 1) * limit).limit(limit)
-            .select('customization.product media userId contentType').lean(),
+        Post.aggregate([
+            { $match: filter },
+            ...relevanceStage,
+            { $sort: sortStage },
+            { $skip: (page - 1) * limit },
+            { $limit: limit },
+            //* Join the seller so this path returns the SAME card as Typesense.
+            //* It was skipped as "not cheap", but it runs after $limit — at most
+            //* `limit` lookups — and without it every product card rendered with
+            //* a blank seller name whenever Typesense was unavailable.
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'userId',
+                    foreignField: '_id',
+                    as: '_author',
+                    pipeline: [{ $project: { username: 1, profileImageUrl: 1 } }],
+                }
+            },
+            { $project: { 'customization.product': 1, media: 1, userId: 1, contentType: 1, _author: 1 } },
+        ]),
         Post.countDocuments(filter),
     ]);
     return res.status(200).json(new ApiResponse(200, {

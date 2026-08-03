@@ -6,6 +6,7 @@ import Business from '../models/business.models.js';
 import { ApiResponse } from '../utils/ApiResponse.js';
 import { ApiError } from '../utils/ApiError.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { getBlockedUsersFilter } from '../middlewares/blocking.middleware.js';
 
 /**
  * Enhanced search suggestions that always include user profiles with their posts, reels, and business information
@@ -26,11 +27,28 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
     }
 
     const keyword = q.trim().toLowerCase();
-    const searchRegex = new RegExp(keyword, 'i');
+    //* The raw query used to go straight into new RegExp() (and into $regex
+    //* below), so a query like "a(" threw and 500'd the endpoint the search box
+    //* calls on every keystroke.
+    const safeKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const searchRegex = new RegExp(safeKeyword, 'i');
+
+    //* Blocking was not applied here AT ALL — this endpoint has no
+    //* getBlockedUsers middleware on its route and the handler never asked for
+    //* the list, so a blocked account's profile, posts and reels came straight
+    //* back through the search-suggestions dropdown while every other search
+    //* surface correctly hid them. Reuses the same cached helper the middleware
+    //* uses rather than defining "blocked" a second time; the route is
+    //* verifyJWT-only, so req.user is always present.
+    const blockedFilter = await getBlockedUsersFilter(req.user?._id);
+    const blockedUsers = blockedFilter?._id?.$nin || [];
+    //* Private posts must never leak through suggestions either — the main
+    //* search path has always guarded this and this one did not.
+    const publicPostFilter = { 'settings.privacy': { $ne: 'private' } };
 
     // Get keyword suggestions from search history
     const suggestions = await SearchSuggestion.find({
-        keyword: { $regex: `^${keyword}`, $options: 'i' }
+        keyword: { $regex: `^${safeKeyword}`, $options: 'i' }
     })
         .sort({ searchCount: -1, lastSearched: -1 })
         .limit(parseInt(limit))
@@ -62,7 +80,8 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
                 { 'customization.business.location.pincode': searchRegex },
                 { 'customization.business.category': searchRegex },
                 { 'customization.business.subcategory': searchRegex }
-            ]
+            ],
+            _id: { $nin: blockedUsers }
         })
             .limit(parseInt(limit))
             .select('username fullName profileImageUrl bio location customization');
@@ -75,7 +94,8 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
                 { businessName: searchRegex },
                 { businessType: searchRegex },
                 { tags: searchRegex }
-            ]
+            ],
+            userId: { $nin: blockedUsers }
         })
             .populate('userId', 'username fullName profileImageUrl bio location customization')
             .limit(parseInt(limit))
@@ -108,7 +128,7 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
 
         // Fetch posts for each user found - exactly like searchAllContent
         const usersWithPosts = await Promise.all(limitedUsers.map(async (user) => {
-            const userPosts = await Post.find({ userId: user._id })
+            const userPosts = await Post.find({ userId: user._id, ...publicPostFilter })
                 .sort({ createdAt: -1 })
                 .limit(10) // Limit to 10 recent posts per user (same as searchAllContent)
                 .lean();
@@ -128,14 +148,15 @@ export const getSearchSuggestions = asyncHandler(async (req, res) => {
                 business: businessProfile,
                 posts: userPosts,
                 reels: userReels,
-                totalPosts: await Post.countDocuments({ userId: user._id }),
+                totalPosts: await Post.countDocuments({ userId: user._id, ...publicPostFilter }),
                 totalReels: await Reel.countDocuments({ userId: user._id })
             };
         }));
 
         // Now get all posts/reels from matching users for the main results array with population and scoring
         const allUserPosts = await Post.find({
-            userId: { $in: limitedUsers.map(u => u._id) }
+            userId: { $in: limitedUsers.map(u => u._id) },
+            ...publicPostFilter
         })
             .populate('userId', 'username profileImageUrl bio location')
             .sort({ createdAt: -1 })

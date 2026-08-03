@@ -5,6 +5,7 @@ import { uploadBufferToBunny } from "../utils/bunny.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { User } from "../models/user.models.js";
 import Business from "../models/business.models.js";
+import Follower from "../models/follower.models.js";
 import { checkContentVisibility } from "../middlewares/privacy.middleware.js";
 
 // 1. Upload Story
@@ -37,10 +38,22 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
     const userId = req.user._id;
     const blockedUsers = req.blockedUsers || [];
 
-    // Get current user's following list
-    const currentUser = await User.findById(userId).select("following followers");
-    const following = currentUser?.following || [];
-    const followers = currentUser?.followers || [];
+    // Who this viewer follows, and who follows them.
+    //
+    // Read from the Follower COLLECTION, which is the only place a follow is
+    // recorded: onUserFollowed upserts a Follower row and never touches the
+    // legacy User.following / User.followers arrays this used to read. Those
+    // arrays are empty on every account created since, so Rule 5 below could
+    // never match anyone — a private account's stories were invisible to its
+    // own followers, and after a block was lifted they still never came back,
+    // because the rule that was supposed to re-include them had nothing to
+    // match against.
+    const [followingRecords, followerRecords] = await Promise.all([
+        Follower.find({ followerId: userId }).select("userId").lean(),
+        Follower.find({ userId }).select("followerId").lean()
+    ]);
+    const following = followingRecords.map(f => f.userId.toString());
+    const followers = followerRecords.map(f => f.followerId.toString());
 
     const now = new Date();
 
@@ -50,7 +63,7 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
         expiresAt: { $gt: now }
     })
         .sort({ createdAt: -1 })
-        .populate("userId", "username profileImageUrl privacy followers following isBusinessProfile");
+        .populate("userId", "username profileImageUrl privacy isFullPrivate followers following isBusinessProfile accountStatus isDeleted");
 
     // Get active payment plan user IDs and business user IDs
     const activePaymentPlanUserIds = await Business.find({
@@ -61,8 +74,15 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
 
     // Filter stories based on privacy rules AND business payment plan rules
     const visibleStories = allStories.filter(story => {
+        // A story whose author was deleted populates userId as null.
+        if (!story.userId) {
+            return false;
+        }
+
         const storyOwnerId = story.userId._id.toString();
-        const storyOwnerPrivacy = story.userId.privacy || 'public';
+        // Private by EITHER flag — see checkContentVisibility on why both are
+        // consulted rather than `privacy` alone.
+        const isPrivateAccount = story.userId.privacy === 'private' || story.userId.isFullPrivate === true;
         const isBusinessAccount = story.userId.isBusinessProfile || false;
         const hasActivePlan = activePlanUserIdsSet.has(storyOwnerId);
 
@@ -76,25 +96,23 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
             return false;
         }
 
-        // Rule 3: Hide unpaid business stories from ALL users (including followers)
+        // Rule 3: Nothing from a removed or banned account
+        if (story.userId.isDeleted || ['deactivated', 'banned'].includes(story.userId.accountStatus)) {
+            return false;
+        }
+
+        // Rule 4: Hide unpaid business stories from ALL users (including followers)
         if (isBusinessAccount && !hasActivePlan) {
             return false;
         }
 
-        // Rule 4: If story owner has PUBLIC account → show to everyone
-        if (storyOwnerPrivacy === 'public') {
+        // Rule 5: If story owner has PUBLIC account → show to everyone
+        if (!isPrivateAccount) {
             return true;
         }
 
-        // Rule 5: If story owner has PRIVATE account → only show to followers/following
-        if (storyOwnerPrivacy === 'private') {
-            const isFollowing = following.some(id => id.toString() === storyOwnerId);
-            const isFollower = followers.some(id => id.toString() === storyOwnerId);
-
-            return isFollowing || isFollower;
-        }
-
-        return false;
+        // Rule 6: If story owner has PRIVATE account → only show to followers/following
+        return following.includes(storyOwnerId) || followers.includes(storyOwnerId);
     });
 
     // Map mediaType to postType and remove viewers
@@ -103,9 +121,12 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
         obj.postType = obj.mediaType;
         delete obj.mediaType;
         delete obj.viewers;
-        // Remove privacy field from user object in response
+        // Remove privacy/moderation fields from user object in response
         if (obj.userId) {
             delete obj.userId.privacy;
+            delete obj.userId.isFullPrivate;
+            delete obj.userId.accountStatus;
+            delete obj.userId.isDeleted;
             delete obj.userId.followers;
             delete obj.userId.following;
         }
@@ -126,14 +147,16 @@ export const fetchStoriesByUser = asyncHandler(async (req, res) => {
     }
 
     // Rule 2: Get target user's privacy settings
-    const targetUser = await User.findById(userId).select('privacy username profileImageUrl');
+    const targetUser = await User.findById(userId).select('privacy isFullPrivate username profileImageUrl');
     if (!targetUser) {
         throw new ApiError(404, "User not found");
     }
 
     // Rule 3: Check if viewer can see this user's content
     const isOwnStory = viewerId?.toString() === userId;
-    const isPublicAccount = targetUser.privacy === 'public';
+    // Public means public by BOTH flags: an account with isFullPrivate set and
+    // a stale privacy:'public' skipped the check below entirely.
+    const isPublicAccount = targetUser.privacy === 'public' && targetUser.isFullPrivate !== true;
 
     if (!isOwnStory && !isPublicAccount) {
         // For private accounts, check if viewer is following
@@ -281,14 +304,15 @@ export const fetchArchivedStoriesByUser = asyncHandler(async (req, res) => {
     }
 
     // Rule 2: Get target user's privacy settings
-    const targetUser = await User.findById(userId).select('privacy username profileImageUrl');
+    const targetUser = await User.findById(userId).select('privacy isFullPrivate username profileImageUrl');
     if (!targetUser) {
         throw new ApiError(404, "User not found");
     }
 
     // Rule 3: Check if viewer can see this user's content
     const isOwnStory = viewerId?.toString() === userId;
-    const isPublicAccount = targetUser.privacy === 'public';
+    // Public means public by BOTH flags — see fetchStoriesByUser.
+    const isPublicAccount = targetUser.privacy === 'public' && targetUser.isFullPrivate !== true;
 
     if (!isOwnStory && !isPublicAccount) {
         // For private accounts, check if viewer is following

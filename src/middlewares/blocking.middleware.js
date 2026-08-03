@@ -110,22 +110,121 @@ export const getBlockedUsersFilter = (userId) => {
 };
 
 /**
- * Helper function to invalidate blocked users cache
- * Call this when a user blocks/unblocks someone
+ * Is there a block between these two users, in EITHER direction?
+ *
+ * Authoritative (reads Block directly, no cache) because the callers are
+ * write paths and read paths that must not act on a five-minute-old answer:
+ * sending a message, opening a conversation, fetching a post. The cached list
+ * above is for bulk filtering, where being briefly stale only affects
+ * ordering; here it would mean a blocked user's message actually landing.
+ *
+ * Returns false when either id is missing, so an anonymous viewer is simply
+ * "not blocked" rather than throwing.
  */
-export const invalidateBlockedUsersCache = async (userId, blockedUserId = null) => {
-    try {
-        const userIdStr = userId.toString();
-        const cacheKey = `blocked:${userIdStr}`;
-        await redisClient.del(cacheKey);
+export const isBlockedBetween = async (userA, userB) => {
+    if (!userA || !userB) return false;
+    if (userA.toString() === userB.toString()) return false;
 
-        // Also invalidate the blocked user's cache (they might have blocked this user)
-        if (blockedUserId) {
-            const blockedUserIdStr = blockedUserId.toString();
-            const blockedCacheKey = `blocked:${blockedUserIdStr}`;
-            await redisClient.del(blockedCacheKey);
+    try {
+        const block = await Block.exists({
+            $or: [
+                { blockerId: userA, blockedId: userB },
+                { blockerId: userB, blockedId: userA }
+            ]
+        });
+        return !!block;
+    } catch (error) {
+        console.error('Error checking block relationship:', error);
+        // Fail CLOSED would break every chat if Mongo hiccups; fail open here
+        // matches how the rest of the block filtering degrades.
+        return false;
+    }
+};
+
+/**
+ * The ids blocked in either direction for one user, as strings.
+ *
+ * Same data req.blockedUsers carries, for controllers whose route does not
+ * mount getBlockedUsers (e.g. the profile-posts route). Shares the cache key
+ * with the middleware so one warm-up serves both.
+ */
+export const getBlockedUserIds = async (userId) => {
+    if (!userId) return [];
+
+    const userIdStr = userId.toString();
+    const cacheKey = `blocked:${userIdStr}`;
+
+    try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+            return JSON.parse(cached);
         }
     } catch (error) {
+        console.error('Error reading blocked users cache:', error);
+    }
+
+    try {
+        const [blockedByMe, blockedByOthers] = await Promise.all([
+            Block.find({ blockerId: userId }).select('blockedId').lean(),
+            Block.find({ blockedId: userId }).select('blockerId').lean()
+        ]);
+
+        const blockedUsers = [
+            ...blockedByMe.map(block => block.blockedId.toString()),
+            ...blockedByOthers.map(block => block.blockerId.toString())
+        ];
+
+        try {
+            await redisClient.setex(cacheKey, 300, JSON.stringify(blockedUsers));
+        } catch (cacheError) {
+            console.error('Error caching blocked users:', cacheError);
+        }
+
+        return blockedUsers;
+    } catch (error) {
+        console.error('Error loading blocked users:', error);
+        return [];
+    }
+};
+
+/**
+ * Helper function to invalidate blocked users cache
+ * Call this when a user blocks/unblocks someone
+ *
+ * The blocked LIST is only half of it. Both users' home feeds are cached per
+ * viewer (fn:user:<id>:feed:*) with the block filter already baked in, so
+ * without dropping those a freshly blocked account's posts stayed in the feed
+ * until the TTL expired — and, worse the other way round, an UNBLOCKED
+ * account's posts and stories stayed missing for the same window, which reads
+ * as "unblocking did nothing". Same for the cached profile snapshots.
+ */
+export const invalidateBlockedUsersCache = async (userId, blockedUserId = null) => {
+    const ids = [userId, blockedUserId].filter(Boolean).map(id => id.toString());
+
+    try {
+        await Promise.all(ids.map(id => redisClient.del(`blocked:${id}`)));
+    } catch (error) {
         console.error('Error invalidating blocked users cache:', error);
+    }
+
+    try {
+        const { FeedCacheManager, UserCacheManager } = await import('../utils/cache.utils.js');
+        const { invalidateViewableUsersCache } = await import('./privacy.middleware.js');
+
+        await Promise.allSettled(ids.flatMap(id => [
+            FeedCacheManager.invalidateUserFeed(id),
+            UserCacheManager.invalidateUserProfile(id),
+            invalidateViewableUsersCache(id),
+            // getUserChats caches its own page-by-page result, and that result
+            // now hides direct chats with blocked users — so both blocking and
+            // unblocking have to drop it or the chat list disagrees with what
+            // opening the chat does. Same key shape the chat controllers write.
+            ...[1, 2, 3].flatMap(page => [
+                redisClient.del(`chats:user:${id}:status:active:page:${page}:limit:20`),
+                redisClient.del(`chats:user:${id}:status:requested:page:${page}:limit:20`)
+            ])
+        ]));
+    } catch (error) {
+        console.error('Error invalidating block-dependent caches:', error);
     }
 };

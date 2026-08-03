@@ -76,7 +76,14 @@ export const searchAllContent = async (req, res) => {
         const safeTerm = escapeRegex(term);
         const searchRegex = new RegExp(safeTerm, 'i');                 // '#'-free
         const hashtagLiteralRegex = new RegExp(`#${safeTerm}`, 'i');   // "#foo" in prose
-        const tagExactRegex = new RegExp(`^${safeTerm}$`, 'i');        // whole tag
+        //* Whole-tag match, tolerant of how the tag was actually stored. The
+        //* composer's hashtag field says "without #" but does not enforce it, and
+        //* nothing trims the value before it reaches customization.<type>.tags —
+        //* so a tag the user typed as "#shirt" (or " shirt") sat in the database
+        //* with the '#'/space still on it and a strict /^shirt$/ never matched it.
+        //* The post displayed "#shirt", tapping it searched "#shirt", and the
+        //* result was an empty screen.
+        const tagExactRegex = new RegExp(`^\\s*#?\\s*${safeTerm}\\s*$`, 'i');
         const skip = (page - 1) * limit;
 
         // 🔍 Parse postType (can be comma-separated)
@@ -86,8 +93,7 @@ export const searchAllContent = async (req, res) => {
         }
 
         // 🔎 Enhanced Post filters for comprehensive search
-        const basePostFilters = {
-            $or: [
+        const keywordOrClauses = [
                 // Caption and description search
                 { caption: searchRegex },
                 { description: searchRegex },
@@ -145,26 +151,29 @@ export const searchAllContent = async (req, res) => {
                 { 'customization.business.location.city': searchRegex },
                 { 'customization.business.location.state': searchRegex },
                 { 'customization.business.location.country': searchRegex },
-            ],
-            contentType: { $in: ['normal', 'service', 'product', 'business'] },
-            'settings.privacy': { $ne: 'private' }  // Never show private posts in search results
-        };
+        ];
 
         //* An explicit '#' means the user wants a TAG search, not a keyword
         //* search — "#coffee" should return posts tagged coffee, not every
         //* caption that happens to mention coffee. Bare "coffee" keeps the
         //* broad behaviour above.
-        if (isHashtagQuery) {
-            basePostFilters.$or = [
-                { hashtags: tagExactRegex },
-                { 'customization.normal.tags': tagExactRegex },
-                { 'customization.product.tags': tagExactRegex },
-                { 'customization.service.tags': tagExactRegex },
-                { 'customization.business.tags': tagExactRegex },
-                { caption: hashtagLiteralRegex },
-                { description: hashtagLiteralRegex },
-            ];
-        }
+        const hashtagOrClauses = [
+            { hashtags: tagExactRegex },
+            { 'customization.normal.tags': tagExactRegex },
+            { 'customization.product.tags': tagExactRegex },
+            { 'customization.service.tags': tagExactRegex },
+            { 'customization.business.tags': tagExactRegex },
+            { caption: hashtagLiteralRegex },
+            { description: hashtagLiteralRegex },
+        ];
+
+        //* Everything a post must satisfy REGARDLESS of which text clauses are in
+        //* play. The text `$or` is supplied per query by buildPostQuery below, so
+        //* the '#' fallback can swap it without losing any of these.
+        const basePostFilters = {
+            contentType: { $in: ['normal', 'service', 'product', 'business'] },
+            'settings.privacy': { $ne: 'private' }  // Never show private posts in search results
+        };
 
         // Filter by contentType
         if (contentType && contentType !== 'reel') {
@@ -200,14 +209,18 @@ export const searchAllContent = async (req, res) => {
             }
         }
 
-        if (useLocationFilter) {
+        //* Wraps every text clause in the active geo box. Applied at query time
+        //* rather than mutating basePostFilters.$or in place, because the '#'
+        //* fallback below swaps that array out and the geo constraint has to
+        //* survive the swap.
+        const withLocation = (orClauses) => {
+            if (!useLocationFilter) return orClauses;
             const geoFilter = {
                 $geoWithin: {
                     $centerSphere: [[lng, lat], distance / 6371]
                 }
             };
-
-            basePostFilters.$or = basePostFilters.$or.map(condition => ({
+            return orClauses.map(condition => ({
                 $and: [
                     condition,
                     {
@@ -220,7 +233,7 @@ export const searchAllContent = async (req, res) => {
                     }
                 ]
             }));
-        }
+        };
 
         // Enhanced user search (excluding blocked users)
         const matchingUsers = await User.find({
@@ -263,25 +276,43 @@ export const searchAllContent = async (req, res) => {
         //* Author-based widening is deliberately skipped for a '#' query —
         //* otherwise "#coffee" would drag in every post by a user named
         //* "coffee_shop", which is not a hashtag result.
-        if (!isHashtagQuery) {
-            // Add username search to post filters
-            if (matchingUserIds.length > 0) {
-                basePostFilters.$or.push({ userId: { $in: matchingUserIds } });
-            }
+        const authorOrClauses = [];
+        if (matchingUserIds.length > 0) authorOrClauses.push({ userId: { $in: matchingUserIds } });
+        if (businessUserIds.length > 0) authorOrClauses.push({ userId: { $in: businessUserIds } });
 
-            // Add business category search to post filters
-            if (businessUserIds.length > 0) {
-                basePostFilters.$or.push({ userId: { $in: businessUserIds } });
-            }
-        }
+        //* Author clauses sit OUTSIDE withLocation() on purpose — matching an
+        //* author has never been geo-constrained here and narrowing it now would
+        //* quietly change what a "near me" search returns.
+        const buildPostQuery = (orClauses, { widenByAuthor }) => ({
+            ...basePostFilters,
+            $or: [
+                ...withLocation(orClauses),
+                ...(widenByAuthor ? authorOrClauses : []),
+            ],
+            userId: { $nin: blockedUsers }
+        });
 
         // 📄 Fetch Posts (excluding blocked users)
-        const rawPosts = await Post.find({
-            ...basePostFilters,
-            userId: { $nin: blockedUsers }
-        })
+        let rawPosts = await Post.find(
+            buildPostQuery(isHashtagQuery ? hashtagOrClauses : keywordOrClauses, { widenByAuthor: !isHashtagQuery })
+        )
             .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
             .lean();
+
+        //* Nothing carries that tag EXACTLY. Rather than dead-ending on an empty
+        //* screen — which is what a tag search looked like whenever the tag was
+        //* only ever typed inside a caption, or was stored in a shape the exact
+        //* match could not reach — retry as an ordinary keyword search on the
+        //* bare term. Tag hits still come first because they score higher below.
+        let hashtagFellBackToKeyword = false;
+        if (isHashtagQuery && rawPosts.length === 0) {
+            hashtagFellBackToKeyword = true;
+            rawPosts = await Post.find(
+                buildPostQuery(keywordOrClauses, { widenByAuthor: false })
+            )
+                .populate('userId', 'username profileImageUrl bio location isBusinessProfile')
+                .lean();
+        }
 
         // Get active payment plan user IDs and business user IDs for prioritization
         const activePaymentPlanUserIds = await Business.find({
@@ -303,6 +334,81 @@ export const searchAllContent = async (req, res) => {
         //* post rendered on the home feed with a clickable "#tag", but that same
         //* tag's search silently filtered the post back out.
         const finalPosts = await filterBusinessPostsByPaymentPlan(rawPosts);
+
+        //* ---- Relevance ----------------------------------------------------
+        //*
+        //* Everything used to be ranked by ENGAGEMENT alone, with a tiny
+        //* content-type nudge. That is fine when every candidate matched the
+        //* query — but the post query above deliberately widens to "any post by
+        //* an author whose username / bio / location / address matches". Those
+        //* posts have nothing to do with the words typed, and a popular one beat
+        //* an exact product-name match by thousands of points. Searching "shirt"
+        //* returned a wall of unrelated photos by whoever had "shirt" in their
+        //* bio, and the actual shirt listings were pushed so far down the ranked
+        //* list that they fell off page 1 entirely — which is why the Products
+        //* tab (a client-side filter over that same page) came back empty.
+        //*
+        //* So: score WHERE the term matched first, engagement only as a
+        //* tie-break inside a relevance band. A post that matched nothing but its
+        //* author still appears, just underneath everything that matched on
+        //* content.
+        const matches = (value, rx) => {
+            if (!value) return false;
+            if (Array.isArray(value)) return value.some(v => typeof v === 'string' && rx.test(v));
+            return typeof value === 'string' && rx.test(value);
+        };
+        //* Best (not cumulative) field weight — a product whose name, brand AND
+        //* tags all say "shirt" should not outrank one purely for repetition.
+        const bestWeight = (pairs) => pairs.reduce(
+            (best, [value, rx, weight]) => (matches(value, rx) && weight > best ? weight : best),
+            0
+        );
+
+        const postRelevance = (post) => {
+            const c = post.customization || {};
+            const product = c.product || {};
+            const service = c.service || {};
+            const business = c.business || {};
+            const normal = c.normal || {};
+            const allTags = [
+                ...(Array.isArray(product.tags) ? product.tags : []),
+                ...(Array.isArray(service.tags) ? service.tags : []),
+                ...(Array.isArray(business.tags) ? business.tags : []),
+                ...(Array.isArray(normal.tags) ? normal.tags : []),
+            ];
+            const locations = [product.location, service.location, business.location, normal.location]
+                .filter(Boolean)
+                .flatMap(l => [l.name, l.address, l.city, l.state, l.country])
+                .filter(Boolean);
+
+            return bestWeight([
+                // Whole-tag hit — the strongest signal there is, and what a
+                // '#query' is actually asking for.
+                [post.hashtags, tagExactRegex, 16],
+                [allTags, tagExactRegex, 16],
+                // The thing being sold, by name.
+                [product.name, searchRegex, 12],
+                [service.name, searchRegex, 12],
+                [business.businessName, searchRegex, 12],
+                [product.brand, searchRegex, 10],
+                // Partial tag hit ("shirt" inside "tshirts").
+                [post.hashtags, searchRegex, 9],
+                [allTags, searchRegex, 9],
+                [product.category, searchRegex, 8],
+                [service.category, searchRegex, 8],
+                [business.category, searchRegex, 8],
+                [product.subcategory, searchRegex, 7],
+                [service.subcategory, searchRegex, 7],
+                [business.subcategory, searchRegex, 7],
+                [business.businessType, searchRegex, 7],
+                [post.caption, searchRegex, 5],
+                [post.description, searchRegex, 4],
+                [product.description, searchRegex, 4],
+                [service.description, searchRegex, 4],
+                [business.description, searchRegex, 4],
+                [locations, searchRegex, 2],
+            ]);
+        };
 
         const scoredPosts = finalPosts.map(post => {
             const userId = post.userId?._id || post.userId;
@@ -332,6 +438,7 @@ export const searchAllContent = async (req, res) => {
 
             return {
                 ...post,
+                _relevance: postRelevance(post),
                 _score: base + score + (new Date(post.createdAt).getTime() / 10000000000000),
                 _type: 'post'
             };
@@ -415,17 +522,31 @@ export const searchAllContent = async (req, res) => {
                     baseScore += 2.0; // Significant boost for paid business reels
                 }
 
+                //* Same banding as posts so reels and posts interleave by how
+                //* well they match, not by which collection they came from.
+                const relevance = bestWeight([
+                    [reel.hashtags, tagExactRegex, 16],
+                    [reel.hashtags, searchRegex, 9],
+                    [reel.caption, searchRegex, 5],
+                    [reel.description, searchRegex, 4],
+                    [reel.audio?.title, searchRegex, 4],
+                    [reel.audio?.artist, searchRegex, 3],
+                    [[reel.location?.name, reel.location?.city, reel.location?.state, reel.location?.country]
+                        .filter(Boolean), searchRegex, 2],
+                ]);
+
                 return {
                     ...reel,
+                    _relevance: relevance,
                     _score: baseScore + score + (new Date(reel.createdAt).getTime() / 10000000000000),
                     _type: 'reel'
                 };
             });
         }
 
-        //  Merge + sort
+        //  Merge + sort: relevance band first, popularity only inside a band.
         const combinedContent = [...scoredPosts, ...scoredReels]
-            .sort((a, b) => b._score - a._score);
+            .sort((a, b) => (b._relevance - a._relevance) || (b._score - a._score));
 
         const paginatedContent = combinedContent.slice(skip, skip + limit);
 
@@ -575,6 +696,10 @@ export const searchAllContent = async (req, res) => {
             new ApiResponse(200, {
                 results: contentWithBadges,
                 users: usersWithBadges,
+                //* True when a '#tag' search found no post carrying that tag and
+                //* these results are a plain keyword search on the bare word
+                //* instead. Clients can say so; ignoring it just shows results.
+                hashtagFallback: hashtagFellBackToKeyword,
                 pagination: {
                     page: parseInt(page),
                     limit: parseInt(limit),
