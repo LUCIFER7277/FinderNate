@@ -51,61 +51,113 @@ const getUserProfile = asyncHandler(async (req, res) => {
         Post.countDocuments({ userId }),
     ]);
 
+    /**
+     * The settings a user can change from a switch are read LIVE on every
+     * request, never from the cached snapshot.
+     *
+     * The snapshot lives for an hour, and the endpoints that flip these live
+     * elsewhere — Service/Product posts in the business controller, hide
+     * phone/address in privacy.js, autofill in preferences.js. Every one of
+     * them that forgot to invalidate this key produced the same symptom: the
+     * write succeeded, the next profile read returned the OLD value, and the
+     * switch snapped back on its own. Both clients ended up carrying local
+     * "re-assert the toggle result" workarounds for it.
+     *
+     * Rather than depend on every current and future writer remembering to
+     * invalidate, these fields simply are not cached. They are three indexed
+     * reads on a request that already makes several.
+     */
+    const readLiveSettings = async () => {
+        const settingsUser = await User.findById(userId)
+            .select('isBusinessProfile isPhoneNumberHidden isAddressHidden phoneNumber address isPhoneVerified privacy isFullPrivate messagingPrivacy servicePostPreferences productPostPreferences')
+            .lean();
+
+        if (!settingsUser) return null;
+
+        let businessInfo = null;
+        if (settingsUser.isBusinessProfile) {
+            businessInfo = await Business.findOne({ userId })
+                .select('postSettings isVerified subscriptionStatus plan')
+                .lean();
+        }
+
+        const isContentVisible = settingsUser.isBusinessProfile && businessInfo
+            ? businessInfo.subscriptionStatus === 'active' && businessInfo.plan !== 'plan1'
+            : true;
+
+        return {
+            // The OWNER always sees their own phone number and address.
+            //
+            // These were nulled out whenever the hide flag was on, but the
+            // flag means "hide this from OTHER people" — getOtherUserProfile
+            // is where it is enforced. Applying it here meant that turning on
+            // "Hide phone number" made the user's own settings screen report
+            // the number as Not Set, which reads as the number having been
+            // wiped rather than hidden.
+            phoneNumber: settingsUser.phoneNumber ?? null,
+            address: settingsUser.address ?? null,
+            isPhoneVerified: settingsUser.isPhoneVerified,
+            isPhoneNumberHidden: settingsUser.isPhoneNumberHidden,
+            isAddressHidden: settingsUser.isAddressHidden,
+            privacy: settingsUser.privacy,
+            isFullPrivate: settingsUser.isFullPrivate,
+            // Returned so the client can paint the saved state instead of the
+            // 'everyone' default — Account Settings had no other source for it
+            // and always showed the default, whatever had been chosen.
+            messagingPrivacy: {
+                onlineStatus: settingsUser.messagingPrivacy?.onlineStatus || 'everyone',
+                lastSeen: settingsUser.messagingPrivacy?.lastSeen || 'everyone',
+            },
+            servicePostAutoFill: settingsUser.servicePostPreferences?.enableAutoFill ?? true,
+            productPostAutoFill: settingsUser.productPostPreferences?.enableAutoFill ?? true,
+            productEnabled: settingsUser.isBusinessProfile ? (businessInfo?.postSettings?.allowProductPosts ?? true) : null,
+            serviceEnabled: settingsUser.isBusinessProfile ? (businessInfo?.postSettings?.allowServicePosts ?? true) : null,
+            isVerified: settingsUser.isBusinessProfile ? (businessInfo?.isVerified ?? false) : null,
+            isContentVisible: settingsUser.isBusinessProfile ? isContentVisible : true,
+            contentVisibilityMessage: settingsUser.isBusinessProfile && !isContentVisible
+                ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
+                : null,
+        };
+    };
+
     if (cachedProfile) {
-        return res.status(200).json(
-            new ApiResponse(200, {
-                ...cachedProfile,
-                followersCount,
-                followingCount,
-                postsCount,
-            }, "User profile retrieved successfully")
-        );
+        const liveSettings = await readLiveSettings();
+        if (liveSettings) {
+            return res.status(200).json(
+                new ApiResponse(200, {
+                    ...cachedProfile,
+                    ...liveSettings,
+                    followersCount,
+                    followingCount,
+                    postsCount,
+                }, "User profile retrieved successfully")
+            );
+        }
     }
 
     const user = await User.findById(userId).select(
-        "username fullName email phoneNumber address gender dateOfBirth bio profileImageUrl location link followers following posts isBusinessProfile businessProfileId isBlueTickVerified isEmailVerified isPhoneVerified isPhoneNumberHidden isAddressHidden privacy isFullPrivate createdAt"
+        "username fullName email phoneNumber address gender dateOfBirth bio profileImageUrl location link followers following posts isBusinessProfile businessProfileId isBlueTickVerified isEmailVerified isPhoneVerified isPhoneNumberHidden isAddressHidden privacy isFullPrivate messagingPrivacy servicePostPreferences productPostPreferences createdAt"
     );
 
     if (!user) {
         throw new ApiError(404, "User not found");
     }
 
-    let businessInfo = null;
-    let isContentVisible = true;
-    if (user.isBusinessProfile) {
-        businessInfo = await Business.findOne({ userId }).select('postSettings isVerified subscriptionStatus plan');
-        if (businessInfo) {
-            isContentVisible = businessInfo.subscriptionStatus === 'active' && businessInfo.plan !== 'plan1';
-        }
-    }
-
     const subscriptionBadge = await user.getSubscriptionBadge();
 
+    // Only the STABLE half of the profile is cached; everything a settings
+    // switch can change is spread in fresh from readLiveSettings below.
     const profileSnapshot = {
         _id: user._id,
         username: user.username,
         email: user.email,
         fullName: user.fullName,
-        phoneNumber: user.isPhoneNumberHidden ? null : user.phoneNumber,
-        address: user.isAddressHidden ? null : user.address,
         dateOfBirth: user.dateOfBirth,
         gender: user.gender,
         isBusinessProfile: user.isBusinessProfile,
         businessProfileId: user.businessProfileId,
         isBlueTickVerified: user.isBlueTickVerified,
         isEmailVerified: user.isEmailVerified,
-        isPhoneVerified: user.isPhoneVerified,
-        isPhoneNumberHidden: user.isPhoneNumberHidden,
-        isAddressHidden: user.isAddressHidden,
-        privacy: user.privacy,
-        isFullPrivate: user.isFullPrivate,
-        productEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowProductPosts ?? true) : null,
-        serviceEnabled: user.isBusinessProfile ? (businessInfo?.postSettings?.allowServicePosts ?? true) : null,
-        isVerified: user.isBusinessProfile ? (businessInfo?.isVerified ?? false) : null,
-        isContentVisible: user.isBusinessProfile ? isContentVisible : true,
-        contentVisibilityMessage: user.isBusinessProfile && !isContentVisible
-            ? 'Content is currently hidden. Activate your payment plan to make posts visible.'
-            : null,
         subscriptionBadge,
         createdAt: user.createdAt,
         bio: user.bio,
@@ -116,9 +168,12 @@ const getUserProfile = asyncHandler(async (req, res) => {
 
     await CacheManager.set(profileCacheKey, profileSnapshot, RedisTTL.USER_PROFILE);
 
+    const liveSettings = (await readLiveSettings()) || {};
+
     return res.status(200).json(
         new ApiResponse(200, {
             ...profileSnapshot,
+            ...liveSettings,
             followersCount,
             followingCount,
             postsCount,
@@ -126,24 +181,58 @@ const getUserProfile = asyncHandler(async (req, res) => {
     );
 });
 
-const updateUserProfile = asyncHandler(async (req, res) => {
-    const updates = { ...req.body };
+/**
+ * The ONLY fields PUT /users/profile may write.
+ *
+ * This used to spread the whole request body into a $set and filter it with a
+ * denylist, so every schema field the denylist forgot went straight into the
+ * document: isBlueTickVerified (the blue tick, which only the admin route
+ * PUT /admin/users/:userId/blue-tick is meant to set), isBusinessProfile and
+ * businessProfileId (paid business gating), isDeleted, privacy/isFullPrivate —
+ * and accountStatus, which the denylist misspelled as "acccoutStatus", so a
+ * user could ban themselves. Everything not listed here is either server-owned
+ * or has its own checked route: privacy toggles (/privacy/*), phone and email
+ * changes (OTP flows), messaging privacy, chat wallpaper, autofill preferences.
+ */
+const EDITABLE_PROFILE_FIELDS = [
+    "fullName",
+    "username",
+    "bio",
+    "location",
+    "link",
+    "profileImageUrl",
+    "gender",
+    "dateOfBirth",
+    "address"
+];
 
-    const disallowedFields = [
-        "email",
-        "password",
-        "refreshToken",
-        "isEmailVerified",
-        "isPhoneVerified",
-        "acccoutStatus",
-        "followers",
-        "following",
-        "posts",
-        "uid"
-    ];
-    for (const field of disallowedFields) {
-        if (updates.hasOwnProperty(field)) {
+// Anything else in the body is dropped silently, but these keep the explicit
+// 400 the endpoint has always returned so a client trying to change a
+// credential is told why it did not happen instead of seeing a silent no-op.
+const PROTECTED_PROFILE_FIELDS = [
+    "email",
+    "password",
+    "refreshToken",
+    "isEmailVerified",
+    "isPhoneVerified",
+    "accountStatus",
+    "followers",
+    "following",
+    "posts",
+    "uid"
+];
+
+const updateUserProfile = asyncHandler(async (req, res) => {
+    for (const field of PROTECTED_PROFILE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(req.body, field)) {
             throw new ApiError(400, `Field '${field}' cannot be updated`);
+        }
+    }
+
+    const updates = {};
+    for (const field of EDITABLE_PROFILE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+            updates[field] = req.body[field];
         }
     }
 
@@ -170,6 +259,10 @@ const updateUserProfile = asyncHandler(async (req, res) => {
             throw new ApiError(500, "Failed to upload image to Bunny.net");
         }
         updates.profileImageUrl = uploadResult.secure_url;
+    }
+
+    if (Object.keys(updates).length === 0) {
+        throw new ApiError(400, "No updatable profile fields provided");
     }
 
     const updatedUser = await User.findByIdAndUpdate(
@@ -326,7 +419,11 @@ const getOtherUserProfile = asyncHandler(async (req, res) => {
         followersCount,
         followingCount,
         postsCount,
-        isPrivate: targetUser.privacy === 'private',
+        // Private by EITHER flag. `privacy` alone left an account carrying
+        // isFullPrivate:true advertising itself as public to the client, which
+        // then rendered the full profile instead of the locked one.
+        isPrivate: targetUser.privacy === 'private' || targetUser.isFullPrivate === true,
+        isFullPrivate: targetUser.isFullPrivate === true,
         createdAt: targetUser.createdAt
     };
 
@@ -380,6 +477,11 @@ const deleteAccount = asyncHandler(async (req, res) => {
         mediaCleanup.errors.push({ error: 'Failed to clean up media', details: err.message });
     }
 
+    // Captured BEFORE the cleanup below pulls this user out of them, so the
+    // follow-up pass can still find the conversations they were part of.
+    const userChats = await Chat.find({ participants: userId }).select("_id").lean();
+    const userChatIds = userChats.map(chat => chat._id);
+
     const cleanupResults = await Promise.allSettled([
         Post.deleteMany({ userId }),
         Reel.deleteMany({ userId }),
@@ -396,8 +498,27 @@ const deleteAccount = asyncHandler(async (req, res) => {
         Subscription.deleteMany({ subscriberId: userId }),
         PushSubscription.deleteMany({ userId }),
         Device.deleteMany({ userId }),
-        Chat.deleteMany({ participants: userId }),
-        Message.deleteMany({ senderId: userId }),
+        // A Chat is the SHARED record of a conversation, not a per-user copy.
+        // This was Chat.deleteMany({ participants: userId }), which hard-deleted
+        // every thread the leaving user was in — so the person on the other side
+        // lost their own messages, the packing photos and the agreed price they
+        // would need to defend an escrow dispute. Only this user's participation
+        // is removed; the counterparty keeps the conversation.
+        Chat.updateMany(
+            { participants: userId },
+            {
+                $pull: {
+                    participants: userId,
+                    admins: userId,
+                    mutedBy: userId,
+                    blockedUsers: userId
+                }
+            }
+        ),
+        // The field on MessageSchema is `sender`; `senderId` does not exist, so
+        // this matched nothing and the departing user's message bodies, media
+        // urls and file names were all retained despite the erasure promise.
+        Message.deleteMany({ sender: userId }),
         Activity.deleteMany({ userId }),
         Activity.deleteMany({ targetUserId: userId }),
         Notification.deleteMany({ userId }),
@@ -409,7 +530,10 @@ const deleteAccount = asyncHandler(async (req, res) => {
         ContactRequest.deleteMany({ userId }),
         ContactRequest.deleteMany({ contactUserId: userId }),
         Block.deleteMany({ blockerId: userId }),
-        Block.deleteMany({ blockedUserId: userId }),
+        // Same class of bug as the message cleanup above: the field on
+        // BlockSchema is `blockedId`, so blocks placed ON this user were never
+        // cleared and outlived the account.
+        Block.deleteMany({ blockedId: userId }),
         User.updateMany({ followers: userId }, { $pull: { followers: userId } }),
         User.updateMany({ following: userId }, { $pull: { following: userId } }),
         Post.updateMany({ mentions: userId }, { $pull: { mentions: userId } }),
@@ -420,6 +544,65 @@ const deleteAccount = asyncHandler(async (req, res) => {
         Following.deleteMany({ userId }),
         Following.deleteMany({ followingId: userId })
     ]);
+
+    if (userChatIds.length) {
+        try {
+            // A conversation nobody is left in (the other side had already
+            // deleted their account) is dead weight — that one can go, together
+            // with whatever messages remain in it.
+            const emptyChats = await Chat.find({
+                _id: { $in: userChatIds },
+                participants: { $size: 0 }
+            }).select("_id").lean();
+
+            if (emptyChats.length) {
+                const emptyChatIds = emptyChats.map(chat => chat._id);
+                await Promise.allSettled([
+                    Message.deleteMany({ chatId: { $in: emptyChatIds } }),
+                    Chat.deleteMany({ _id: { $in: emptyChatIds } })
+                ]);
+            }
+
+            // The chat list renders chat.lastMessage. Where that was one of the
+            // messages just deleted, roll it back to the newest surviving one so
+            // the other participant isn't left looking at text that no longer
+            // exists.
+            const staleChats = await Chat.find({
+                _id: { $in: userChatIds },
+                "lastMessage.sender": userId
+            }).select("_id").lean();
+
+            for (const chat of staleChats) {
+                const latest = await Message.findOne({
+                    chatId: chat._id,
+                    isDeleted: { $ne: true }
+                })
+                    .sort({ timestamp: -1 })
+                    .select("sender message timestamp")
+                    .lean();
+
+                await Chat.updateOne(
+                    { _id: chat._id },
+                    latest
+                        ? {
+                            $set: {
+                                lastMessageId: latest._id,
+                                lastMessage: {
+                                    sender: latest.sender,
+                                    message: latest.message,
+                                    timestamp: latest.timestamp
+                                },
+                                lastMessageAt: latest.timestamp
+                            }
+                        }
+                        : { $unset: { lastMessageId: "", lastMessage: "" } }
+                );
+            }
+        } catch (err) {
+            // Best effort: the account itself must still be deleted.
+            console.error("[deleteAccount] chat cleanup failed:", err?.message || err);
+        }
+    }
 
     await User.findByIdAndDelete(userId);
 

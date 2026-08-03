@@ -77,6 +77,7 @@ import {
     verifyAdminJWT,
     requirePermission
 } from "../middlewares/adminAuth.middleware.js";
+import { requireSuperAdmin } from "../controllers/admin/superadmin.controllers.js";
 // DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
 import {
     listDiagnostics,
@@ -207,9 +208,13 @@ router.route("/businesses/:businessId/documents/:documentId/verify").post(
 // ===============================
 // ADMIN MANAGEMENT ROUTES
 // ===============================
-router.route("/create-admin").post(createAdmin);
+// Creating admins and rewriting their permissions are super-admin only —
+// these were the only routes under verifyAdminJWT with no gate at all, so any
+// admin could grant itself every permission. The controllers repeat the check,
+// so it holds however the handler is reached.
+router.route("/create-admin").post(requireSuperAdmin, createAdmin);
 router.route("/all-admins").get(getAllAdmins);
-router.route("/:adminId/permissions").put(updateAdminPermissions);
+router.route("/:adminId/permissions").put(requireSuperAdmin, updateAdminPermissions);
 
 // ===============================
 // ESCROW & ORDER MANAGEMENT ROUTES

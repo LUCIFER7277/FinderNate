@@ -3,6 +3,7 @@ import { upload } from "../middlewares/multerConfig.js";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import { getBlockedUsers as getBlockedUsersMiddleware } from "../middlewares/blocking.middleware.js";
 import { cacheSearchResults } from "../middlewares/cache.middleware.js";
+import { authRateLimit, loginRateLimit } from "../middlewares/rateLimiter.middleware.js";
 import { loginUser, logOutUser, registerUser, verifyRegistrationOTP, resendRegistrationOTP, getUserProfile, updateUserProfile, changePassword, deleteAccount, searchUsers, verifyEmailWithOTP, uploadProfileImage, sendVerificationOTPForEmail, sendPasswordResetOTP, resetPasswordWithOTP, getOtherUserProfile, checkTokenExpiry, togglePhoneNumberVisibility, toggleAddressVisibility, trackSearch, getPopularSearches, blockUser, unblockUser, getBlockedUsers, checkIfUserBlocked, getUsernameSuggestions, checkUsernameAvailability, toggleFullPrivateAccount, toggleServiceAutoFill, getPreviousServicePostData, toggleProductAutoFill, getPreviousProductPostData, saveFCMToken, testFCMNotification, checkFirebaseStatus, updateMessagingPrivacy, getMessagingPrivacy, sendPhoneVerificationOtp, verifyAndUpdatePhone, getOtpStatus, sendEmailChangeOtp, verifyAndUpdateEmail } from "../controllers/user.controllers.js";
 import { getChatWallpaper, updateChatWallpaper } from "../controllers/user/chatWallpaper.js";
 import { searchAllContent } from "../controllers/searchAllContent.controllers.js";
@@ -12,32 +13,49 @@ import { instantSearch, searchProfiles, searchProducts } from "../controllers/se
 
 const router = Router();
 
-router.route("/register").post(registerUser);
-router.route("/register/verify").post(verifyRegistrationOTP);
-router.route("/register/resend-otp").post(resendRegistrationOTP);
-router.route("/login").post(loginUser);
+// ─────────────────────────────────────────────────────────────────────────────
+// THE CREDENTIAL ROUTES ARE RATE LIMITED PER IP.
+//
+// app.js applies generalRateLimit to everything, but that is 50,000 requests a
+// minute — traffic shaping, not a limit an attacker would ever notice. Every
+// route below that sends a code, checks a code, or checks a password carries
+// its own limiter as well, mounted FIRST so a rejected request never reaches
+// the controller (same order the payment routes use for
+// guestCheckoutIpRateLimit).
+//
+// Two limiters, differing only in what they do when Redis is down:
+//   authRateLimit  — OTP send + OTP verify. Fails CLOSED.
+//   loginRateLimit — sign-in only. Fails OPEN, because the per-account
+//                    failed-login throttle is the real control there and a
+//                    cache blip must not take sign-in down platform-wide.
+// See rateLimiter.middleware.js for the full reasoning on both.
+// ─────────────────────────────────────────────────────────────────────────────
+router.route("/register").post(authRateLimit, registerUser);
+router.route("/register/verify").post(authRateLimit, verifyRegistrationOTP);
+router.route("/register/resend-otp").post(authRateLimit, resendRegistrationOTP);
+router.route("/login").post(loginRateLimit, loginUser);
 router.route("/logout").post(verifyJWT, logOutUser);
 router.route("/profile").get(verifyJWT, getUserProfile);
 router.route("/profile").put(verifyJWT, upload.single("profileImage"), updateUserProfile);
 router.route("/profile/change-password").put(verifyJWT, changePassword);
 router.route("/profile").delete(verifyJWT, deleteAccount);
 router.route("/profile/search").get(verifyJWT, getBlockedUsersMiddleware, searchUsers);
-router.route("/verify-email-otp").post(verifyEmailWithOTP);
-router.route("/send-verification-otp").post(sendVerificationOTPForEmail);
-router.route("/send-phone-verification-otp").post(verifyJWT, sendPhoneVerificationOtp);
-router.route("/verify-update-phone").post(verifyJWT, verifyAndUpdatePhone);
+router.route("/verify-email-otp").post(authRateLimit, verifyEmailWithOTP);
+router.route("/send-verification-otp").post(authRateLimit, sendVerificationOTPForEmail);
+router.route("/send-phone-verification-otp").post(authRateLimit, verifyJWT, sendPhoneVerificationOtp);
+router.route("/verify-update-phone").post(authRateLimit, verifyJWT, verifyAndUpdatePhone);
 // Changing the email address mirrors the phone flow: OTP to the NEW address,
 // then verify. Nothing is written until the code checks out.
-router.route("/send-email-change-otp").post(verifyJWT, sendEmailChangeOtp);
+router.route("/send-email-change-otp").post(authRateLimit, verifyJWT, sendEmailChangeOtp);
 // Alias: the website has been calling this path (and /verify-update-email)
 // since before the handler existed, so those requests were 404ing and email
 // changes silently failed there. Same handler, so both clients work and no
 // already-deployed frontend needs to change.
-router.route("/send-email-update-otp").post(verifyJWT, sendEmailChangeOtp);
-router.route("/verify-update-email").post(verifyJWT, verifyAndUpdateEmail);
+router.route("/send-email-update-otp").post(authRateLimit, verifyJWT, sendEmailChangeOtp);
+router.route("/verify-update-email").post(authRateLimit, verifyJWT, verifyAndUpdateEmail);
 router.route("/profile/upload-image").post(verifyJWT, upload.single("profileImage"), uploadProfileImage);
-router.route("/send-reset-otp").post(sendPasswordResetOTP);
-router.route("/reset-password").post(resetPasswordWithOTP);
+router.route("/send-reset-otp").post(authRateLimit, sendPasswordResetOTP);
+router.route("/reset-password").post(authRateLimit, resetPasswordWithOTP);
 // Public — fetch OTP cooldown & expiry remaining (query: identifier, type, purpose)
 router.route("/otp-status").get(getOtpStatus);
 router.route("/check-token").post(checkTokenExpiry);

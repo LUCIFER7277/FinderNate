@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { verifyJWT } from "../middlewares/auth.middleware.js";
+import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import { verifyAdminJWT } from "../middlewares/adminAuth.middleware.js";
 import { upload } from "../middlewares/multerConfig.js";
 import {
@@ -86,7 +86,11 @@ router.route("/bank-details").get(verifyJWT, getBankDetails);
 router.route("/bank-details").delete(verifyJWT, deleteBankDetails);
 
 // Get business by ID (public access) - MUST be after all static routes to avoid catching them as :id
-router.route("/:id").get(getBusinessById);
+//
+// optionalVerifyJWT so the controller can tell the owner apart from everyone
+// else: the response hides bank details, Aadhaar and verification documents
+// unless the caller owns the business.
+router.route("/:id").get(optionalVerifyJWT, getBusinessById);
 
 // 📊 Business Rating Routes
 router.route("/:businessId/rate").post(verifyJWT, rateBusiness);

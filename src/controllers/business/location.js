@@ -76,6 +76,22 @@ export const toggleLiveLocation = asyncHandler(async (req, res) => {
     );
 });
 
+// Strips everything a stranger must never see off a lean Business document.
+// Mirrors stripPrivateBusinessFields in ./profile.js — this endpoint has the
+// identical leak (bank account, IFSC, UPI id, payment QR, Aadhaar number and
+// the CDN links to uploaded Aadhaar/PAN/licence scans) because it is public
+// and previously only excluded gstNumber/aadhaarNumber via .select().
+const stripPrivateBusinessFields = (business) => {
+    const publicBusiness = { ...business };
+
+    delete publicBusiness.gstNumber;
+    delete publicBusiness.aadhaarNumber;
+    delete publicBusiness.bankDetails;
+    delete publicBusiness.documents;
+
+    return publicBusiness;
+};
+
 // GET /api/v1/business/nearby?latitude=X&longitude=Y&radius=Z
 export const getNearbyBusinesses = asyncHandler(async (req, res) => {
     const { latitude, longitude, radius = 5000, category, limit = 20 } = req.query;
@@ -108,13 +124,12 @@ export const getNearbyBusinesses = asyncHandler(async (req, res) => {
     }
 
     const nearbyBusinesses = await Business.find(query)
-        .select('-gstNumber -aadhaarNumber')
         .populate('userId', 'username fullName profileImageUrl')
         .limit(parseInt(limit))
         .lean();
 
     const businessesWithDistance = await Promise.all(nearbyBusinesses.map(async (business) => {
-        let businessWithDistance = { ...business };
+        let businessWithDistance = stripPrivateBusinessFields(business);
 
         if (business.location?.coordinates?.coordinates) {
             const [businessLng, businessLat] = business.location.coordinates.coordinates;

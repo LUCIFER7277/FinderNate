@@ -3,7 +3,7 @@ import Message from '../../models/message.models.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { ApiResponse } from '../../utils/ApiResponse.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
-import { safeEmitToChat } from './helpers.js';
+import { safeEmitToChat, getBlockedParticipantIds } from './helpers.js';
 
 export const addReaction = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
@@ -220,6 +220,18 @@ export const forwardMessage = asyncHandler(async (req, res) => {
 
         if (!targetChat) {
             continue;
+        }
+
+        // Forwarding is a second way to put a message in front of someone —
+        // addMessage refuses a blocked direct chat, and this must too, or the
+        // block is one share sheet away from being bypassed. Skipped rather
+        // than thrown so forwarding to five chats does not fail wholesale
+        // because one of them is blocked.
+        if (targetChat.chatType === 'direct') {
+            const blocked = await getBlockedParticipantIds(currentUserId, targetChat.participants);
+            if (blocked.size > 0) {
+                continue;
+            }
         }
 
         const recipients = targetChat.participants.filter(

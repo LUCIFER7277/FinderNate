@@ -12,15 +12,23 @@ import { sendNotification } from '../../config/firebase-admin.config.js';
 import notificationCache from '../../utils/notificationCache.utils.js';
 import { redisClient } from '../../config/redis.config.js';
 import { calculateMessageStatus } from '../../utils/messageStatus.utils.js';
-import { safeEmitToChat } from './helpers.js';
+import { safeEmitToChat, assertNotBlockedInChat } from './helpers.js';
+
+// Ceiling on how many messages one request may pull, matching the one
+// getUserChats already applies. Without it ?limit=100000 made the server fetch,
+// populate and serialise a hundred thousand documents in a single response.
+const MAX_MESSAGE_PAGE_LIMIT = 100;
+
+// Turns user input into a literal for $regex — same helper as search.controllers.js.
+const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export const getChatMessages = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
     const { chatId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
-    const pageNum = parseInt(page) || 1;
-    const pageLimit = parseInt(limit) || 50;
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const pageLimit = Math.min(Math.max(1, parseInt(limit) || 50), MAX_MESSAGE_PAGE_LIMIT);
     const skip = (pageNum - 1) * pageLimit;
 
     const chat = await Chat.findOne({
@@ -30,6 +38,16 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
     if (!chat) {
         throw new ApiError(404, 'Chat not found or access denied');
+    }
+
+    // A blocked pair cannot READ each other's conversation either — receiving
+    // is half of "blocked users can still chat".
+    //
+    // Direct chats only: a block between two members of a GROUP hides them
+    // from each other elsewhere, but it must not shut the whole group down for
+    // everyone in it.
+    if (chat.chatType === 'direct') {
+        await assertNotBlockedInChat(currentUserId, chat.participants, 'read');
     }
 
     if (socketManager.isReady()) {
@@ -206,6 +224,14 @@ export const addMessage = asyncHandler(async (req, res) => {
         }
     } else if (chat.status === 'declined') {
         throw new ApiError(403, 'This chat request has been declined');
+    }
+
+    // Blocked in either direction: the message is refused before anything is
+    // written, uploaded or pushed. Checked here rather than only at chat
+    // creation because a conversation that predates the block is still open
+    // on both clients. Group chats are exempt — see getChatMessages.
+    if (chat.chatType === 'direct') {
+        await assertNotBlockedInChat(currentUserId, chat.participants, 'send');
     }
 
     const recipients = chat.participants.filter(
@@ -598,8 +624,8 @@ export const searchMessages = asyncHandler(async (req, res) => {
         throw new ApiError(400, 'Search query is required');
     }
 
-    const pageNum = parseInt(page) || 1;
-    const pageLimit = parseInt(limit) || 20;
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const pageLimit = Math.min(Math.max(1, parseInt(limit) || 20), MAX_MESSAGE_PAGE_LIMIT);
     const skip = (pageNum - 1) * pageLimit;
 
     const chat = await Chat.findOne({
@@ -611,23 +637,27 @@ export const searchMessages = asyncHandler(async (req, res) => {
         throw new ApiError(404, 'Chat not found or access denied');
     }
 
+    // The search term went into $regex verbatim, so the caller chose the pattern
+    // the database compiled: ordinary punctuation ("(((") threw or matched the
+    // wrong things, and a backtracking pattern like (a+)+$ pinned a CPU core
+    // against every message in the chat — twice, once for find and once for the
+    // count. Escaped, it can only ever be a literal substring match.
+    const searchPattern = escapeRegex(query.trim());
+    const searchFilter = {
+        chatId,
+        message: { $regex: searchPattern, $options: 'i' },
+        isDeleted: { $ne: true }
+    };
+
     const [searchResults, totalResults] = await Promise.all([
-        Message.find({
-            chatId,
-            message: { $regex: query, $options: 'i' },
-            isDeleted: { $ne: true }
-        })
+        Message.find(searchFilter)
             .sort({ timestamp: -1 })
             .skip(skip)
             .limit(pageLimit)
             .select('sender message messageType timestamp')
             .populate('sender', 'username fullName profileImageUrl')
             .lean(),
-        Message.countDocuments({
-            chatId,
-            message: { $regex: query, $options: 'i' },
-            isDeleted: { $ne: true }
-        })
+        Message.countDocuments(searchFilter)
     ]);
 
     return res.status(200).json(

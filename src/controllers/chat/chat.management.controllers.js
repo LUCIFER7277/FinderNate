@@ -6,7 +6,7 @@ import { asyncHandler } from '../../utils/asyncHandler.js';
 import mongoose from 'mongoose';
 import socketManager from '../../config/socket.js';
 import { redisClient } from '../../config/redis.config.js';
-import { safeEmitToChat, safeEmitToUser, checkFollowStatus } from './helpers.js';
+import { safeEmitToChat, safeEmitToUser, checkFollowStatus, assertNotBlockedInChat, getBlockedParticipantIds } from './helpers.js';
 
 export const createChat = asyncHandler(async (req, res) => {
     const currentUserId = req.user._id;
@@ -44,6 +44,13 @@ export const createChat = asyncHandler(async (req, res) => {
     }
 
     validParticipants.sort((a, b) => a.toString().localeCompare(b.toString()));
+
+    // No new (or reopened) direct conversation with someone either side has
+    // blocked. Group chats are exempt: one block between two members must not
+    // stop everyone else forming a group.
+    if (chatType === 'direct') {
+        await assertNotBlockedInChat(currentUserId, validParticipants, 'send');
+    }
 
     if (chatType === 'direct') {
         const existingChat = await Chat.findOne({
@@ -321,6 +328,13 @@ export const getUserChats = asyncHandler(async (req, res) => {
         messageCountMap[chatIdStr] = item.totalMessages;
     });
 
+    // Everyone this viewer shares a direct chat with, resolved in ONE query,
+    // so the per-chat filter below costs nothing extra.
+    const directCounterpartIds = deduplicatedChats
+        .filter(chat => chat.chatType === 'direct')
+        .flatMap(chat => chat.participants.map(p => p.toString()));
+    const blockedParticipantIds = await getBlockedParticipantIds(currentUserId, directCounterpartIds);
+
     const populatedChatsPromise = Promise.all(deduplicatedChats.map(async (chat) => {
         const chatWithUsers = await Chat.populate(chat, [
             { path: 'participants', select: 'username fullName profileImageUrl accountStatus isDeleted' },
@@ -332,6 +346,12 @@ export const getUserChats = asyncHandler(async (req, res) => {
                 p => p._id.toString() !== currentUserId.toString()
             );
             if (otherParticipant && (otherParticipant.isDeleted || otherParticipant.accountStatus !== 'active')) {
+                return null;
+            }
+            // A blocked pair's conversation is not listed on either side. Both
+            // controllers that open it now refuse, so leaving the row in the
+            // list would only offer a thread that answers 403 when tapped.
+            if (otherParticipant && blockedParticipantIds.has(otherParticipant._id.toString())) {
                 return null;
             }
         }

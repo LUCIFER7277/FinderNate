@@ -435,11 +435,48 @@ export const getCommentById = asyncHandler(async (req, res) => {
     );
 });
 
+/**
+ * Who may touch someone else's comment.
+ *
+ * Neither updateComment nor deleteComment used to check anything beyond
+ * verifyJWT, so any signed-in account could rewrite or erase any comment on the
+ * platform just by knowing its id — which the comments list hands out. Editing
+ * the text is the author's alone; removing a comment is also allowed to the
+ * owner of the post it sits on, which is the moderation power the app already
+ * offers post owners.
+ */
+const assertCommentAuthor = async (commentId, userId) => {
+    const comment = await Comment.findById(commentId).select("userId postId isDeleted");
+    if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
+
+    if (comment.userId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You can only edit your own comment");
+    }
+
+    return comment;
+};
+
+const assertCanDeleteComment = async (commentId, userId) => {
+    const comment = await Comment.findById(commentId).select("userId postId isDeleted");
+    if (!comment) throw new ApiError(404, "Comment not found");
+
+    if (comment.userId.toString() === userId.toString()) return comment;
+
+    const post = await Post.findById(comment.postId).select("userId");
+    if (post && post.userId.toString() === userId.toString()) return comment;
+
+    throw new ApiError(403, "You can only delete your own comment");
+};
+
 // Update a comment
 export const updateComment = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
     const { commentId } = req.params;
     const { content } = req.body;
     if (!content) throw new ApiError(400, "content is required");
+
+    await assertCommentAuthor(commentId, userId);
+
     const comment = await Comment.findByIdAndUpdate(
         commentId,
         { content, isEdited: true },
@@ -458,11 +495,12 @@ export const updateComment = asyncHandler(async (req, res) => {
 
 // Delete a comment (soft delete)
 export const deleteComment = asyncHandler(async (req, res) => {
+    const userId = req.user._id;
     const { commentId } = req.params;
     // Read first so an already-deleted comment cannot decrement the count twice
     // (this is a soft delete, so the document survives and can be re-submitted).
-    const existing = await Comment.findById(commentId).select("postId isDeleted");
-    if (!existing) throw new ApiError(404, "Comment not found");
+    // The same read also proves the caller is allowed to delete it.
+    const existing = await assertCanDeleteComment(commentId, userId);
 
     const comment = await Comment.findByIdAndUpdate(
         commentId,

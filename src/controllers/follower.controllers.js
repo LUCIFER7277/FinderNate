@@ -9,7 +9,7 @@ import { redisClient, RedisKeys, RedisTTL, FOLLOW_LIST_MAX } from "../config/red
 
 const LIST_TTL = RedisTTL.FOLLOW_LIST;
 import { addBadgesToUsers } from "../utils/userBadge.utils.js";
-import { invalidateViewableUsersCache } from "../middlewares/privacy.middleware.js";
+import { invalidateViewableUsersCache, checkContentVisibility } from "../middlewares/privacy.middleware.js";
 import socketManager from "../config/socket.js";
 import {
     getFollowStatus,
@@ -221,11 +221,46 @@ catch(error){
 }
 });
 
+/**
+ * A private account's social graph is part of what "private" promises.
+ *
+ * Both list endpoints used to take :userId straight from the params and return
+ * the page, so any signed-in account could read the followers and following of
+ * a private profile it had been refused — and of one that had blocked it —
+ * even while GET /users/profile/other was telling the same caller the account
+ * is private. checkContentVisibility covers all three questions: blocking in
+ * either direction, the target's privacy flag, and whether the viewer is an
+ * approved follower.
+ */
+const assertFollowListVisible = async (viewerId, targetUserId) => {
+    if (viewerId?.toString() === targetUserId?.toString()) return;
+
+    const canView = await checkContentVisibility(viewerId, targetUserId);
+    if (!canView) {
+        throw new ApiError(403, "This account is private");
+    }
+
+    // isFullPrivate is written alongside privacy by toggleFullPrivateAccount,
+    // but checkContentVisibility only reads privacy — honour both.
+    const target = await User.findById(targetUserId).select('isFullPrivate').lean();
+    if (target?.isFullPrivate) {
+        const isApprovedFollower = await Follower.exists({
+            userId: targetUserId,
+            followerId: viewerId
+        });
+        if (!isApprovedFollower) {
+            throw new ApiError(403, "This account is private");
+        }
+    }
+};
+
 // Get followers of a user (Redis-first, paginated)
 export const getFollowers = asyncHandler(async (req, res) => {
     const { userId } = req.params;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+
+    await assertFollowListVisible(req.user?._id, userId);
 
     // ── Total count ───────────────────────────────────────────────────────────
     const totalCount = await getFollowersCount(userId);
@@ -323,6 +358,8 @@ export const getFollowing = asyncHandler(async (req, res) => {
     const { userId } = req.params;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+
+    await assertFollowListVisible(req.user?._id, userId);
 
     // ── Total count ───────────────────────────────────────────────────────────
     const totalCount = await getFollowingCount(userId);

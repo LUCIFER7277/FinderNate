@@ -234,17 +234,40 @@ export const getBusinessProfile = asyncHandler(async (req, res) => {
     );
 });
 
+// Strips everything a stranger must never see off a lean Business document.
+//
+// This endpoint is public (no token required) and used to return the whole
+// document minus gstNumber, which meant the seller's bank account number,
+// IFSC, UPI id, payment QR, Aadhaar number and the CDN links to their uploaded
+// Aadhaar/PAN/licence scans were readable by anyone who knew the business id —
+// and the id is handed out by GET /users/profile/other. Only the owner (and the
+// admin panel, which has its own /admin/businesses/:businessId/details route)
+// may see them.
+const stripPrivateBusinessFields = (business) => {
+    const publicBusiness = { ...business };
+
+    delete publicBusiness.gstNumber;
+    delete publicBusiness.aadhaarNumber;
+    delete publicBusiness.bankDetails;
+    delete publicBusiness.documents;
+
+    return publicBusiness;
+};
+
 // GET /api/v1/business/:id
 export const getBusinessById = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
-    const business = await Business.findById(id)
-        .select("-gstNumber")
-        .lean();
+    const business = await Business.findById(id).lean();
 
     if (!business) {
         throw new ApiError(404, "Business profile not found");
     }
+
+    const isOwner = !!req.user?._id &&
+        business.userId?.toString() === req.user._id.toString();
+
+    const visibleBusiness = isOwner ? business : stripPrivateBusinessFields(business);
 
     const owner = await User.findById(business.userId)
         .select("username avatar fullName")
@@ -278,7 +301,7 @@ export const getBusinessById = asyncHandler(async (req, res) => {
     return res.status(200).json(
         new ApiResponse(200, {
             business: {
-                ...business,
+                ...visibleBusiness,
                 rating: ratingInfo.averageRating,
                 totalRatings: ratingInfo.totalRatings
             },
