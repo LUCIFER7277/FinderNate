@@ -26,7 +26,9 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
         lastUpdated: wallet.lastUpdated
     };
 
-    const pendingOrders = await Order.countDocuments({ paymentStatus: 'held' });
+    // Store orders sit at 'paid' rather than 'held' but are equally awaiting a
+    // manual payout, so they belong in this count.
+    const pendingOrders = await Order.countDocuments({ paymentStatus: { $in: ['held', 'paid'] } });
     const disputedOrders = await Order.countDocuments({ orderStatus: 'disputed' });
     const rejectedOrders = await Order.countDocuments({ orderStatus: 'seller_rejected' });
     const completedOrders = await Order.countDocuments({ paymentStatus: 'released' });
@@ -46,27 +48,37 @@ export const getEscrowDashboard = asyncHandler(async (req, res) => {
 
 // Get escrow transactions (Admin only)
 export const getEscrowTransactions = asyncHandler(async (req, res) => {
-    const { page = 1, limit = 50, type } = req.query;
+    const { type } = req.query;
+    const page  = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const skip  = (page - 1) * limit;
 
-    const wallet = await EscrowWallet.getWallet();
+    // The ledger lives in one document's array, so filtering, sorting and
+    // slicing are pushed into MongoDB. Loading the whole array into Node and
+    // sorting it there took seconds once the wallet had grown, and it ran on
+    // every page view.
+    const [result] = await EscrowWallet.aggregate([
+        { $match: { isSystemWallet: true } },
+        { $project: { transactions: 1 } },
+        { $unwind: '$transactions' },
+        ...(type ? [{ $match: { 'transactions.type': type } }] : []),
+        { $sort: { 'transactions.createdAt': -1 } },
+        {
+            $facet: {
+                rows:  [{ $skip: skip }, { $limit: limit }, { $replaceRoot: { newRoot: '$transactions' } }],
+                count: [{ $count: 'total' }]
+            }
+        }
+    ]);
 
-    let transactions = wallet.transactions;
-
-    if (type) {
-        transactions = transactions.filter(t => t.type === type);
-    }
-
-    transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    const total = transactions.length;
-    const start = (page - 1) * limit;
-    const paginatedTransactions = transactions.slice(start, start + parseInt(limit));
+    const transactions = result?.rows || [];
+    const total = result?.count?.[0]?.total || 0;
 
     return res.status(200).json(
         new ApiResponse(200, {
-            transactions: paginatedTransactions,
+            transactions,
             total,
-            page: parseInt(page),
+            page,
             totalPages: Math.ceil(total / limit)
         }, "Escrow transactions fetched")
     );
@@ -293,7 +305,7 @@ export const resolveDispute = asyncHandler(async (req, res) => {
             if (action === 'refund_buyer') {
                 if (!insufficientBalance) {
                     // Fetch wallet inside transaction for a consistent view
-                    const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+                    const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).select('-transactions').session(session);
 
                     if (feeBreakdown.buyerRefund > 0) {
                         await wallet.refundFunds(
@@ -323,7 +335,7 @@ export const resolveDispute = asyncHandler(async (req, res) => {
 
             } else {
                 // release_seller
-                const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+                const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).select('-transactions').session(session);
                 await wallet.releaseFunds(
                     order,
                     order.amount,
@@ -359,6 +371,11 @@ export const resolveDispute = asyncHandler(async (req, res) => {
     );
 });
 
+// Statuses whose money is sitting in escrow and can still be moved.
+// Online-store orders land on 'paid' rather than 'held', and were previously
+// unreleasable and unrefundable through the admin panel because of it.
+const RELEASABLE_PAYMENT_STATUSES = ['held', 'paid'];
+
 // Manual release payment (Admin only)
 export const manualReleasePayment = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
@@ -371,7 +388,7 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Order not found");
     }
 
-    if (order.paymentStatus !== 'held') {
+    if (!RELEASABLE_PAYMENT_STATUSES.includes(order.paymentStatus)) {
         throw new ApiError(400, "Payment is not in held status");
     }
 
@@ -393,18 +410,54 @@ export const manualReleasePayment = asyncHandler(async (req, res) => {
         }
     }
 
-    const escrowWallet = await EscrowWallet.getWallet();
-    // No platform fee - release full amount to seller
-    await escrowWallet.releaseFunds(order, order.amount, 0, `Manual release by admin: ${reason || 'Admin action'}`);
+    // ── Atomic claim + release ────────────────────────────────────────────────
+    // The status check above is only a fast fail. The real guard is the
+    // compare-and-set below: a double-clicked Release used to pass the
+    // read-only check twice and debit the escrow ledger twice, leaving the
+    // payout worklist showing double what the seller was owed.
+    const session = await mongoose.startSession();
+    let releasedOrder;
+    try {
+        await session.withTransaction(async () => {
+            const claimed = await Order.findOneAndUpdate(
+                { _id: order._id, paymentStatus: { $in: RELEASABLE_PAYMENT_STATUSES } },
+                {
+                    $set: {
+                        paymentStatus: 'released',
+                        orderStatus: 'confirmed',
+                        paymentReleasedAt: new Date()
+                    }
+                },
+                { new: true, session }
+            );
 
-    order.paymentStatus = 'released';
-    order.orderStatus = 'confirmed';
-    order.paymentReleasedAt = new Date();
-    await order.save();
+            if (!claimed) {
+                throw new ApiError(400, "Payment is not in held status");
+            }
+
+            const wallet = await EscrowWallet.findOne({ isSystemWallet: true })
+                .select('-transactions')
+                .session(session);
+
+            if (!wallet) {
+                throw new ApiError(400, "Escrow wallet has not been initialised - no funds are recorded as held");
+            }
+
+            // No platform fee - release full amount to seller
+            await wallet.releaseFunds(claimed, claimed.amount, 0, `Manual release by admin: ${reason || 'Admin action'}`, { session });
+
+            releasedOrder = claimed;
+        });
+    } finally {
+        await session.endSession();
+    }
+
+    const populatedOrder = await Order.findById(releasedOrder._id)
+        .populate('sellerId', 'fullName username profileImageUrl businessProfileId');
 
     return res.status(200).json(
         new ApiResponse(200, {
-            order,
+            order: populatedOrder,
             sellerBankDetails
         }, "Payment released manually")
     );
@@ -418,7 +471,7 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
 
-    if (order.paymentStatus !== 'held') {
+    if (!RELEASABLE_PAYMENT_STATUSES.includes(order.paymentStatus)) {
         throw new ApiError(400, "Payment is not in held status");
     }
 
@@ -484,41 +537,58 @@ export const manualRefundPayment = asyncHandler(async (req, res) => {
     const session = await mongoose.startSession();
     try {
         await session.withTransaction(async () => {
-            const wallet = await EscrowWallet.findOne({ isSystemWallet: true }).session(session);
+            // Compare-and-set: a concurrent release/refund must not be able to
+            // move the same escrowed funds twice.
+            const claimed = await Order.findOneAndUpdate(
+                { _id: order._id, paymentStatus: { $in: RELEASABLE_PAYMENT_STATUSES } },
+                {
+                    $set: {
+                        refundId,
+                        paymentStatus: 'refunded',
+                        orderStatus: 'refunded',
+                        platformFee: feeBreakdown.finerateEarnings,
+                        sellerAmount: feeBreakdown.sellerSettlement
+                    }
+                },
+                { new: true, session }
+            );
+
+            if (!claimed) {
+                throw new ApiError(409, "Order payment status changed - refund already processed");
+            }
+
+            const wallet = await EscrowWallet.findOne({ isSystemWallet: true })
+                .select('-transactions')
+                .session(session);
 
             if (feeBreakdown.buyerRefund > 0) {
                 await wallet.refundFunds(
-                    order,
+                    claimed,
                     feeBreakdown.buyerRefund,
                     `Manual refund: ${reason || 'Admin action'} - Order ${order.orderNumber}`,
                     { session }
                 );
             }
 
-            const remaining = order.amount - feeBreakdown.buyerRefund;
+            const remaining = claimed.amount - feeBreakdown.buyerRefund;
             if (remaining > 0) {
                 await wallet.releaseFunds(
-                    order,
+                    claimed,
                     remaining,
                     feeBreakdown.finerateEarnings,
                     `Fees & shipping settlement - Order ${order.orderNumber}`,
                     { session }
                 );
             }
-
-            order.refundId = refundId;
-            order.paymentStatus = 'refunded';
-            order.orderStatus = 'refunded';
-            order.platformFee = feeBreakdown.finerateEarnings;
-            order.sellerAmount = feeBreakdown.sellerSettlement;
-            await order.save({ session });
         });
     } finally {
         await session.endSession();
     }
 
+    const refundedOrder = await Order.findById(order._id);
+
     return res.status(200).json(
-        new ApiResponse(200, { order, feeBreakdown, refundStatus }, "Payment refunded manually")
+        new ApiResponse(200, { order: refundedOrder, feeBreakdown, refundStatus }, "Payment refunded manually")
     );
 });
 
