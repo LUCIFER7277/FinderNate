@@ -4,8 +4,21 @@ import {
     getCashfreeOrderStatus,
     getCashfreePayments,
     buildCashfreeCheckoutUrl,
-    verifyCashfreeWebhook,
 } from "../config/cashfree.config.js";
+import { requireCashfreeWebhookSignature } from "../utils/cashfreeWebhook.utils.js";
+import { assertTransactionBelongsToOrder } from "../utils/paymentVerification.utils.js";
+// Guest checkout is shared with the online-store checkout
+// (cashfree.payment.controller.js) — one implementation of account creation and
+// of the auto-refund, never two. See utils/guestCheckout.utils.js.
+import {
+    assertCompleteShippingAddress,
+    assertGuestBuyerDetails,
+    assertGuestEmailUnclaimed,
+    recordGuestConsent,
+    GUEST_CONSENT_SOURCE,
+    settleGuestOrder,
+    describeGuestAccount,
+} from "../utils/guestCheckout.utils.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
@@ -17,7 +30,6 @@ import { User } from "../models/user.models.js";
 import Chat from "../models/chat.models.js";
 import Message from "../models/message.models.js";
 import socketManager from "../config/socket.js";
-import mongoose from "mongoose";
 
 // Always use configured FRONTEND_URL for payment links (never use request origin)
 const getFrontendUrl = () => {
@@ -39,6 +51,193 @@ const generateOrderNumber = () => {
 const generateLinkId = () => {
     return `fnpay_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 10)}`;
 };
+
+// How long a Cashfree checkout session stays payable.
+const CF_SESSION_MINUTES = 20;
+// A 'pending' order is only abandoned well after its session died — until then
+// the buyer may still be approving the payment in their UPI app.
+const PENDING_ABANDONED_MINUTES = CF_SESSION_MINUTES * 3;
+
+const round2 = (value) => parseFloat(Number(value).toFixed(2));
+
+// ── Server-authoritative pricing ─────────────────────────────────────────────
+// The amount charged for a post is ALWAYS derived from the post document. A
+// price arriving in a request body or a URL segment (/post/:postId/pay/:amount)
+// is only ever a display hint to cross-check — never the figure we bill.
+const resolvePostPricing = (post) => {
+    let basePrice       = 0;
+    let shippingCharges = 0;
+    let gstPercent      = 0;
+
+    if (post.customization?.product) {
+        const p = post.customization.product;
+        basePrice       = Number(p.price)           || 0;
+        shippingCharges = Number(p.shippingCharges) || 0;
+        gstPercent      = Number(p.gstPercent)      || 0;
+    } else if (post.customization?.service) {
+        const s = post.customization.service;
+        basePrice       = Number(s.price) || 0;
+        // additionalCharges is the primary extra-fee field for services
+        shippingCharges = (Number(s.additionalCharges) || 0) + (Number(s.shippingCharges) || 0);
+        gstPercent      = Number(s.gstPercent) || 0;
+    }
+
+    const gstAmount  = round2((basePrice * gstPercent) / 100);
+    const totalPrice = round2(basePrice + shippingCharges + gstAmount);
+    // The online-store checkout waives shipping at ≥ ₹499, so a link minted by
+    // that flow carries a different — but equally server-computed — total.
+    const storeTotalPrice = round2(basePrice + (basePrice >= 499 ? 0 : shippingCharges) + gstAmount);
+
+    return { basePrice, shippingCharges, gstPercent, gstAmount, totalPrice, storeTotalPrice };
+};
+
+// ── Which total is legitimate depends on WHICH FLOW is asking ────────────────
+// Two flows mint links for the same post and they charge differently: the
+// online store waives shipping at ≥ ₹499, the shareable payment link never
+// does. Accepting either total everywhere meant a shareable-link buyer could
+// simply submit the store total and skip the shipping charge — both figures are
+// server-computed, so it was never a payment bypass, but it was a standing
+// revenue leak for every product priced at ₹499 or more.
+//
+// So the caller now says which flow it is, and the amount is validated against
+// THAT flow's own total:
+//   PRICING_FLOW.SHAREABLE_LINK — createShareablePhonePeOrder. Charges the full
+//       total including shipping. This is the money path for this file.
+//   PRICING_FLOW.ONLINE_STORE   — the store's own total (shipping waived at
+//       ≥ ₹499). The store checkout itself lives in
+//       cashfree.payment.controller.js and computes this figure directly; the
+//       constant exists so anything in this file that has to speak for that
+//       flow validates against the right number.
+//   PRICING_FLOW.ANY_LINK       — READ-ONLY quotes for a stored link. A
+//       PaymentLink can have been minted by either flow (both write
+//       /post/:postId/pay/:amount as their paymentUrl), so a display endpoint
+//       must recognise both totals or it would 400 on a perfectly valid store
+//       link. Never use this to decide what to charge.
+export const PRICING_FLOW = {
+    SHAREABLE_LINK: 'shareable_link',
+    ONLINE_STORE:   'online_store',
+    ANY_LINK:       'any_link',
+};
+
+// ── Which flow does a STORED link speak for? ─────────────────────────────────
+// A /post/:postId/pay/:amount URL does not say who minted it, and the two flows
+// mint it at different figures. Hard-coding SHAREABLE_LINK on the pay path made
+// every store-minted link permanently unpayable: the store writes its own
+// (shipping-waived) total into the URL, the pay endpoint accepted only the
+// non-waived one, and "please reload" reloaded to the very same number.
+//
+// So the flow is resolved from the PaymentLink the URL belongs to instead of
+// being assumed. This is NOT "accept both totals everywhere" — the store total
+// is accepted only where a link minted by the store actually exists at exactly
+// that figure, which is precisely a product the store itself sells at that
+// price. A shareable link with no store counterpart still accepts nothing but
+// the full total, so the revenue leak the previous pass closed stays closed.
+const resolveLinkPricingFlow = (link, pricing) => {
+    if (link?.pricingFlow === PRICING_FLOW.ONLINE_STORE)   return PRICING_FLOW.ONLINE_STORE;
+    if (link?.pricingFlow === PRICING_FLOW.SHAREABLE_LINK) return PRICING_FLOW.SHAREABLE_LINK;
+
+    // Minted before pricingFlow was recorded: infer from the figure it carries.
+    // Only conclusive when the two totals differ — when they are equal (no
+    // shipping charge, or a base price under the ₹499 waiver threshold) both
+    // flows accept the same number and the answer does not matter.
+    const amount = Number(link?.amount);
+    if (
+        Number.isFinite(amount) &&
+        Math.abs(amount - pricing.storeTotalPrice) < 0.01 &&
+        Math.abs(amount - pricing.totalPrice) >= 0.01
+    ) {
+        return PRICING_FLOW.ONLINE_STORE;
+    }
+
+    return PRICING_FLOW.SHAREABLE_LINK;
+};
+
+// Looks up the link a /post/:postId/pay/:amount URL refers to, purely to answer
+// "which flow minted this figure".
+//
+// DELIBERATELY IGNORES link.status. A link goes to 'paid' the moment somebody
+// completes a purchase through it, and who minted it does not change when that
+// happens — filtering on 'active' here would make a store link start failing
+// again as soon as its first sale went through.
+const resolvePricingFlowForLink = async (postId, linkAmount, pricing) => {
+    if (!Number.isFinite(linkAmount) || linkAmount <= 0) return PRICING_FLOW.SHAREABLE_LINK;
+
+    const link = await PaymentLink.findOne({ postId, amount: linkAmount, isShareableLink: true })
+        .select('pricingFlow amount')
+        .sort({ createdAt: -1 });
+
+    return resolveLinkPricingFlow(link, pricing);
+};
+
+const acceptedTotalsFor = (pricing, flow) => {
+    switch (flow) {
+        case PRICING_FLOW.ONLINE_STORE:   return [pricing.storeTotalPrice];
+        case PRICING_FLOW.ANY_LINK:       return [pricing.totalPrice, pricing.storeTotalPrice];
+        case PRICING_FLOW.SHAREABLE_LINK: return [pricing.totalPrice];
+        default:
+            // A missing/unknown flow must never silently fall back to "accept
+            // anything the server can compute" — that is the leak this fixes.
+            throw new ApiError(500, "Pricing flow not specified");
+    }
+};
+
+// Resolves what the buyer must actually pay for `post`. `requestedAmount` (from
+// the client) is validated against the server figures for `flow` and rejected
+// on mismatch, so editing the amount in the URL or the request body buys
+// nothing.
+const resolveChargeableAmount = (post, requestedAmount, flow) => {
+    const pricing = resolvePostPricing(post);
+
+    if (pricing.basePrice <= 0) {
+        throw new ApiError(400, "This item does not have a valid price set");
+    }
+
+    const requested = Number(requestedAmount);
+    if (!Number.isFinite(requested) || requested <= 0) {
+        throw new ApiError(400, "Invalid amount");
+    }
+
+    const accepted = acceptedTotalsFor(pricing, flow);
+    const matched = accepted.find(candidate => Math.abs(candidate - requested) < 0.01);
+
+    if (matched === undefined) {
+        throw new ApiError(400,
+            `Price mismatch: this item costs ₹${accepted[0]}. Please reload the page and try again.`
+        );
+    }
+
+    return { ...pricing, amount: matched };
+};
+
+// Retires pending orders whose Cashfree session provably expired. Never deletes
+// them: a pending order can have money against it that the webhook still needs
+// to reconcile by cashfreeOrderId.
+const retireAbandonedPendingOrders = async (filter) => {
+    await Order.updateMany(
+        {
+            ...filter,
+            paymentStatus: 'pending',
+            createdAt: { $lt: new Date(Date.now() - PENDING_ABANDONED_MINUTES * 60 * 1000) }
+        },
+        { $set: { paymentStatus: 'failed', orderStatus: 'cancelled' } }
+    );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GUEST CHECKOUT
+//
+// Everything that turns a paid guest order into an owned one — the validators,
+// the consent record, account creation, the automatic refund when the email
+// stopped being free mid-payment, and the summary the success page renders —
+// now lives in utils/guestCheckout.utils.js.
+//
+// It moved because the ONLINE STORE checkout (cashfree.payment.controller.js)
+// settles guest orders too and had none of it: those orders reached
+// paymentStatus 'paid' with buyerId:null and stayed ownerless. Both flows run
+// the same pipeline now, and a shared module is the only way that stays true —
+// a second copy of "who owns this money" is how one of them silently stops
+// matching reality.
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Seller creates payment link to send in chat
 export const createPaymentLink = asyncHandler(async (req, res) => {
@@ -138,16 +337,16 @@ export const createPhonePeOrder = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Payment link not found or expired");
     }
 
-    // --- IDEMPOTENCY: block if already paid, delete stale pending on retry ---
+    // --- IDEMPOTENCY: block if already paid, retire stale pending on retry ---
+    // A pending order is never deleted — its Cashfree session may still be live
+    // and the webhook needs it to exist to record the payment.
     if (paymentLink.orderId) {
         const existingOrder = await Order.findById(paymentLink.orderId);
         if (existingOrder?.paymentStatus === 'held' || existingOrder?.paymentStatus === 'released') {
             throw new ApiError(400, "Payment for this link has already been completed");
         }
         if (existingOrder?.paymentStatus === 'pending') {
-            await Order.findByIdAndDelete(existingOrder._id);
-            paymentLink.orderId = null;
-            await paymentLink.save();
+            await retireAbandonedPendingOrders({ _id: existingOrder._id });
         }
     }
 
@@ -239,16 +438,32 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 
     // --- IDEMPOTENCY GUARD: already verified (by this endpoint or webhook) ---
     if (order.paymentStatus === 'held' || order.paymentStatus === 'released') {
+        // The payment is confirmed, so a guest order still missing its buyer
+        // gets one here — this call is what heals the case where the webhook
+        // marked the order paid but the account creation did not run or failed.
+        // No-op once buyerId is set.
+        //
+        // The escrow hold is already in place on this branch (the execution that
+        // banked the payment wrote it), so a refund can go straight out.
+        const settled = await settleGuestOrder(order);
+        // Read the account state back rather than relying on this call having
+        // been the one that created it: on the common webhook-races-verify
+        // ordering the account was created by the other execution, and the
+        // buyer still has to be told about it.
+        const guest = await describeGuestAccount(order);
+        // Re-read after an auto-refund: `order` was loaded before it ran.
+        const shown = settled.orphaned ? (await Order.findById(order._id)) || order : order;
         return res.status(200).json(
             new ApiResponse(200, {
                 order: {
-                    _id: order._id,
-                    orderNumber: order.orderNumber,
-                    orderStatus: order.orderStatus,
-                    paymentStatus: toUserPaymentStatus(order.paymentStatus),
-                    amount: order.amount,
-                    productDetails: order.productDetails
-                }
+                    _id: shown._id,
+                    orderNumber: shown.orderNumber,
+                    orderStatus: shown.orderStatus,
+                    paymentStatus: toUserPaymentStatus(shown.paymentStatus),
+                    amount: shown.amount,
+                    productDetails: shown.productDetails
+                },
+                ...guest
             }, "Payment already verified")
         );
     }
@@ -276,6 +491,20 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Failed to fetch order status from Cashfree");
     }
 
+    // --- Bind the transaction to THIS order before believing anything it says ---
+    //
+    // This route is public and the transaction id arrives in the request body,
+    // so without these two checks any anonymous caller could quote a real PAID
+    // transaction of their own (a genuine ₹1 purchase, reusable forever) against
+    // somebody else's pending order and settle it: the order flips to 'held',
+    // the escrow ledger is credited order.amount that no money backs, and the
+    // seller is told to ship. One cheap payment would settle orders of any value.
+    //
+    // assertTransactionBelongsToOrder throws before any state change. The legitimate
+    // path is unaffected: order.cashfreeOrderId is written at order creation and the
+    // Cashfree return URL carries that same id back as txnId, so they always agree.
+    assertTransactionBelongsToOrder(cfOrder, order);
+
     if (cfOrder?.order_status !== 'PAID') {
         order.paymentStatus = 'failed';
         order.orderStatus = 'payment_pending';
@@ -291,10 +520,13 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     } catch { /* non-critical */ }
 
     // --- Atomic guard: only one of verifyPayment / webhook wins ---
+    // cashfreeOrderId is deliberately NOT written here. It is set once at order
+    // creation and is the value we just validated against; rewriting it from a
+    // request body would let a caller re-aim the order (and the automated refund
+    // that reads this field) at a transaction of their choosing.
     const updated = await Order.findOneAndUpdate(
         { _id: order._id, paymentStatus: 'pending' },
         {
-            cashfreeOrderId,
             cashfreePaymentId: cfPaymentId,
             paymentStatus: 'held',
             orderStatus: 'payment_received'
@@ -303,18 +535,24 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     );
 
     if (!updated) {
-        // Webhook already processed it — re-fetch and return
+        // Webhook already processed it — re-fetch and return. The webhook also
+        // wrote the escrow hold, so an auto-refund can run immediately.
         const refreshed = await Order.findById(order._id);
+        const settled = await settleGuestOrder(refreshed);
+        const guest = await describeGuestAccount(refreshed);
+        // Re-read after an auto-refund: `refreshed` predates it.
+        const shown = settled.orphaned ? (await Order.findById(refreshed._id)) || refreshed : refreshed;
         return res.status(200).json(
             new ApiResponse(200, {
                 order: {
-                    _id: refreshed._id,
-                    orderNumber: refreshed.orderNumber,
-                    orderStatus: refreshed.orderStatus,
-                    paymentStatus: toUserPaymentStatus(refreshed.paymentStatus),
-                    amount: refreshed.amount,
-                    productDetails: refreshed.productDetails
-                }
+                    _id: shown._id,
+                    orderNumber: shown.orderNumber,
+                    orderStatus: shown.orderStatus,
+                    paymentStatus: toUserPaymentStatus(shown.paymentStatus),
+                    amount: shown.amount,
+                    productDetails: shown.productDetails
+                },
+                ...guest
             }, "Payment verified")
         );
     }
@@ -323,19 +561,41 @@ export const verifyPayment = asyncHandler(async (req, res) => {
         order.paymentLinkId,
         { status: 'paid', paidAt: new Date() }
     );
-    const escrowWallet = await EscrowWallet.getWallet();
-    await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
+
+    // Payment is CONFIRMED — create the guest's account now (never at order
+    // creation), attach it, send the "set your password" claim, and auto-refund
+    // the rare order that cannot be given a buyer.
+    //
+    // settleGuestOrder owns the ORDERING, which is not interchangeable: the
+    // back-fill runs BEFORE the escrow hold (the ledger row copies
+    // `order.buyerId` at write time, so holding first stamped every guest
+    // order's hold with buyerId:null), and the refund runs AFTER it (it unwinds
+    // the very entry the hold just made). The store checkout runs the identical
+    // sequence with its own escrow write — see guestCheckout.utils.js.
+    const settled = await settleGuestOrder(updated, async () => {
+        const escrowWallet = await EscrowWallet.getWallet();
+        await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
+    });
+
+    const guest = await describeGuestAccount(updated);
+
+    // An auto-refund just moved this order to refunded/refunded, so the
+    // in-memory snapshot taken before it is stale — report what the database
+    // says, or the page tells the buyer their payment succeeded while the money
+    // is on its way back.
+    const shown = settled.orphaned ? (await Order.findById(updated._id)) || updated : updated;
 
     return res.status(200).json(
         new ApiResponse(200, {
             order: {
-                _id: updated._id,
-                orderNumber: updated.orderNumber,
-                orderStatus: updated.orderStatus,
-                paymentStatus: toUserPaymentStatus(updated.paymentStatus),
-                amount: updated.amount,
-                productDetails: updated.productDetails
-            }
+                _id: shown._id,
+                orderNumber: shown.orderNumber,
+                orderStatus: shown.orderStatus,
+                paymentStatus: toUserPaymentStatus(shown.paymentStatus),
+                amount: shown.amount,
+                productDetails: shown.productDetails
+            },
+            ...guest
         }, "Payment verified")
     );
 });
@@ -346,17 +606,8 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 // Same format as /cashfree/webhook but sets paymentStatus:'held' + escrow hold.
 // ─────────────────────────────────────────────────────────────────────────────
 export const phonePeWebhook = asyncHandler(async (req, res) => {
-    const timestamp = req.headers['x-webhook-timestamp'] || '';
-    const signature = req.headers['x-webhook-signature'] || '';
-    const rawBody   = req.rawBody || JSON.stringify(req.body);
-
-    if (timestamp && signature) {
-        const isValid = verifyCashfreeWebhook(timestamp, signature, rawBody);
-        if (!isValid) {
-            console.error('[Cashfree chat webhook] Invalid signature');
-            return res.status(200).json({ status: 'ok' });
-        }
-    }
+    // Signature is mandatory — it is the only authentication this route has.
+    if (!requireCashfreeWebhookSignature(req, res, '[Cashfree chat webhook]')) return;
 
     const payload       = req.body;
     const cfOrderId     = payload?.data?.order?.order_id;
@@ -369,7 +620,16 @@ export const phonePeWebhook = asyncHandler(async (req, res) => {
     }
 
     const order = await Order.findOne({ cashfreeOrderId: cfOrderId });
-    if (!order || order.paymentStatus !== 'pending') {
+    if (!order) {
+        return res.status(200).json({ status: 'ok' });
+    }
+
+    if (order.paymentStatus !== 'pending') {
+        // A repeat delivery of a webhook we have already banked. Still worth a
+        // pass at the guest back-fill: it is a no-op once buyerId is set, and it
+        // is the retry for a first delivery whose account creation failed.
+        // The hold is already written on this branch, so a refund can go out.
+        await settleGuestOrder(order);
         return res.status(200).json({ status: 'ok' });
     }
 
@@ -388,8 +648,14 @@ export const phonePeWebhook = asyncHandler(async (req, res) => {
             order.paymentLinkId,
             { status: 'paid', paidAt: new Date() }
         );
-        const escrowWallet = await EscrowWallet.getWallet();
-        await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
+        // Confirmed payment — this is the other place a shareable order becomes
+        // paid, and it may run before, after, or alongside verifyPayment. The
+        // pipeline is safe in every ordering (back-fill before the hold, refund
+        // after it — see settleGuestOrder).
+        await settleGuestOrder(updated, async () => {
+            const escrowWallet = await EscrowWallet.getWallet();
+            await escrowWallet.holdFunds(updated, updated.amount, `Payment for order ${updated.orderNumber}`);
+        });
     }
 
     return res.status(200).json({ status: 'ok' });
@@ -508,12 +774,6 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
 export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
     const { postId, amount } = req.params;
 
-    // Validate amount
-    const numericAmount = Number(amount);
-    if (isNaN(numericAmount) || numericAmount <= 0) {
-        throw new ApiError(400, "Invalid amount");
-    }
-
     // Find the post
     const post = await Post.findById(postId);
     if (!post) {
@@ -531,6 +791,28 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
     if (!seller.isBusinessProfile) {
         throw new ApiError(400, "This post is not from a business account");
     }
+
+    // The :amount path segment is NOT the price — it is only cross-checked
+    // against the post. Editing it in the address bar used to render the real
+    // product beside whatever figure the visitor typed.
+    //
+    // ANY_LINK, not SHAREABLE_LINK, for the CROSS-CHECK: this URL is the
+    // paymentUrl of a link that either flow may have minted (the online store
+    // writes /post/:postId/pay/<its own total> too), so refusing the store's
+    // figure here would 404-by-price a perfectly valid link.
+    const pricing = resolveChargeableAmount(post, amount, PRICING_FLOW.ANY_LINK);
+
+    // The stored link record is keyed on the figure that is IN the URL.
+    const linkAmount = pricing.amount;
+
+    // ...and the QUOTE must be the total that createShareablePhonePeOrder will
+    // accept for THIS link, which depends on which checkout minted it. Quoting a
+    // figure the pay endpoint rejects produced a page whose Pay button could
+    // only ever answer "price mismatch … please reload" — and reloading produced
+    // the same number again. The website renders a "price updated" notice when
+    // the quote differs from the URL, so a correction here is visible.
+    const linkFlow = await resolvePricingFlowForLink(postId, linkAmount, pricing);
+    const numericAmount = acceptedTotalsFor(pricing, linkFlow)[0];
 
     // Build product details
     let productDetails = {
@@ -561,7 +843,7 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
     // Find if there's an existing payment link for this post/amount combination
     let paymentLink = await PaymentLink.findOne({
         postId,
-        amount: numericAmount,
+        amount: linkAmount,
         status: 'active',
         isShareableLink: true
     });
@@ -572,6 +854,16 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
         new ApiResponse(200, {
             postId,
             amount: numericAmount,
+            // Server-resolved breakdown so the page shows exactly what will be
+            // charged instead of recomputing tax/shipping with its own defaults.
+            priceBreakdown: {
+                basePrice:       pricing.basePrice,
+                shippingCharges: round2(numericAmount - pricing.basePrice - pricing.gstAmount),
+                gstPercent:      pricing.gstPercent,
+                gstAmount:       pricing.gstAmount,
+                totalPrice:      numericAmount,
+                currency:        'INR'
+            },
             productDetails,
             post: {
                 _id: post._id,
@@ -658,9 +950,29 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
         }
     }
 
-    const basePrice = paymentLink.amount;
-    const gstAmount = Number(((basePrice * gstPercent) / 100).toFixed(2));
-    const totalPrice = basePrice + shippingCharges + gstAmount;
+    // ── Price breakdown must match what create-order will actually charge ─────
+    // paymentLink.amount is already a TOTAL for links minted by the checkout
+    // flows, so treating it as a base price and adding shipping + GST on top
+    // quoted the buyer more than the order endpoint computes. Derive the whole
+    // breakdown from the post instead.
+    const linkPricing = resolvePostPricing(post);
+    const basePrice   = linkPricing.basePrice;
+    const gstAmount   = linkPricing.gstAmount;
+    gstPercent        = linkPricing.gstPercent;
+
+    // The total THIS link's own flow charges — not the link's stored figure and
+    // not ANY_LINK. This page pays through createShareablePhonePeOrder, which
+    // accepts exactly one total per flow, so quoting a seller's arbitrary custom
+    // amount (or the wrong flow's total) produced a page whose Pay button could
+    // only ever answer "price mismatch". The stored amount is a display hint at
+    // most; the post is the price, and the link says which of its two totals
+    // applies.
+    const totalPrice = acceptedTotalsFor(
+        linkPricing,
+        resolveLinkPricingFlow(paymentLink, linkPricing)
+    )[0];
+
+    shippingCharges = round2(totalPrice - basePrice - gstAmount);
 
     const seller = paymentLink.sellerId;
 
@@ -747,7 +1059,9 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     );
 });
 
-// Create PhonePe payment for shareable payment link (can be used by guests too)
+// Create Cashfree payment for a shareable payment link.
+// Signed-in buyers and guests both land here; a guest additionally supplies
+// buyerDetails (name, email, phone, 13+ attestation, terms acceptance).
 export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     const { postId, amount, buyerDetails, shippingAddress } = req.body;
     const buyerId = req.user?._id; // May be null for guest checkout
@@ -757,9 +1071,14 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Post ID and amount are required");
     }
 
-    const numericAmount = Number(amount);
-    if (isNaN(numericAmount) || numericAmount <= 0) {
-        throw new ApiError(400, "Invalid amount");
+    // Ported from createOnlineStoreOrder: this endpoint wrote req.body straight
+    // into the Order, so a partial address produced a PAID, unshippable order.
+    assertCompleteShippingAddress(shippingAddress);
+
+    // Shape/consent validation only — it touches no database and so leaks
+    // nothing about which addresses exist.
+    if (!buyerId) {
+        assertGuestBuyerDetails(buyerDetails);
     }
 
     // Find the post
@@ -772,6 +1091,43 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     const seller = await User.findById(post.userId);
     if (!seller || !seller.isBusinessProfile) {
         throw new ApiError(400, "Invalid seller or not a business account");
+    }
+
+    // ── Server-authoritative amount ────────────────────────────────────────────
+    // The body `amount` is a cross-check only. It used to be written straight
+    // into the Order and sent to Cashfree, so a replayed request with amount=1
+    // bought a ₹45,000 item for ₹1.
+    //
+    // WHICH total is legitimate depends on which checkout minted the link this
+    // request is paying — the store waives shipping at ≥ ₹499, the shareable
+    // link never does. Hard-coding SHAREABLE_LINK here made every store-minted
+    // /post/:postId/pay/<store total> URL permanently unpayable. The flow is
+    // therefore read off the stored link (resolvePricingFlowForLink), and falls
+    // back to SHAREABLE_LINK when no link carries this figure — so submitting
+    // the store's discounted total for a post the store does not sell at that
+    // price is still rejected.
+    const postPricing   = resolvePostPricing(post);
+    const requestedTotal = round2(Number(amount));
+    const pricingFlow   = await resolvePricingFlowForLink(postId, requestedTotal, postPricing);
+
+    const pricing       = resolveChargeableAmount(post, amount, pricingFlow);
+    const numericAmount = pricing.amount;
+
+    // ── Existing-email HARD STOP ─────────────────────────────────────────────
+    // No order is created, nothing is attached, no token is issued. The website
+    // sends the buyer to sign in and come back.
+    //
+    // DELIBERATELY AFTER THE POST AND PRICE RESOLUTION. The 409 this can throw
+    // is an account-existence oracle, and while it sat at the top of the
+    // handler an attacker could probe any address with a request carrying no
+    // valid product at all. Now a probe costs a real postId belonging to a real
+    // business account, at the real price — which is also what makes the
+    // per-IP checkout limiter (the only limiter that can see enumeration; see
+    // rateLimiter.middleware.js) meaningful, since each probe must now pass
+    // every check above.
+    let guestEmail = null;
+    if (!buyerId) {
+        guestEmail = await assertGuestEmailUnclaimed(buyerDetails.email);
     }
 
     // Build product details
@@ -820,7 +1176,10 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
             expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
             paymentUrl: `${frontendUrl}/post/${postId}/pay/${numericAmount}`,
             shortUrl: `${frontendUrl}/p/${linkId}`,
-            isShareableLink: true
+            isShareableLink: true,
+            // Record which total this URL was minted at, so re-opening it later
+            // resolves back to the same flow instead of being guessed.
+            pricingFlow
         });
     }
 
@@ -832,30 +1191,42 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     // }
 
     // --- DOUBLE BOOKING GUARD + IDEMPOTENCY ---
+    // An older 'pending' order is NOT deleted: its Cashfree session may still be
+    // live and the buyer may be approving that payment right now. Deleting it
+    // left the webhook with no order to credit and the buyer charged for
+    // nothing. Only provably-expired sessions are retired.
     if (buyerId) {
-        const existingOrder = await Order.findOne({
+        await retireAbandonedPendingOrders({ postId, buyerId });
+
+        const settledOrder = await Order.findOne({
             postId,
             buyerId,
             amount: numericAmount,
-            paymentStatus: { $in: ['pending', 'held', 'released'] }
+            paymentStatus: { $in: ['held', 'released'] }
         });
-        if (existingOrder?.paymentStatus === 'held' || existingOrder?.paymentStatus === 'released') {
+        if (settledOrder) {
             throw new ApiError(400, "You have already purchased this product");
-        }
-        if (existingOrder?.paymentStatus === 'pending') {
-            await Order.findByIdAndDelete(existingOrder._id);
         }
     }
 
     const order = await Order.create({
         orderNumber: generateOrderNumber(),
         buyerId: buyerId || null,
-        buyerDetails: !buyerId ? buyerDetails : undefined,
+        // Store the NORMALISED email: the account is created from this value
+        // after payment, and every later lookup goes through Mongoose, which
+        // lowercases its filters.
+        buyerDetails: !buyerId ? {
+            fullName:    buyerDetails.fullName,
+            email:       guestEmail,
+            phoneNumber: buyerDetails.phoneNumber
+        } : undefined,
         sellerId: seller._id,
         postId,
         paymentLinkId: paymentLink._id,
         productDetails,
         amount: numericAmount,
+        shippingCharges: round2(numericAmount - pricing.basePrice - pricing.gstAmount),
+        gstAmount: pricing.gstAmount,
         platformFee: 0,
         sellerAmount: numericAmount,
         shippingAddress,
@@ -863,6 +1234,16 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
         paymentStatus: 'pending',
         isShareableOrder: true
     });
+
+    if (!buyerId) {
+        // LEGAL EVIDENCE for the 13+ attestation and the terms acceptance the
+        // guest just ticked. It has to survive until the payment is confirmed,
+        // because that is when the account is created and the permanent record
+        // is written from it. Same helper — and therefore the same shape — as
+        // the online-store checkout, so anything that ever has to produce this
+        // record reads one format. See guestCheckout.utils.js.
+        await recordGuestConsent(order._id, buyerDetails, req, GUEST_CONSENT_SOURCE.SHAREABLE_LINK);
+    }
 
     // ── Cashfree payment initiation ────────────────────────────────────────────
     // const merchantTransactionId = generateMerchantTransactionId();
@@ -917,6 +1298,15 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
             cashfreeMode: process.env.CASHFREE_ENV === 'production' ? 'production' : 'sandbox',
             orderId: order._id,
             orderNumber: order.orderNumber,
+            amount: numericAmount,  // server-resolved; this is what Cashfree will charge
+            priceBreakdown: {
+                basePrice:       pricing.basePrice,
+                shippingCharges: round2(numericAmount - pricing.basePrice - pricing.gstAmount),
+                gstPercent:      pricing.gstPercent,
+                gstAmount:       pricing.gstAmount,
+                totalPrice:      numericAmount,
+                currency:        'INR'
+            },
             seller: {
                 name: seller.fullName,
                 username: seller.username
@@ -1653,16 +2043,17 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     }
 
     // --- DOUBLE BOOKING GUARD + IDEMPOTENCY ---
-    const existingCheckoutOrder = await Order.findOne({
+    // Pending orders are retired only once their gateway session has expired;
+    // deleting an in-flight one orphaned real payments.
+    await retireAbandonedPendingOrders({ paymentLinkId: paymentLink._id, buyerId });
+
+    const settledCheckoutOrder = await Order.findOne({
         paymentLinkId: paymentLink._id,
         buyerId,
-        paymentStatus: { $in: ['pending', 'held', 'released'] }
+        paymentStatus: { $in: ['held', 'released'] }
     });
-    if (existingCheckoutOrder?.paymentStatus === 'held' || existingCheckoutOrder?.paymentStatus === 'released') {
+    if (settledCheckoutOrder) {
         throw new ApiError(400, "Payment for this checkout has already been completed");
-    }
-    if (existingCheckoutOrder?.paymentStatus === 'pending') {
-        await Order.findByIdAndDelete(existingCheckoutOrder._id);
     }
 
     const order = await Order.create({
@@ -1763,6 +2154,14 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Order not found");
     }
 
+    // This endpoint settles whichever order the body names, so it must confirm the
+    // caller is that order's buyer. Without it any authenticated user could settle
+    // a stranger's pending order — including a guest order, which has no buyer at
+    // all and must never be settled through this chat-checkout path.
+    if (!order.buyerId || order.buyerId.toString() !== req.user._id.toString()) {
+        throw new ApiError(403, "This order does not belong to you");
+    }
+
     if (order.paymentStatus === 'held' || order.paymentStatus === 'released') {
         return res.status(200).json(
             new ApiResponse(200, {
@@ -1787,6 +2186,13 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Failed to fetch order status from Cashfree");
     }
 
+    // Third settlement path — same binding as /payments/verify and /payments/store/verify.
+    // The transaction id arrives in the request body, so without this a caller could
+    // quote one genuine cheap PAID transaction of their own against an expensive
+    // pending order: it would flip to 'held' and escrow would be credited the full
+    // order amount with no money behind it.
+    assertTransactionBelongsToOrder(cfOrder, order);
+
     if (cfOrder?.order_status !== 'PAID') {
         order.paymentStatus = 'failed';
         order.orderStatus = 'payment_pending';
@@ -1801,11 +2207,14 @@ export const verifyCheckoutPayment = asyncHandler(async (req, res) => {
         cfPaymentId = paid?.cf_payment_id?.toString() || null;
     } catch { /* non-critical */ }
 
-    // Atomic guard: only one of verifyCheckoutPayment / webhook wins
+    // Atomic guard: only one of verifyCheckoutPayment / webhook wins.
+    // cashfreeOrderId is deliberately NOT written here — it is set at order creation
+    // and is the value just validated against. Rewriting it from a request body would
+    // re-aim this order, and the refund paths that read that field, at a transaction
+    // of the caller's choosing.
     const activeOrder = await Order.findOneAndUpdate(
         { _id: order._id, paymentStatus: 'pending' },
         {
-            cashfreeOrderId,
             cashfreePaymentId: cfPaymentId,
             paymentStatus: 'held',
             orderStatus: 'payment_received'

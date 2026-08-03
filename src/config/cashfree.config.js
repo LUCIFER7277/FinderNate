@@ -174,7 +174,17 @@ export const buildCashfreeCheckoutUrl = (paymentSessionId) => {
 //   x-webhook-timestamp: unix timestamp (string)
 //   x-webhook-signature: base64(HMAC-SHA256(timestamp + rawBody, secretKey))
 export const verifyCashfreeWebhook = (timestamp, signature, rawBody) => {
-    if (!SECRET_KEY) return true; // skip if not configured
+    // Fail CLOSED. A missing secret means we cannot prove the caller is
+    // Cashfree, and these webhooks mark orders paid — treating "not configured"
+    // as "valid" let anyone credit any order.
+    if (!SECRET_KEY) {
+        console.error('[Cashfree] CASHFREE_SECRET_KEY is not configured - webhook signature cannot be verified');
+        return false;
+    }
+
+    if (!timestamp || !signature || typeof rawBody !== 'string' || rawBody.length === 0) {
+        return false;
+    }
 
     const data     = `${timestamp}${rawBody}`;
     const computed = crypto
@@ -182,5 +192,10 @@ export const verifyCashfreeWebhook = (timestamp, signature, rawBody) => {
         .update(data)
         .digest('base64');
 
-    return computed === signature;
+    // Constant-time compare so the signature cannot be recovered byte by byte
+    const computedBuf = Buffer.from(computed, 'utf8');
+    const providedBuf = Buffer.from(String(signature), 'utf8');
+    if (computedBuf.length !== providedBuf.length) return false;
+
+    return crypto.timingSafeEqual(computedBuf, providedBuf);
 };
