@@ -11,13 +11,13 @@ import {
     UserCacheManager, 
     SearchCacheManager,
     CacheInvalidator 
-} from '../utlis/cache.utils.js';
+} from '../utils/cache.utils.js';
 import { RedisKeys, RedisTTL } from '../config/redis.config.js';
-import { 
-    feedCacheMiddleware,
-    searchCacheMiddleware,
-    profileCacheMiddleware,
-    trendingCacheMiddleware
+import {
+    cacheUserFeed,
+    cacheSearchResults,
+    cacheBusinessProfile,
+    cacheTrendingPosts
 } from '../middlewares/cache.middleware.js';
 
 /**
@@ -287,25 +287,25 @@ export const exampleRouteIntegrations = {
     
     // Home feed with caching
     homeFeed: [
-        feedCacheMiddleware({ ttl: RedisTTL.USER_FEED }),
+        cacheUserFeed,
         getHomeFeedCached
     ],
-    
+
     // Search with caching
     search: [
-        searchCacheMiddleware({ ttl: RedisTTL.SEARCH_RESULTS }),
+        cacheSearchResults,
         searchContentCached
     ],
-    
+
     // User profile with caching
     userProfile: [
-        profileCacheMiddleware({ ttl: RedisTTL.USER_PROFILE }),
+        cacheBusinessProfile,
         getUserProfileCached
     ],
-    
+
     // Trending content with caching
     trending: [
-        trendingCacheMiddleware({ ttl: RedisTTL.TRENDING_POSTS }),
+        cacheTrendingPosts,
         getTrendingPostsCached
     ]
 };
