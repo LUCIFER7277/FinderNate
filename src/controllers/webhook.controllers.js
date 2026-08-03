@@ -7,6 +7,15 @@ import Business from '../models/business.models.js';
 import { User } from '../models/user.models.js';
 import { FeedCacheManager } from '../utils/cache.utils.js';
 import { redisClient } from '../config/redis.config.js';
+import { addOneMonth } from './subscription/payment.js';
+
+// Adds one calendar month without the Date.setMonth() overflow that turned a
+// 31-January renewal into 3 March and handed out free days.
+//
+// Imported from controllers/subscription/payment.js — see the import at the top
+// of this file. This used to be a verbatim local copy, which is exactly how the
+// two renewal paths drifted apart: the month-overflow bug was fixed in one and
+// left live in the other. Keep it as one definition.
 
 /**
  * Razorpay Webhook Handler
@@ -136,18 +145,31 @@ const handlePaymentCaptured = async (payload) => {
             return;
         }
 
-        // Calculate subscription dates
-        const now = new Date();
-        const endDate = new Date();
-        endDate.setMonth(endDate.getMonth() + 1); // 1 month from now
-
         // Create or update subscription
+        const now = new Date();
         let subscription = await Subscription.findOne({ userId });
+
+        // ── Extend, never replace ─────────────────────────────────────────────
+        // Same rule as activateSubscriptionForOrder in
+        // controllers/subscription/payment.js, which is the primary activation
+        // path — this handler had drifted and still did the two things that one
+        // was fixed for. Renewing while the same plan is still running used to
+        // reset endDate to now + 1 month, silently deleting every day the user
+        // had already paid for; and `endDate.setMonth(m + 1)` on the 31st
+        // overflowed into the month after (31 Jan → 3 Mar), handing out free
+        // days instead.
+        const stillRunningSamePlan =
+            subscription &&
+            subscription.plan === plan &&
+            subscription.status === 'active' &&
+            subscription.endDate > now;
+
+        const endDate = addOneMonth(stillRunningSamePlan ? subscription.endDate : now);
 
         if (subscription) {
             subscription.plan = plan;
             subscription.status = 'active';
-            subscription.startDate = now;
+            subscription.startDate = stillRunningSamePlan ? (subscription.startDate || now) : now;
             subscription.endDate = endDate;
             subscription.paymentId = paymentId;
             await subscription.save();

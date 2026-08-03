@@ -2,6 +2,26 @@ import mongoose from "mongoose";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import Order from "../../models/order.models.js";
+import { redactOrdersForViewer } from "./helpers.js";
+
+/**
+ * End bound for a date range, inclusive of the whole final day.
+ *
+ * Both clients send a bare `yyyy-MM-dd` from a date picker, which parses to
+ * MIDNIGHT — so `$lte` dropped every order placed during the last day of the
+ * range. Filtering 1–31 July silently lost the 31st, in the list and in the CSV
+ * export people reconcile their spending against. An end value that carries an
+ * explicit time is honoured exactly as sent.
+ */
+const endOfDayBound = (endDate) => {
+    const date = new Date(endDate);
+    if (isNaN(date.getTime())) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(String(endDate).trim())) {
+        // Date-only strings parse as UTC midnight, so extend in UTC too.
+        date.setUTCHours(23, 59, 59, 999);
+    }
+    return date;
+};
 
 const buildOrderHistoryQuery = ({ status, paymentStatus, startDate, endDate, minAmount, maxAmount, search }) => {
     const query = {};
@@ -12,7 +32,13 @@ const buildOrderHistoryQuery = ({ status, paymentStatus, startDate, endDate, min
     if (startDate || endDate) {
         query.createdAt = {};
         if (startDate) query.createdAt.$gte = new Date(startDate);
-        if (endDate) query.createdAt.$lte = new Date(endDate);
+        if (endDate) {
+            const end = endOfDayBound(endDate);
+            if (end) query.createdAt.$lte = end;
+        }
+        // An unparseable end date must not leave an empty `createdAt: {}`,
+        // which matches no document at all.
+        if (!Object.keys(query.createdAt).length) delete query.createdAt;
     }
 
     if (minAmount || maxAmount) {
@@ -122,7 +148,10 @@ export const getSellerOrderHistory = asyncHandler(async (req, res) => {
 
     return res.status(200).json(
         new ApiResponse(200, {
-            orders: normalizePaymentStatus(orders),
+            // Seller-facing list: buyerDetails is projected down to the
+            // fulfilment fields, so the buyer's email never leaves the server
+            // here either (order/helpers.js → redactOrdersForViewer).
+            orders: redactOrdersForViewer(normalizePaymentStatus(orders), sellerId),
             total,
             page: parseInt(page),
             totalPages: Math.ceil(total / limit),
@@ -297,7 +326,13 @@ export const exportOrdersToCSV = asyncHandler(async (req, res) => {
     if (startDate || endDate) {
         query.createdAt = {};
         if (startDate) query.createdAt.$gte = new Date(startDate);
-        if (endDate) query.createdAt.$lte = new Date(endDate);
+        //* Inclusive of the final day — the export is used for accounting, and
+        //* a midnight bound silently left the last day's orders out of it.
+        if (endDate) {
+            const end = endOfDayBound(endDate);
+            if (end) query.createdAt.$lte = end;
+        }
+        if (!Object.keys(query.createdAt).length) delete query.createdAt;
     }
 
     const orders = await Order.find(query)

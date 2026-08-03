@@ -2,6 +2,18 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import Order from "../../models/order.models.js";
+import { redactOrderForViewer, redactOrdersForViewer } from "./helpers.js";
+
+// An order created by a guest through a shareable payment link has buyerId:null
+// until an account is created for that buyer on confirmed payment — and orders
+// created by the online-store guest flow may stay that way forever. Reading
+// `order.buyerId._id` on one of those threw a TypeError, so the SELLER opening
+// their own guest order got a 500 instead of the order. Populated refs can also
+// resolve to null when the referenced user is gone, so unwrap defensively.
+const idOf = (ref) => {
+    const value = ref?._id ?? ref;
+    return value ? value.toString() : null;
+};
 
 export const getOrderDetails = asyncHandler(async (req, res) => {
     const { orderId } = req.params;
@@ -16,12 +28,24 @@ export const getOrderDetails = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Order not found");
     }
 
-    if (order.buyerId._id.toString() !== userId.toString() &&
-        order.sellerId._id.toString() !== userId.toString()) {
+    const buyerIdStr  = idOf(order.buyerId);
+    const sellerIdStr = idOf(order.sellerId);
+    const viewerIdStr = userId.toString();
+
+    // A guest order has no buyer, so only the seller can reach it. It must still
+    // RENDER — the seller has to see the address and the guest contact details
+    // in order to ship it.
+    if (buyerIdStr !== viewerIdStr && sellerIdStr !== viewerIdStr) {
         throw new ApiError(403, "Not authorized to view this order");
     }
 
-    const responseData = { order };
+    // The seller has to see the shipping address and a contact number to ship
+    // this, but NOT the buyer's email address — see redactOrderForViewer. The
+    // buyer's own view of their own order is unaffected.
+    const responseData = {
+        order: redactOrderForViewer(order, userId),
+        isGuestOrder: !buyerIdStr
+    };
 
     // Include dispute policy info when order is disputed
     if (order.orderStatus === 'disputed' && order.dispute) {
@@ -73,7 +97,13 @@ export const getSellerOrders = asyncHandler(async (req, res) => {
     const total = await Order.countDocuments(query);
 
     return res.status(200).json(
-        new ApiResponse(200, { orders, total, page: parseInt(page), totalPages: Math.ceil(total / limit) }, "Seller orders fetched")
+        new ApiResponse(200, {
+            // Guest orders in this list carry buyerDetails; strip the email.
+            orders: redactOrdersForViewer(orders, sellerId),
+            total,
+            page: parseInt(page),
+            totalPages: Math.ceil(total / limit)
+        }, "Seller orders fetched")
     );
 });
 

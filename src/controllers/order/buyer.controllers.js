@@ -6,6 +6,16 @@ import { sendOrderNotification, populateOrder } from "./helpers.js";
 
 const VALID_DISPUTE_REASONS = ['damaged_product', 'wrong_item', 'missing_item', 'not_as_described', 'defective', 'counterfeit', 'other'];
 
+// Guest orders (shareable payment links, and the live online-store guest flow)
+// carry buyerId:null until an account is created for the buyer on confirmed
+// payment. `order.buyerId.toString()` threw a TypeError on those and surfaced as
+// a 500; the honest answer is simply that the caller is not the buyer. Every
+// buyer-authorised action below goes through this.
+const isOrderBuyer = (order, userId) => {
+    const buyer = order?.buyerId?._id ?? order?.buyerId;
+    return !!buyer && buyer.toString() === userId.toString();
+};
+
 const DISPUTE_REASON_LABELS = {
     damaged_product: 'Damaged Product',
     wrong_item: 'Wrong Item Received',
@@ -23,7 +33,7 @@ export const confirmDelivery = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Only the buyer can confirm delivery");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Only the buyer can confirm delivery");
     if (order.orderStatus !== 'delivered' && order.orderStatus !== 'shipped') {
         throw new ApiError(400, "Order must be shipped or delivered first");
     }
@@ -65,7 +75,7 @@ export const reportIssue = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Not authorized");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Not authorized");
     if (!reason) throw new ApiError(400, "Reason is required");
     if (!VALID_DISPUTE_REASONS.includes(reason)) {
         throw new ApiError(400, `Invalid dispute reason. Must be one of: ${VALID_DISPUTE_REASONS.join(', ')}`);
@@ -124,7 +134,7 @@ export const uploadDisputeVideo = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Only the buyer can upload dispute video");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Only the buyer can upload dispute video");
     if (order.orderStatus !== 'disputed') throw new ApiError(400, "Can only upload dispute video for disputed orders");
     if (!order.dispute) throw new ApiError(400, "No active dispute found for this order");
     if (order.dispute.status === 'resolved' || order.dispute.status === 'rejected') {
@@ -165,7 +175,7 @@ export const uploadPaymentProof = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Only the buyer can upload payment proof");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Only the buyer can upload payment proof");
 
     const allowedStatuses = ['payment_received', 'processing', 'shipped', 'delivered'];
     if (!allowedStatuses.includes(order.orderStatus)) {
@@ -191,7 +201,7 @@ export const uploadOpeningVideo = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Only the buyer can upload opening video");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Only the buyer can upload opening video");
 
     const allowedStatuses = ['shipped', 'delivered'];
     if (!allowedStatuses.includes(order.orderStatus)) {
@@ -221,7 +231,7 @@ export const rateSeller = asyncHandler(async (req, res) => {
 
     const order = await Order.findById(orderId);
     if (!order) throw new ApiError(404, "Order not found");
-    if (order.buyerId.toString() !== buyerId.toString()) throw new ApiError(403, "Only the buyer can rate the seller");
+    if (!isOrderBuyer(order, buyerId)) throw new ApiError(403, "Only the buyer can rate the seller");
     if (!['confirmed', 'delivered'].includes(order.orderStatus)) {
         throw new ApiError(400, "Order must be delivered or confirmed to rate the seller");
     }

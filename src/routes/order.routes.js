@@ -42,6 +42,15 @@ router.get("/seller/new-count", getSellerNewOrdersCount);
 router.get("/buyer/history", getBuyerOrderHistory);
 router.get("/seller/history", getSellerOrderHistory);
 
+// NOTE: there is deliberately NO self-service "claim this guest order" route
+// here. A guest order that could not be attached to a buyer at settlement is
+// auto-refunded instead — see refundOrphanedGuestOrder in
+// utils/guestCheckout.utils.js. Letting a signed-in account claim an ownerless paid
+// order on the strength of its own `email` field was an account-takeover
+// primitive: registration in this codebase verifies the PHONE only
+// (auth.js verifyRegistrationOTP sets isPhoneVerified and never isEmailVerified),
+// so that field is an unproven string anyone can register. Do not re-add it.
+
 // Export orders
 router.get("/export", exportOrdersToCSV);
 

@@ -32,7 +32,7 @@ export const getInvoice = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invoice is not available for this order status");
     }
 
-    const invoice = buildInvoiceData(order);
+    const invoice = buildInvoiceData(order, isBuyer);
 
     return res.status(200).json(
         new ApiResponse(200, { invoice }, "Invoice fetched successfully")
@@ -65,7 +65,7 @@ export const getInvoiceByOrderNumber = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invoice is not available for this order status");
     }
 
-    const invoice = buildInvoiceData(order);
+    const invoice = buildInvoiceData(order, isBuyer);
 
     return res.status(200).json(
         new ApiResponse(200, { invoice }, "Invoice fetched successfully")
@@ -104,8 +104,17 @@ export const getUserInvoices = asyncHandler(async (req, res) => {
     );
 });
 
-// Build full invoice data from an order
-function buildInvoiceData(order) {
+// Build full invoice data from an order.
+//
+// `viewerIsBuyer` decides whether the buyer's EMAIL ADDRESS appears in the
+// "Bill To" block. Both parties can pull this invoice, and for a guest order the
+// only place that address exists is order.buyerDetails — so an unconditional
+// invoice handed the seller the address the buyer's account is keyed on, walking
+// straight past the redaction applied to every other seller-facing order read
+// (order/helpers.js → redactOrderForViewer). The seller still gets the name,
+// the phone number and the full shipping address, which is everything invoicing
+// and fulfilment need.
+function buildInvoiceData(order, viewerIsBuyer) {
     return {
         invoiceNumber: `INV-${order.orderNumber}`,
         orderReferenceId: order.orderNumber,
@@ -129,7 +138,7 @@ function buildInvoiceData(order) {
             username: order.buyerId?.username,
             profileImageUrl: order.buyerId?.profileImageUrl,
             phoneNumber: order.buyerId?.phoneNumber || order.buyerDetails?.phoneNumber,
-            email: order.buyerDetails?.email,
+            email: viewerIsBuyer ? order.buyerDetails?.email : undefined,
         },
 
         // Shipping Address

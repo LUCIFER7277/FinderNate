@@ -2,7 +2,7 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import Order from "../../models/order.models.js";
-import { sendOrderNotification, populateOrder } from "./helpers.js";
+import { sendOrderNotification, populateOrderFor } from "./helpers.js";
 
 const VALID_REJECTION_REASONS = ['out_of_stock', 'price_change', 'invalid_address', 'need_clarification', 'certificate_required', 'other'];
 
@@ -41,7 +41,7 @@ export const sellerConfirmOrder = asyncHandler(async (req, res) => {
         }).catch(err => console.error('Seller confirm notification error:', err));
     }
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order confirmed by seller")
@@ -86,7 +86,7 @@ export const sellerRejectOrder = asyncHandler(async (req, res) => {
         }).catch(err => console.error('Seller reject notification error:', err));
     }
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order rejected by seller. Admin will process the refund.")
@@ -131,7 +131,7 @@ export const markOrderShipped = asyncHandler(async (req, res) => {
         }).catch(err => console.error('Ship notification error:', err));
     }
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order marked as shipped")
@@ -170,7 +170,7 @@ export const updateTrackingInfo = asyncHandler(async (req, res) => {
         }).catch(err => console.error('Tracking update notification error:', err));
     }
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Tracking info updated")
@@ -204,7 +204,7 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
         }).catch(err => console.error('Deliver notification error:', err));
     }
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Order marked as delivered")
@@ -240,7 +240,7 @@ export const uploadPackingMedia = asyncHandler(async (req, res) => {
 
     await order.save();
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Packing media uploaded successfully")
@@ -266,7 +266,7 @@ export const rateBuyer = asyncHandler(async (req, res) => {
     order.sellerReview = review;
     await order.save();
 
-    const updatedOrder = await populateOrder(orderId);
+    const updatedOrder = await populateOrderFor(orderId, sellerId);
 
     return res.status(200).json(
         new ApiResponse(200, { order: updatedOrder }, "Buyer rated successfully")
