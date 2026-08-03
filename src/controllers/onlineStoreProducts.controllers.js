@@ -7,6 +7,24 @@ import Post from '../models/userPost.models.js';
 // Fixed store owner — hardcoded in DB query, never exposed via client params
 const STORE_USER_ID = new mongoose.Types.ObjectId('69ba39e7ee60e4c9277fb780');
 
+// Is `post` genuinely part of the online store's catalogue?
+//
+// Same three conditions the listing query below filters on — owner, product
+// content type, and not private — read from the same constant, so the
+// catalogue and the checkout can never disagree about what the store sells.
+//
+// The store CHECKOUT (cashfree.payment.controller.js → createOnlineStoreOrder)
+// is what needs this. That endpoint is public and unauthenticated, and it mints
+// a PaymentLink stamped pricingFlow:'online_store' — the marker that unlocks
+// the store's shipping-waived total on the shareable /post/:postId/pay/:amount
+// URL. Without this check one free anonymous request handed that pricing to any
+// post on the platform, permanently.
+export const isOnlineStoreListing = (post) =>
+    !!post &&
+    STORE_USER_ID.equals(post.userId) &&
+    post.contentType === 'product' &&
+    post.settings?.privacy !== 'private';
+
 /**
  * GET /api/v1/posts/online-store/products
  * Public endpoint — no auth required.
@@ -84,6 +102,11 @@ export const getOnlineStoreProducts = asyncHandler(async (req, res) => {
     ]);
 
     // ── Shape response ───────────────────────────────────────────────────────
+    // The order endpoint (createOnlineStoreOrder) is what actually charges the
+    // buyer, so this listing must quote exactly what that endpoint computes:
+    // same GST default (0 when the seller left it blank — NOT 5), same free
+    // shipping threshold, same rounding. The store page used to invent a 5% tax
+    // line the server never collected.
     const products = posts.map((post) => {
         const p = post.customization?.product || {};
         const image =
@@ -91,24 +114,36 @@ export const getOnlineStoreProducts = asyncHandler(async (req, res) => {
             post.media?.[0]?.url ||
             '';
 
+        const price           = Number(p.price)           || 0;
+        const shippingCharges = Number(p.shippingCharges) || 0;
+        const gstPercent      = Number(p.gstPercent)      || 0;
+        const gstAmount         = parseFloat(((price * gstPercent) / 100).toFixed(2));
+        const effectiveShipping = price >= 499 ? 0 : shippingCharges; // free shipping on orders ≥ ₹499
+        const totalPrice        = parseFloat((price + effectiveShipping + gstAmount).toFixed(2));
+
         return {
             _id:             post._id,
             name:            p.name            || post.caption || 'Product',
             category:        p.category        || '',
-            price:           p.price           ?? 0,
+            price,
             // The seller enters both of these and the store dropped them, so
             // every listing rendered in a default currency with no way through
             // to the product.
             currency:        p.currency        || 'INR',
             link:            p.link            || '',
-            originalPrice:   p.price           ?? 0,   // extend if you add MRP field
+            originalPrice:   price,                     // extend if you add MRP field
             description:     p.description     || post.description || '',
             rating:          0,                         // extend when reviews are wired up
             image,
             inStock:         p.inStock         ?? true,
             discount:        0,                         // extend if discount field is added
-            gstPercent:      p.gstPercent      ?? 5,
-            shippingCharges: p.shippingCharges ?? 0,
+            gstPercent,
+            shippingCharges,
+            // Server-authoritative figures — the client should display these
+            // rather than recomputing tax/shipping with its own defaults.
+            gstAmount,
+            effectiveShipping,
+            totalPrice,
         };
     });
 

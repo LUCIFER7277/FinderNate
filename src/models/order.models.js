@@ -66,6 +66,46 @@ const GuestBuyerDetailsSchema = new mongoose.Schema({
     phoneNumber: String
 }, { _id: false });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT HAPPENED TO A GUEST ORDER THAT COULD NOT BE GIVEN A BUYER
+//
+// A guest checkout only creates the buyer's account once the payment is
+// CONFIRMED, and it refuses to create one for an address that already belongs to
+// somebody. In the ~20-minute payment window that address can stop being free,
+// and the order then settles with buyerId:null and no way for anyone to act on
+// it — confirm-delivery, dispute and refund all go through isOrderBuyer, which
+// needs a buyerId.
+//
+// There is deliberately NO "claim this order" path. The money is refunded
+// automatically instead (utils/guestCheckout.utils.js → refundOrphanedGuestOrder) and
+// this is the record of that. A REAL SCHEMA PATH, not a raw-driver field, so the
+// admin escrow screens and every ordinary read can see it — a marker nothing can
+// read is a marker that does not exist.
+//
+// It carries NO email address: the buyer's address already lives in
+// buyerDetails, which is redacted out of every seller-facing read
+// (order/helpers.js → redactOrderForViewer), and a second copy here would walk
+// straight past that redaction.
+const GuestSettlementSchema = new mongoose.Schema({
+    status: {
+        type: String,
+        enum: [
+            'auto_refund_pending',        // collision detected, refund not started
+            'auto_refund_in_progress',    // one execution has claimed the refund
+            'auto_refunded',              // Cashfree accepted the refund
+            'refund_failed_admin_review'  // needs a human — see admin escrow tools
+        ]
+    },
+    reason: String,
+    refundId: String,
+    refundStatus: String,
+    error: String,
+    detectedAt: Date,
+    startedAt: Date,
+    refundedAt: Date,
+    flaggedAt: Date
+}, { _id: false });
+
 const OrderSchema = new mongoose.Schema({
     orderNumber: { type: String, required: true, unique: true },
     buyerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Optional for guest checkout
@@ -122,7 +162,8 @@ const OrderSchema = new mongoose.Schema({
     buyerReview: String,
     sellerRating: { type: Number, min: 1, max: 5 },
     sellerReview: String,
-    isShareableOrder: { type: Boolean, default: false } // Created via shareable payment link
+    isShareableOrder: { type: Boolean, default: false }, // Created via shareable payment link
+    guestSettlement: GuestSettlementSchema
 }, { timestamps: true });
 
 OrderSchema.pre('save', function(next) {

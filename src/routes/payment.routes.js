@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { verifyJWT, optionalVerifyJWT } from "../middlewares/auth.middleware.js";
 import {
+    guestCheckoutIpRateLimit,
+} from "../middlewares/rateLimiter.middleware.js";
+import {
     createPaymentLink,
     getPaymentLinkDetails,
     createPhonePeOrder,
@@ -40,10 +43,36 @@ router.get("/link/:linkId", getPaymentLinkDetails);
 router.get("/post/:postId/pay/:amount", getShareablePaymentLinkDetails);
 
 // Create Cashfree payment for shareable link.
-// Auth is REQUIRED: a guest order has no buyer account, so it never shows up in
-// anyone's order history and never rolls into the seller's sales stats. The web
-// checkout gates on this too, but the gate has to hold at the API as well.
-router.post("/post/create-order", verifyJWT, createShareablePhonePeOrder);
+//
+// Auth is OPTIONAL: the website supports guest checkout here. A guest supplies
+// buyerDetails (name, email, phone, an explicit "I am 13 or older" attestation
+// and terms acceptance) instead of a token, and the order is created with
+// buyerId:null.
+//
+// The account is created only once the payment is CONFIRMED — see
+// settleGuestOrder in utils/guestCheckout.utils.js — and buyerId is back-filled
+// there, so a paid guest order does land in an order history and in the
+// seller's stats, while an abandoned checkout leaves no orphan identity behind.
+//
+// An email that ALREADY belongs to a user is a hard stop: the endpoint answers
+// 409, creates no order, attaches nothing and issues no token, and the website
+// diverts the buyer to sign in. No session token is ever minted on this path;
+// the buyer reaches the new account through the public reset-OTP pair.
+//
+// If the address stops being free while the payment is in flight, the settled
+// order is REFUNDED automatically. It is never parked for someone to claim —
+// see refundOrphanedGuestOrder in utils/guestCheckout.utils.js.
+//
+// Rate-limited PER IP ONLY. The per-email limiter that used to sit here was
+// removed: its key was attacker-supplied, so it could be used to lock a chosen
+// address out of guest checkout, and the account creation it was sized to bound
+// no longer happens here. See rateLimiter.middleware.js for the full reasoning.
+router.post(
+    "/post/create-order",
+    guestCheckoutIpRateLimit,
+    optionalVerifyJWT,
+    createShareablePhonePeOrder
+);
 
 // Public route - get checkout details by linkId (for shareable checkout links)
 // Used when someone accesses /checkout/:linkId
@@ -57,7 +86,25 @@ router.get("/checkout/link/:linkId", getCheckoutByLinkId);
 router.post("/cashfree/webhook", cashfreeWebhook);
 
 // Step 1: Buyer fills shipping address → creates Cashfree order, returns checkoutUrl
-router.post("/store/create-order", optionalVerifyJWT, createOnlineStoreOrder);
+//
+// Auth is OPTIONAL — this checkout supports guests on exactly the terms the
+// shareable one does (see /post/create-order above): buyerDetails with a 13+
+// attestation and terms acceptance instead of a token, an existing email is a
+// 409 before any order exists, the account is created only once the payment is
+// confirmed, and an order that cannot be given a buyer is refunded
+// automatically.
+//
+// SAME PER-IP LIMITER, for the same reason. This route was mounted with nothing
+// but optionalVerifyJWT: anonymous callers could create unbounded pending
+// orders and Cashfree sessions, and each request also minted a PaymentLink. The
+// key is the IP and never anything the caller supplies, so spending the bucket
+// costs the attacker their own address rather than locking a victim out.
+router.post(
+    "/store/create-order",
+    guestCheckoutIpRateLimit,
+    optionalVerifyJWT,
+    createOnlineStoreOrder
+);
 
 // Step 2: After Cashfree redirect back → verify payment status
 // Public (no auth) so guest buyers can also complete verification

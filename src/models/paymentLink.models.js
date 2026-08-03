@@ -28,7 +28,23 @@ const PaymentLinkSchema = new mongoose.Schema({
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
     paymentUrl: String,
     shortUrl: String,
-    isShareableLink: { type: Boolean, default: false }
+    isShareableLink: { type: Boolean, default: false },
+    // WHICH CHECKOUT MINTED THIS LINK — and therefore which of the two
+    // server-computed totals its `paymentUrl` was written at. The online store
+    // waives shipping at ≥ ₹499 and the shareable payment link never does, so
+    // the same post has two legitimate totals and a link is only payable at its
+    // own one. Without this the store minted /post/:postId/pay/<store total> and
+    // the pay endpoint, which validates against the shareable total, rejected it
+    // forever with "price mismatch … please reload".
+    //
+    // DELIBERATELY HAS NO DEFAULT. A link written before this field existed must
+    // read as "unknown" so the flow can be inferred from the amount it was
+    // actually minted at; a default of 'shareable_link' would assert something
+    // untrue about every legacy store link and re-break exactly those URLs.
+    pricingFlow: {
+        type: String,
+        enum: ['shareable_link', 'online_store']
+    }
 }, { timestamps: true });
 
 PaymentLinkSchema.index({ sellerId: 1 });
