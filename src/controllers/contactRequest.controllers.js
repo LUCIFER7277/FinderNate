@@ -4,6 +4,10 @@ import { ApiResponse } from "../utils/ApiResponse.js";
 import ContactRequest from "../models/contactRequest.models.js";
 import Business from "../models/business.models.js";
 import mongoose from "mongoose";
+import {
+    createContactRequestNotification,
+    createContactResponseNotification
+} from "./notification.controllers.js";
 
 // POST /api/v1/contact-requests/:businessId
 const sendContactRequest = asyncHandler(async (req, res) => {
@@ -54,6 +58,18 @@ const sendContactRequest = asyncHandler(async (req, res) => {
         message: message || '',
         status: 'pending'
     });
+
+    // Tell the owner. Fire-and-forget on purpose, exactly like the follow flow
+    // (follower.controllers.js): the request has already been persisted and a
+    // notification failure must not turn a successful 201 into an error.
+    createContactRequestNotification({
+        recipientId: business.userId._id,
+        sourceUserId: requesterId,
+        businessId,
+        businessName: business.businessName,
+        requestId: contactRequest._id,
+        requestMessage: message
+    })?.catch(() => { });
 
     // Populate the request with user and business details for response
     const populatedRequest = await ContactRequest.findById(contactRequest._id)
@@ -227,6 +243,17 @@ const respondToRequest = asyncHandler(async (req, res) => {
     const updatedRequest = await ContactRequest.findById(requestId)
         .populate('requester', 'username fullName profileImageUrl')
         .populate('business', 'businessName logoUrl');
+
+    // Close the loop for the person who asked — same fire-and-forget contract.
+    createContactResponseNotification({
+        recipientId: request.requester,
+        sourceUserId: userId,
+        businessId: request.business,
+        businessName: updatedRequest?.business?.businessName,
+        requestId: request._id,
+        status,
+        responseMessage: request.responseMessage
+    })?.catch(() => { });
 
     res.status(200).json(
         new ApiResponse(200, updatedRequest, `Contact request ${status} successfully`)
