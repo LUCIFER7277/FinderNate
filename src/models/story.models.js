@@ -31,32 +31,45 @@ const StorySchema = new mongoose.Schema({
     expiresAt: {
         type: Date,
         required: true
+    },
+    // Bookkeeping for the story-expiry job: set when a worker takes ownership
+    // of a row it is about to purge. Two workers therefore never try to delete
+    // the same media file, and a row whose media delete failed is left alone
+    // until the claim goes stale instead of being retried in a tight loop. It
+    // is never read by any API path, so it stays out of responses.
+    purgeClaimedAt: {
+        type: Date,
+        default: null,
+        select: false
     }
 }, { timestamps: true });
 
-// Auto-expire stories after 24 hours.
+// Stories are purged 24 hours after they are posted — the row AND the media
+// file — by the story-expiry job (src/jobs/storyExpiry.job.js). NOT by a
+// MongoDB TTL index.
 //
-// The comment here used to say this happened "in code logic, not schema
-// itself", but no such code ever existed: nothing swept expired stories, so the
-// collection grew forever and every stories-tray load scanned all of it to find
-// the handful still live. MongoDB does the sweep now — expireAfterSeconds: 0
-// means "delete once the date in expiresAt has passed", which is exactly the
-// 24-hour window createStory sets.
+// A TTL index (expiresAt, expireAfterSeconds: 0) used to live here and was
+// removed deliberately. The TTL monitor drops the document and knows nothing
+// about Bunny: every expiry left the image or video live on the CDN forever,
+// so the row vanished but the storage bill did not — deletion that is only
+// cosmetic. The job does it in the safe order instead, media first and the row
+// only once that succeeded, so a Bunny failure leaves the row for the next
+// pass rather than orphaning the file.
 //
-// Archived stories are exempt via the partial filter: fetchArchivedStories
-// reads { userId, isArchived: true } long after expiresAt has gone by, and a
-// blanket TTL would delete the archive out from under it. Nothing else can
-// reach an expired story — every other read path filters expiresAt: { $gt: now }
-// — so this only removes documents that were already unreachable.
-StorySchema.index(
-    { expiresAt: 1 },
-    { expireAfterSeconds: 0, partialFilterExpression: { isArchived: false } }
-);
+// DEPLOY NOTE: the old TTL index still exists on the live collection and
+// Mongoose will not alter an existing index's expireAfterSeconds. It has to be
+// dropped by hand — db.stories.dropIndex('expiresAt_1') — otherwise Mongo keeps
+// racing the job and orphaning media exactly as before.
+//
+// Archived stories stay exempt, as they were under the TTL's partial filter:
+// fetchArchivedStoriesByUser reads { userId, isArchived: true } long after
+// expiresAt has gone by, so the job only ever considers isArchived: false.
 
-// The stories tray (story.controllers fetchAllStories) and the profile stories
-// tab both filter { isArchived: false, expiresAt: { $gt: now } }; neither field
-// was indexed, so both were collection scans.
-StorySchema.index({ isArchived: 1, expiresAt: 1 });
+// Serves the purge job's scan ({ isArchived: false, expiresAt <= now, not
+// currently claimed }) and, on its { isArchived, expiresAt } prefix, the
+// stories tray (fetchStoriesFeed) and the profile stories tab, which both
+// filter { isArchived: false, expiresAt: { $gt: now } }.
+StorySchema.index({ isArchived: 1, expiresAt: 1, purgeClaimedAt: 1 });
 
 // Archive screen and per-user story lookups: { userId, isArchived } sorted by
 // createdAt desc.

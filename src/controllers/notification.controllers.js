@@ -1,6 +1,8 @@
 import Notification from "../models/notification.models.js";
 import Message from "../models/message.models.js";
 import Chat from "../models/chat.models.js";
+import Post from "../models/userPost.models.js";
+import { buildDeletedTombstone } from "../utils/contentTombstone.utils.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { ApiError } from "../utils/ApiError.js";
@@ -412,9 +414,41 @@ export const getNotifications = asyncHandler(async (req, res) => {
             .sort({ createdAt: -1 })
             .skip((page - 1) * limit)
             .limit(limit)
-            .populate("senderId", "username profileImageUrl"),
+            .populate("senderId", "username profileImageUrl")
+            .lean(),
         Notification.countDocuments(query),
     ]);
+
+    // A notification outlives the post it points at — nothing rewrites or removes
+    // it when the author deletes the post — so "X liked your post" sat in the list
+    // with a deep link that opened an error. One id lookup for the page marks
+    // those entries up front, so the client can render the tombstone in place and
+    // not navigate into a dead screen at all.
+    //
+    // Purely additive: `deletedContent` is absent on every notification whose
+    // target still exists, and the payload stays a plain array (the shipped
+    // mobile app reads `data` as one).
+    const referencedPostIds = [...new Set(
+        notifications.filter(n => n.postId).map(n => n.postId.toString())
+    )];
+
+    if (referencedPostIds.length) {
+        const livePosts = await Post.find({ _id: { $in: referencedPostIds } })
+            .select('_id')
+            .lean();
+        const livePostIds = new Set(livePosts.map(p => p._id.toString()));
+
+        notifications.forEach(n => {
+            if (n.postId && !livePostIds.has(n.postId.toString())) {
+                // The post's own contentType died with it, so this says "post" —
+                // true of every deleted post regardless of what it was selling.
+                n.deletedContent = buildDeletedTombstone({
+                    contentType: 'post',
+                    contentId: n.postId,
+                });
+            }
+        });
+    }
 
     res.set({
         'X-Total-Count': String(totalCount),

@@ -98,13 +98,35 @@ export const fetchStoriesFeed = asyncHandler(async (req, res) => {
 
     const now = new Date();
 
-    // Get all active stories and populate user info including privacy
-    const allStories = await Story.find({
-        isArchived: false,
-        expiresAt: { $gt: now }
-    })
-        .sort({ createdAt: -1 })
-        .populate("userId", "username profileImageUrl privacy isFullPrivate followers following isBusinessProfile accountStatus isDeleted");
+    // Get active stories and populate user info including privacy.
+    //
+    // This used to load EVERY live story on the platform in one unbounded
+    // query and populate an author document for each, then filter in Node —
+    // the cost of one tray load grew with the whole platform's posting rate
+    // rather than with what this viewer can actually see. The scan is capped
+    // now. The viewer's own stories are fetched separately and merged, so a
+    // busy hour elsewhere on the platform can never push a person's own story
+    // out of their own tray.
+    const OWN_STORIES_LIMIT = 50;
+    const FEED_SCAN_LIMIT = 300;
+    const STORY_AUTHOR_FIELDS = "username profileImageUrl privacy isFullPrivate followers following isBusinessProfile accountStatus isDeleted";
+
+    const [ownStories, otherStories] = await Promise.all([
+        Story.find({ userId, isArchived: false, expiresAt: { $gt: now } })
+            .sort({ createdAt: -1 })
+            .limit(OWN_STORIES_LIMIT)
+            .populate("userId", STORY_AUTHOR_FIELDS),
+        Story.find({ userId: { $ne: userId }, isArchived: false, expiresAt: { $gt: now } })
+            .sort({ createdAt: -1 })
+            .limit(FEED_SCAN_LIMIT)
+            .populate("userId", STORY_AUTHOR_FIELDS)
+    ]);
+
+    // Newest first across both queries, matching the single-query ordering the
+    // clients already render.
+    const allStories = [...ownStories, ...otherStories].sort(
+        (a, b) => b.createdAt - a.createdAt
+    );
 
     // Get active payment plan user IDs and business user IDs
     const activePaymentPlanUserIds = await Business.find({

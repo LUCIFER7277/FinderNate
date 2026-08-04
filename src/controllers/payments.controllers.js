@@ -22,6 +22,12 @@ import {
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+// A payment link outlives the post it was minted from — the post row is deleted
+// outright and nothing rewrites the links pointing at it. Every endpoint that
+// resolves one therefore answers with an explicit tombstone instead of a 404 a
+// buyer's browser cannot tell apart from a broken URL. See the util for the
+// exact shape and for why reads answer 200 while order creation answers 410.
+import { sendDeletedTombstone } from "../utils/contentTombstone.utils.js";
 import Order from "../models/order.models.js";
 import PaymentLink from "../models/paymentLink.models.js";
 import EscrowWallet from "../models/escrowWallet.models.js";
@@ -304,12 +310,30 @@ export const createPaymentLink = asyncHandler(async (req, res) => {
 export const getPaymentLinkDetails = asyncHandler(async (req, res) => {
     const { linkId } = req.params;
 
+    // postId is populated SEPARATELY, below, and only once the post is known to
+    // exist. Populating it in this query would collapse "the listing was deleted"
+    // and "this link never named a listing" into the same null — and the second
+    // is legitimate, since a chat link can be minted from a bare product name and
+    // price with no post behind it at all.
     const paymentLink = await PaymentLink.findOne({ linkId })
-        .populate('sellerId', 'fullName username profileImageUrl isBlueTickVerified')
-        .populate('postId', 'media caption');
+        .populate('sellerId', 'fullName username profileImageUrl isBlueTickVerified');
 
     if (!paymentLink) {
         throw new ApiError(404, "Payment link not found");
+    }
+
+    if (paymentLink.postId) {
+        const linkedPostExists = await Post.exists({ _id: paymentLink.postId });
+        if (!linkedPostExists) {
+            return sendDeletedTombstone(res, {
+                // A PaymentLink stores no product/service discriminator and the
+                // post that held one no longer exists, so the neutral wording is
+                // the only honest one here.
+                contentId: paymentLink.postId,
+                extra: { linkId: paymentLink.linkId },
+            });
+        }
+        await paymentLink.populate('postId', 'media caption');
     }
 
     // if (paymentLink.status === 'expired' || (paymentLink.expiresAt && new Date() > paymentLink.expiresAt)) {
@@ -335,6 +359,24 @@ export const createPhonePeOrder = asyncHandler(async (req, res) => {
     const paymentLink = await PaymentLink.findOne({ linkId, status: 'active' });
     if (!paymentLink) {
         throw new ApiError(404, "Payment link not found or expired");
+    }
+
+    // No new order may be created against a listing that has been deleted. The
+    // link stays 'active' after the post goes — nothing rewrites it — so without
+    // this an Order was minted carrying a postId that resolves to nothing, and
+    // the buyer paid for something the seller had already taken down.
+    //
+    // Only checked when the link actually names a post: a chat link created from
+    // a bare product name and price has no listing behind it by design.
+    if (paymentLink.postId) {
+        const linkedPost = await Post.exists({ _id: paymentLink.postId });
+        if (!linkedPost) {
+            return sendDeletedTombstone(res, {
+                contentId: paymentLink.postId,
+                status: 410,
+                extra: { linkId: paymentLink.linkId },
+            });
+        }
     }
 
     // --- IDEMPOTENCY: block if already paid, retire stale pending on retry ---
@@ -777,7 +819,14 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
     // Find the post
     const post = await Post.findById(postId);
     if (!post) {
-        throw new ApiError(404, "Post not found");
+        // Somebody is holding a /post/:postId/pay/:amount URL for a listing the
+        // seller has taken down. 200 with an explicit marker, not a 404: this is
+        // a link that was legitimately issued, and the page has to be able to say
+        // why it is empty.
+        return sendDeletedTombstone(res, {
+            contentId: postId,
+            extra: { postId, paymentLinkId: null },
+        });
     }
 
     // Get seller details
@@ -905,7 +954,16 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     // Get the post for full details
     const post = await Post.findById(paymentLink.postId);
     if (!post) {
-        throw new ApiError(404, "Product not found");
+        // The checkout link survived the listing. `canProceedToPay: false` is
+        // carried alongside the marker so a page that reads `actions` before it
+        // reads `deleted` still refuses to offer a Pay button.
+        return sendDeletedTombstone(res, {
+            contentId: paymentLink.postId,
+            extra: {
+                linkId: paymentLink.linkId,
+                actions: { canProceedToPay: false, addressRequired: false, paymentLinkId: paymentLink.linkId },
+            },
+        });
     }
 
     // Build detailed product info
@@ -1084,7 +1142,10 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     // Find the post
     const post = await Post.findById(postId);
     if (!post) {
-        throw new ApiError(404, "Post not found");
+        // 410, not 200: this call CREATES an order, and there is nothing left to
+        // buy. Same body as the read endpoints so the checkout page can show the
+        // same sentence instead of a generic failure toast.
+        return sendDeletedTombstone(res, { contentId: postId, status: 410 });
     }
 
     // Get seller
@@ -1344,7 +1405,9 @@ export const showProductInterest = asyncHandler(async (req, res) => {
     // Find the post
     const post = await Post.findById(postId);
     if (!post) {
-        throw new ApiError(404, "Post not found");
+        // Reached from a product card in a chat, which can outlive the listing.
+        // 410 with the marker: this mints a payment link, so it cannot succeed.
+        return sendDeletedTombstone(res, { contentId: postId, status: 410 });
     }
 
     const sellerId = post.userId;
@@ -1589,7 +1652,9 @@ export const sendCheckoutMessage = asyncHandler(async (req, res) => {
     // Find the post with full details
     const post = await Post.findById(postId);
     if (!post) {
-        throw new ApiError(404, "Post not found");
+        // 410 with the marker: this writes a checkout message into the chat, and
+        // there is no longer a listing to check out.
+        return sendDeletedTombstone(res, { contentId: postId, status: 410 });
     }
 
     const sellerId = post.userId;
@@ -1870,9 +1935,22 @@ export const getCheckoutDetails = asyncHandler(async (req, res) => {
     // Determine user role
     const isSeller = checkout.sellerId?.toString() === userId.toString();
     const userRole = isSeller ? 'seller' : 'buyer';
-    const post=await Post.findById(checkout.postId)
-    if (!post){
-        throw new ApiError(404, `${checkout?.productType} not found, please contact the seller `);
+    const post = await Post.findById(checkout.postId);
+    if (!post) {
+        // The checkout message stored productType at send time, so this is one of
+        // the few places the type of a deleted listing is still known — the
+        // tombstone can name it ("This service was deleted by the owner.")
+        // instead of falling back to the neutral wording.
+        return sendDeletedTombstone(res, {
+            contentType: checkout?.productType,
+            contentId: checkout.postId,
+            extra: {
+                messageId: message._id,
+                chatId: message.chatId,
+                userRole,
+                actions: { canProceedToPay: false, addressRequired: false, paymentLinkId: checkout.paymentLinkId },
+            },
+        });
     }
 
     // Always derive fresh media from the post so images/videos are current
@@ -1993,17 +2071,12 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     if (!message) {
         throw new ApiError(404, "Checkout message not found");
     }
-    
-    const post = await Post.findById(message.checkoutDetails.postId);
-    if (!post) {
-        throw new ApiError(404, `${message.checkoutDetails.productType || 'Product'} not found`);
-    }
-    if (post.contentType === "product" && post.customization?.product?.inStock === false) {
-        throw new ApiError(400, "Product is Out of stock");
-    }
-    const checkout = message.checkoutDetails;
 
-    // Verify buyer is in the chat
+    // Chat membership is settled BEFORE anything is read out of the checkout.
+    // It used to sit below the post lookup, so a caller who was not in the chat
+    // still learned the product type of any checkout message id they guessed;
+    // the tombstone below reports on the referenced post, and a non-participant
+    // has no business being told about it either.
     const chat = await Chat.findOne({
         _id: message.chatId,
         participants: buyerId
@@ -2012,6 +2085,23 @@ export const initiateCheckoutPayment = asyncHandler(async (req, res) => {
     if (!chat) {
         throw new ApiError(403, "Access denied");
     }
+
+    const post = await Post.findById(message.checkoutDetails.postId);
+    if (!post) {
+        // 410 with the marker: this is the "Proceed to Pay" call, so no order may
+        // be created — but the buyer is told exactly why, naming the type the
+        // checkout message recorded.
+        return sendDeletedTombstone(res, {
+            contentType: message.checkoutDetails.productType,
+            contentId: message.checkoutDetails.postId,
+            status: 410,
+            extra: { messageId: message._id },
+        });
+    }
+    if (post.contentType === "product" && post.customization?.product?.inStock === false) {
+        throw new ApiError(400, "Product is Out of stock");
+    }
+    const checkout = message.checkoutDetails;
 
     // Don't let seller pay themselves
     if (checkout.sellerId.toString() === buyerId.toString()) {

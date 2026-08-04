@@ -6,6 +6,14 @@ import { v4 as uuidv4 } from "uuid";
 import { sendSms } from "../../utils/sendSms.js";
 import { TempUser } from "../../models/tempUser.models.js";
 import { AuthOtp } from "../../models/authOtp.models.js";
+import { AcceptanceLog } from "../../models/acceptanceLog.models.js";
+import {
+    SIGNUP_CONSENT_FIELD,
+    readSignupConsent,
+    buildSignupLegalAcceptance,
+    getAllEffectiveVersions,
+    extractClientMeta,
+} from "../legal.controllers.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import {
@@ -37,6 +45,24 @@ const registerUser = asyncHandler(async (req, res) => {
 
     if (password !== confirmPassword) {
         throw new ApiError(400, "Password and confirm password do not match");
+    }
+
+    //* Consent to the Terms of Use and Privacy Policy, from the checkbox on the
+    //* signup form (SIGNUP_CONSENT_FIELD — see legal.controllers.js).
+    //*
+    //* THREE states, and the difference matters:
+    //*   true  -> recorded against the account when the OTP is verified.
+    //*   false -> the box was unticked. Refused, 400.
+    //*   null  -> no flag in the body at all: an app or browser build that
+    //*            predates the checkbox. Allowed through, because the shipped
+    //*            app must keep being able to register; nothing is recorded as
+    //*            accepted for it, exactly as before this existed.
+    const signupConsent = readSignupConsent(req.body);
+
+    if (signupConsent === false) {
+        throw new ApiError(400, "You must accept the Terms of Use and Privacy Policy to create an account", [
+            { field: SIGNUP_CONSENT_FIELD, message: "Please accept the Terms of Use and Privacy Policy to continue" }
+        ]);
     }
 
     // Usernames become part of a public URL (/userprofile/<username>), so they
@@ -96,6 +122,18 @@ const registerUser = asyncHandler(async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    //* The account itself is not created here — verifyRegistrationOTP creates
+    //* it minutes later — so the consent has to travel with the pending signup.
+    //* Captured NOW, because now is when the person actually ticked the box:
+    //* the timestamp, the version-bearing acceptance and the IP all belong to
+    //* this request, not to the later OTP screen.
+    //*
+    //* `ip` is LEGAL EVIDENCE, so it comes from extractClientMeta -> req.ip,
+    //* which express resolves through `trust proxy`. Never the raw
+    //* x-forwarded-for header, which is caller-supplied — guestAccount.js and
+    //* legal.controllers.js state the same rule.
+    const { ip: consentIp, userAgent: consentUserAgent } = extractClientMeta(req);
+
     await TempUser.findOneAndUpdate(
         { phoneNumber: normalizedPhone },
         {
@@ -107,8 +145,15 @@ const registerUser = asyncHandler(async (req, res) => {
             phoneNumber: normalizedPhone,
             dateOfBirth,
             gender: gender || 'prefer-not-to-say',
+            //* Pending consent. Written with `strict: false` because these are
+            //* not declared on TempUserSchema — see the note in
+            //* verifyRegistrationOTP, which reads them back with .lean().
+            legalConsentGiven:     signupConsent === true,
+            legalConsentAt:        signupConsent === true ? new Date() : null,
+            legalConsentIp:        signupConsent === true ? (consentIp || null) : null,
+            legalConsentUserAgent: signupConsent === true ? (consentUserAgent || null) : null,
         },
-        { upsert: true, new: true }
+        { upsert: true, new: true, strict: false }
     );
 
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
@@ -182,7 +227,14 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         await registerFailedOtpAttempt(otpRecord);
     }
 
-    const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone });
+    //* .lean() — the raw driver document, not a hydrated model.
+    //*
+    //* registerUser parks the signup consent on this row (legalConsentGiven and
+    //* friends) and those keys are NOT declared on TempUserSchema, so a
+    //* hydrated document would drop them on read and the consent would be lost
+    //* between the two halves of registration. Everything below reads plain
+    //* fields off this object, so lean costs nothing.
+    const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone }).lean();
     if (!tempUser) {
         throw new ApiError(404, "Registration session not found. Please register again.");
     }
@@ -224,6 +276,23 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
                 : "That username was taken while you were signing up. Please register again with a different username.");
     }
 
+    //* The consent captured when the signup form was submitted. A client MAY
+    //* also send the flag on THIS request — either one proves acceptance — so
+    //* an older install that only learns to send it on one of the two calls
+    //* still gets a record. Absent from both means an install that predates the
+    //* checkbox entirely: it registers exactly as before, with nothing recorded
+    //* as accepted, rather than being locked out of signup.
+    const signupConsent =
+        tempUser.legalConsentGiven === true || readSignupConsent(req.body) === true;
+
+    const versions = await getAllEffectiveVersions();
+    const requestMeta = extractClientMeta(req);
+    //* Prefer the evidence captured at the moment of consent; fall back to this
+    //* request for a client that consented here instead.
+    const acceptanceIp = tempUser.legalConsentIp || requestMeta.ip;
+    const acceptanceUserAgent = tempUser.legalConsentUserAgent || requestMeta.userAgent;
+    const acceptedAt = tempUser.legalConsentAt ? new Date(tempUser.legalConsentAt) : new Date();
+
     const uid = uuidv4();
     //* This writes through User.collection — the RAW driver — so NONE of the
     //* schema setters run. `email` is declared `trim: true, lowercase: true`,
@@ -254,6 +323,18 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         isBusinessProfile: false,
         isBlueTickVerified: false,
         messagingPrivacy: { onlineStatus: "everyone", lastSeen: "everyone" },
+        //* Written inline rather than through POST /legal/accept-signup: that
+        //* endpoint needs a JWT, and there is no account to issue one against
+        //* until the line below runs. EVERY key of the sub-document is set,
+        //* because this insert bypasses the schema defaults — see
+        //* buildSignupLegalAcceptance.
+        legalAcceptance: buildSignupLegalAcceptance({
+            accepted: signupConsent,
+            versions,
+            ip: acceptanceIp,
+            userAgent: acceptanceUserAgent,
+            acceptedAt,
+        }),
         servicePostPreferences: { enableAutoFill: true },
         productPostPreferences: { enableAutoFill: true },
         followers: [],
@@ -290,6 +371,21 @@ const verifyRegistrationOTP = asyncHandler(async (req, res) => {
         TempUser.deleteOne({ _id: tempUser._id }),
         AuthOtp.deleteOne({ _id: otpRecord._id }),
     ]);
+
+    //* Audit trail, mirroring acceptAtSignup and guestAccount.js. Best effort:
+    //* the account exists and is paid for in OTPs by this point, so a failure
+    //* to write the log must not fail the signup — the acceptance itself is
+    //* already on the user document above.
+    if (signupConsent) {
+        try {
+            await AcceptanceLog.insertMany([
+                { userId: user._id, docType: "TERMS",   version: versions.TERMS,   acceptedAt, ipAddress: acceptanceIp || null, userAgent: acceptanceUserAgent || null },
+                { userId: user._id, docType: "PRIVACY", version: versions.PRIVACY, acceptedAt, ipAddress: acceptanceIp || null, userAgent: acceptanceUserAgent || null },
+            ]);
+        } catch (err) {
+            console.error('[auth] Acceptance log write failed:', err.message);
+        }
+    }
 
     const { accessToken, refreshToken } = await generateAcessAndRefreshToken(user._id);
     const options = { httpOnly: true, secure: true };

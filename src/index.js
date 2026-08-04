@@ -7,6 +7,7 @@ import './config/firebase-admin.config.js'; // Initialize Firebase Admin on star
 import { startSubscriptionExpiryJob } from './jobs/subscriptionExpiry.job.js';
 import { ensureCollections } from './services/typesense/index.js';
 import { startShareSyncJob } from './jobs/shareSync.job.js';
+import { startStoryExpiryJob } from './jobs/storyExpiry.job.js';
 import { startLikeWorker } from './queues/likeQueue.js';
 // import { seedLikesToRedis } from './scripts/seedLikesToRedis.js';
 import { redisClient } from './config/redis.config.js';
@@ -79,6 +80,7 @@ connectDB()
             // Start cron jobs and queue workers
             startSubscriptionExpiryJob();
             startShareSyncJob();
+            startStoryExpiryJob();
             startLikeWorker();
         });
 

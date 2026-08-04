@@ -21,7 +21,7 @@ async function getEffectiveVersion(docType) {
 /**
  * Get effective versions for all document types at once.
  */
-async function getAllEffectiveVersions() {
+export async function getAllEffectiveVersions() {
   const overrides = await LegalVersion.find({});
   const map = {};
   for (const o of overrides) map[o.docType] = o.version;
@@ -33,7 +33,7 @@ async function getAllEffectiveVersions() {
   };
 }
 
-function extractClientMeta(req) {
+export function extractClientMeta(req) {
   // `ip` is stored as LEGAL EVIDENCE — legalAcceptance.acceptanceIP and every
   // AcceptanceLog row — so it must be `req.ip`, which express resolves through
   // the `trust proxy` setting in app.js. The raw x-forwarded-for header this
@@ -43,6 +43,85 @@ function extractClientMeta(req) {
   const ip = req.ip || req.socket?.remoteAddress || null;
   const userAgent = req.headers["user-agent"] || null;
   return { ip, userAgent };
+}
+
+// ─── Signup consent checkbox (shared with controllers/user/auth.js) ───────────
+
+/**
+ * THE request field name for the consent checkbox on the signup form.
+ *
+ * One boolean covers BOTH documents: the form shows a single checkbox whose
+ * label links to the Terms of Use and to the Privacy Policy, so ticking it is
+ * one act of acceptance recorded against both. The name is deliberately the
+ * one acceptAtSignup below already reads out of req.body, so there is exactly
+ * one spelling of "the user ticked the box" across the whole API.
+ *
+ * Both clients (Flutter app and website) must send this key.
+ */
+export const SIGNUP_CONSENT_FIELD = "termsAccepted";
+
+/**
+ * Other spellings accepted on the way IN only. Nothing should send these —
+ * they exist so that a client wired to the sibling names already used
+ * elsewhere in this codebase (acceptAtSignup's `privacyAccepted`, guest
+ * checkout's `acceptedTerms`) records consent instead of being rejected.
+ */
+const SIGNUP_CONSENT_ALIASES = [SIGNUP_CONSENT_FIELD, "privacyAccepted", "acceptedTerms"];
+
+/**
+ * Read the signup consent flag off a request body.
+ *
+ * @returns {true|false|null} `null` when the body carries NO flag at all —
+ * an install that predates the checkbox. Callers MUST treat null as "unknown",
+ * never as "refused": the shipped app has to keep being able to register.
+ * `false` is a real refusal (the user unticked the box) and is rejected
+ * by the caller.
+ */
+export function readSignupConsent(body) {
+  for (const key of SIGNUP_CONSENT_ALIASES) {
+    const raw = body?.[key];
+    if (raw === undefined || raw === null || raw === "") continue;
+    // multipart/form-data and query strings deliver booleans as strings.
+    return raw === true || raw === "true" || raw === 1 || raw === "1";
+  }
+  return null;
+}
+
+/**
+ * The COMPLETE `legalAcceptance` sub-document for a brand-new account.
+ *
+ * Every key is set explicitly, including the ones left untouched: registration
+ * inserts through the RAW driver (User.collection.insertOne), where none of the
+ * schema defaults declared in user.models.js run, so an omitted key is simply
+ * absent from the stored document rather than `false`/`null` — and
+ * getAcceptanceStatus / the acceptance middleware would then read `undefined`.
+ * Same shape guestAccount.js writes, so the admin history screens read it
+ * unchanged.
+ *
+ * `ip` is LEGAL EVIDENCE and must come from extractClientMeta (i.e. `req.ip`),
+ * never a raw x-forwarded-for value — see the note on that helper.
+ */
+export function buildSignupLegalAcceptance({ accepted, versions, ip, userAgent, acceptedAt }) {
+  const at = accepted ? acceptedAt : null;
+  return {
+    termsAccepted:         !!accepted,
+    termsAcceptedAt:       at,
+    termsVersion:          accepted ? versions.TERMS : null,
+    privacyAccepted:       !!accepted,
+    privacyAcceptedAt:     at,
+    privacyVersion:        accepted ? versions.PRIVACY : null,
+    // Seller onboarding is a separate, later act — see acceptSellerOnboarding.
+    sellerTermsAccepted:   false,
+    sellerTermsAcceptedAt: null,
+    sellerTermsVersion:    null,
+    communityAccepted:     false,
+    communityAcceptedAt:   null,
+    communityVersion:      null,
+    // Recorded only alongside an actual acceptance: an IP filed under
+    // `acceptanceIP` when nothing was accepted is evidence of nothing.
+    acceptanceIP:          accepted ? (ip || null) : null,
+    acceptanceUserAgent:   accepted ? (userAgent || null) : null,
+  };
 }
 
 // ─── Get current legal versions ───────────────────────────────────────────────

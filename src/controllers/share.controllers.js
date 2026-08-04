@@ -14,6 +14,10 @@ import {
   generateErrorHTML,
 } from "../utils/shareUtils.js";
 import { redisClient, RedisKeys, RedisTTL } from "../config/redis.config.js";
+// A share URL is permanent by nature — it lives in somebody else's chat long
+// after the post is gone. Answering 404 made every one of those links look
+// broken, so a deleted post now resolves to an explicit tombstone instead.
+import { sendDeletedTombstone, buildDeletedTombstone } from "../utils/contentTombstone.utils.js";
 import { batchIsLikedByUser } from "../utils/postEngagement.utils.js";
 import { createPostVisibilityChecker } from "./post/visibility.js";
 
@@ -64,7 +68,10 @@ export const generatePostShareLink = asyncHandler(async (req, res) => {
   );
 
   if (!post) {
-    throw new ApiError(404, "Post not found");
+    // 410 with the marker rather than 404: the caller is looking at a card for a
+    // post that has since been deleted, and "deleted by the owner" is the honest
+    // answer to "give me a link to this".
+    return sendDeletedTombstone(res, { contentType: "post", contentId: postId, status: 410 });
   }
 
   // Check if post can be shared
@@ -128,7 +135,8 @@ export const generateReelShareLink = asyncHandler(async (req, res) => {
   );
 
   if (!post) {
-    throw new ApiError(404, "Reel not found");
+    // See generatePostShareLink — same reasoning, reel wording.
+    return sendDeletedTombstone(res, { contentType: "reel", contentId: postId, status: 410 });
   }
 
   // Verify it's a reel or video
@@ -201,7 +209,12 @@ export const getSharedPost = asyncHandler(async (req, res) => {
     .lean();
 
   if (!post) {
-    throw new ApiError(404, "This post is no longer available");
+    // 200, not 404. This is the endpoint behind every shared /r/:postId link, and
+    // a 404 here is indistinguishable from a mistyped URL — which is exactly what
+    // produced the blank screen a recipient saw when the author deleted the post.
+    //
+    // Nothing about the post is disclosed: only that it existed and is gone.
+    return sendDeletedTombstone(res, { contentType: "post", contentId: postId });
   }
 
   // Check if sharing is allowed
@@ -347,7 +360,8 @@ export const getSharedReel = asyncHandler(async (req, res) => {
     .lean();
 
   if (!post) {
-    throw new ApiError(404, "This reel is no longer available");
+    // See getSharedPost — 200 with an explicit marker, reel wording.
+    return sendDeletedTombstone(res, { contentType: "reel", contentId: postId });
   }
 
   // Verify it's a reel or video
@@ -491,8 +505,15 @@ export const getPostPreviewPage = asyncHandler(async (req, res) => {
     .lean();
 
   if (!post) {
-    const errorHTML = generateErrorHTML("Post Not Found");
-    return res.status(404).type("html").send(errorHTML);
+    // 200, not 404: this page IS the answer to a link somebody followed, and the
+    // deleted state is a real, renderable outcome rather than an error. The
+    // "Post Not Found" wording is replaced with the tombstone sentence so the
+    // recipient reads the same thing here as in the app.
+    //
+    // The private-account and sharing-disabled branches BELOW keep their 403/404
+    // — those hide a post that still exists and must not start announcing it.
+    const { message } = buildDeletedTombstone({ contentType: "post", contentId: postId });
+    return res.status(200).type("html").send(generateErrorHTML(message));
   }
 
   // Check if sharing is allowed
@@ -553,8 +574,9 @@ export const getReelPreviewPage = asyncHandler(async (req, res) => {
     .lean();
 
   if (!post) {
-    const errorHTML = generateErrorHTML("Reel Not Found");
-    return res.status(404).type("html").send(errorHTML);
+    // See getPostPreviewPage — 200 with the tombstone sentence, reel wording.
+    const { message } = buildDeletedTombstone({ contentType: "reel", contentId: postId });
+    return res.status(200).type("html").send(generateErrorHTML(message));
   }
 
   // Verify it's a reel or video
@@ -622,7 +644,9 @@ export const trackShare = asyncHandler(async (req, res) => {
   const post = await Post.findById(postId);
 
   if (!post) {
-    throw new ApiError(404, "Post not found");
+    // Nothing to count a share against. 410 with the marker so the client shows
+    // "deleted by the owner" rather than a bare failure on the share sheet.
+    return sendDeletedTombstone(res, { contentType: "post", contentId: postId, status: 410 });
   }
 
   // Check if sharing is allowed

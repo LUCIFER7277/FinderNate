@@ -14,6 +14,10 @@ import { hasActivePaymentPlan } from "../../utils/businessPlan.utils.js";
 import { getFollowStatus } from '../../utils/followEngagement.utils.js';
 import { isBlockedBetween, getBlockedUserIds } from "../../middlewares/blocking.middleware.js";
 import { checkContentVisibility, getViewableUserIds } from "../../middlewares/privacy.middleware.js";
+// GET /posts/:postId is where every deep link lands — notification taps, order
+// references, shared URLs. A deleted post answers with an explicit tombstone
+// instead of a 404 the clients render as a blank screen.
+import { sendDeletedTombstone } from "../../utils/contentTombstone.utils.js";
 
 /**
  * Is this post's author a private account?
@@ -100,8 +104,24 @@ export const getPostById = asyncHandler(async (req, res) => {
         .populate('userId', 'username fullName profileImageUrl privacy isFullPrivate')
         .lean();
 
-    if (!post) throw new ApiError(404, "Post not found");
+    // The post row is gone — say so. 200 with an explicit marker, because this is
+    // the destination of links the caller legitimately holds and a 404 reads to
+    // them as a broken app, not as "the owner took it down".
+    //
+    // `_id` is echoed back so a client keyed on the id it asked for can still
+    // slot the tombstone into place; nothing else about the post is returned,
+    // because nothing else exists.
+    if (!post) {
+        return sendDeletedTombstone(res, {
+            contentType: 'post',
+            contentId: postId,
+            extra: { _id: postId },
+        });
+    }
 
+    // NOT a tombstone: the post still exists, it is the AUTHOR who is gone or
+    // suspended. Answering "deleted by the owner" here would assert something
+    // untrue, and these branches deliberately reveal nothing at all — keep 404.
     const postOwner = await User.findById(post.userId?._id || post.userId)
         .select('accountStatus isDeleted').lean();
     if (!postOwner || postOwner.isDeleted || postOwner.accountStatus !== 'active') {

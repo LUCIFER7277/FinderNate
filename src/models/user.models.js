@@ -98,7 +98,18 @@ const UserSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
-    // Legal acceptance tracking
+    /**
+     * LEGAL ACCEPTANCE TRACKING.
+     *
+     * Three paths write this: legal.controllers.js (through the model, so the
+     * defaults below apply), and the two account-creation paths —
+     * controllers/user/auth.js#verifyRegistrationOTP and
+     * controllers/user/guestAccount.js — which insert through the RAW driver,
+     * where NONE of these defaults run. Those two must therefore set every key
+     * explicitly; auth.js does it via buildSignupLegalAcceptance in
+     * legal.controllers.js. An omitted key is absent from the stored document,
+     * not `false`/`null`, and getAcceptanceStatus would read `undefined`.
+     */
     legalAcceptance: {
         termsAccepted:         { type: Boolean, default: false },
         termsAcceptedAt:       { type: Date,    default: null },
