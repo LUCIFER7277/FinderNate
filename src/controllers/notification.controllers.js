@@ -9,6 +9,7 @@ import { ApiError } from "../utils/ApiError.js";
 import notificationCache from "../utils/notificationCache.utils.js";
 import { User } from "../models/user.models.js";
 import { sendEmail } from "../utils/sendEmail.js";
+import { renderEmail, emailParagraph, emailCallout } from "../utils/emailTemplate.js";
 import { deliverPush } from "../services/pushDelivery.service.js";
 
 const sendRealTimeNotification = async (recipientId, notification, overrides = {}) => {
@@ -347,21 +348,49 @@ export const createBusinessVerificationNotification = async ({
         const user = await User.findById(recipientId).select('email fullName username');
         if (user?.email) {
             const name = user.fullName || user.username || 'there';
+            // fullName, businessName and the admin's remarks are all free text
+            // and were previously interpolated raw. emailParagraph/emailCallout
+            // escape everything they are given, so a name or a rejection reason
+            // containing `<` can no longer swallow the rest of the message.
+            const forBusiness = businessName ? ` for ${businessName}` : '';
+            const title = approved
+                ? 'Your business profile is approved'
+                : 'About your business profile';
+
+            const bodyHtml = approved
+                ? emailParagraph(`Hi ${name},`, { topGap: 0 })
+                  + emailParagraph(`Your business profile${forBusiness} has been approved.`)
+                  + emailParagraph('You can now use the business features on FinderNate.')
+                : emailParagraph(`Hi ${name},`, { topGap: 0 })
+                  + emailParagraph(`Your business profile${forBusiness} could not be approved yet.`)
+                  + (remarks ? emailCallout(`Reason: ${remarks}`) : '')
+                  + emailParagraph('You can update your details and submit again from your profile settings.');
+
+            const text = [
+                title, '',
+                `Hi ${name},`, '',
+                approved
+                    ? `Your business profile${forBusiness} has been approved.`
+                    : `Your business profile${forBusiness} could not be approved yet.`,
+                ...(approved ? ['You can now use the business features on FinderNate.']
+                             : [...(remarks ? [`Reason: ${remarks}`] : []),
+                                'You can update your details and submit again from your profile settings.']),
+                '', '--', 'findernate.com',
+            ].join('\n');
+
             await sendEmail({
                 to: user.email,
                 subject: approved
                     ? 'Your Findernate business profile is approved'
                     : 'About your Findernate business profile',
-                html: approved
-                    ? `<p>Hi ${name},</p>
-                       <p>Your business profile${businessName ? ` for <strong>${businessName}</strong>` : ''} has been approved.</p>
-                       <p>You can now use the business features on Findernate.</p>
-                       <p>— The Findernate team</p>`
-                    : `<p>Hi ${name},</p>
-                       <p>Your business profile${businessName ? ` for <strong>${businessName}</strong>` : ''} could not be approved yet.</p>
-                       ${remarks ? `<p><strong>Reason:</strong> ${remarks}</p>` : ''}
-                       <p>You can update your details and submit again from your profile settings.</p>
-                       <p>— The Findernate team</p>`,
+                html: renderEmail({
+                    title,
+                    preheader: approved
+                        ? 'Your business profile has been approved.'
+                        : 'There is an update on your business profile.',
+                    bodyHtml,
+                }),
+                text,
             });
         }
     } catch (e) {

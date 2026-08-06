@@ -131,6 +131,89 @@ ${escapeHtml(preheader)}&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;
 </body>
 </html>`;
 
+// ── Body-content helpers ─────────────────────────────────────────────────────
+//
+// Every one of these takes PLAIN TEXT and escapes it. That is the point: the
+// callers interpolate display names, admin remarks and product titles, and the
+// previous hand-written templates dropped all of them straight into the markup
+// unescaped. Making escaping the default — rather than something each call site
+// remembers — is what stops the next email from reintroducing it.
+//
+// Nothing here is XSS in the browser sense; mail clients do not run scripts.
+// The real damage is a name or a product title containing a stray `<` silently
+// eating the rest of the message, or a crafted one closing the layout early and
+// appending its own link under FinderNate's branding.
+
+/** A body paragraph. */
+export const emailParagraph = (text, { muted = false, topGap = 16 } = {}) =>
+    `<p style="margin:${topGap}px 0 0 0; font-size:15px; line-height:23px; color:${muted ? MUTED : INK};">${escapeHtml(text)}</p>`;
+
+/**
+ * A call-to-action button.
+ *
+ * Built from a table cell, not a styled <a>: the Word engine behind Outlook on
+ * Windows ignores padding on inline elements, so a padded anchor collapses to
+ * bare underlined text there. A td with bgcolor and cellpadding renders
+ * everywhere. Outlook drops the rounded corners and shows a square button,
+ * which is the intended degradation.
+ *
+ * The URL is always accompanied by a visible plain-text copy at the call site —
+ * a button whose target cannot be read is indistinguishable from a phishing
+ * button, and some clients strip the link entirely.
+ */
+export const emailButton = ({ label, url }) => `
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0 0;">
+              <tr>
+                <td align="center" bgcolor="${GOLD_500}" style="background-color:${GOLD_500}; border-radius:8px;">
+                  <a href="${escapeHtml(url)}" style="display:inline-block; padding:13px 30px; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:15px; font-weight:600; line-height:20px; color:${INK}; text-decoration:none;">${escapeHtml(label)}</a>
+                </td>
+              </tr>
+            </table>`;
+
+/**
+ * A label/value block — order number, amount, username and the like.
+ * @param {Array<[string, string]>} rows
+ */
+export const emailDetails = (rows) => `
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:22px 0 0 0; background-color:${GOLD_50}; border:1px solid ${BORDER}; border-radius:10px;">
+              ${rows.map(([label, value], i) => `<tr>
+                <td style="padding:${i === 0 ? '16' : '0'}px 18px ${i === rows.length - 1 ? '16' : '10'}px 18px; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:13px; line-height:19px; color:${MUTED};">${escapeHtml(label)}</td>
+                <td align="right" style="padding:${i === 0 ? '16' : '0'}px 18px ${i === rows.length - 1 ? '16' : '10'}px 18px; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:14px; line-height:19px; font-weight:600; color:${INK};">${escapeHtml(value)}</td>
+              </tr>`).join('\n              ')}
+            </table>`;
+
+/**
+ * A tinted notice. `tone: 'warning'` is for the internal action-required alert
+ * — it is the one email a human is expected to act on, and it should not look
+ * like the transactional mail around it in a busy inbox.
+ */
+export const emailCallout = (text, { tone = 'neutral' } = {}) => {
+    const bg = tone === 'warning' ? '#FEF2F2' : GOLD_50;
+    const edge = tone === 'warning' ? '#DC2626' : GOLD_500;
+    return `
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:20px 0 0 0;">
+              <tr>
+                <td style="background-color:${bg}; border-left:4px solid ${edge}; border-radius:6px; padding:14px 18px; font-family:'Segoe UI',Roboto,Helvetica,Arial,sans-serif; font-size:14px; line-height:21px; color:${INK};">${escapeHtml(text)}</td>
+              </tr>
+            </table>`;
+};
+
+/**
+ * The one-time code, in its own tinted box.
+ *
+ * A table cell rather than a styled div so the Word engine behind Outlook still
+ * renders the wash and the border. `user-select:all` lets a desktop user grab
+ * the whole code in one click and is harmless where unsupported.
+ */
+export const emailCodeBlock = (code) => `
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:22px 0 0 0;">
+              <tr>
+                <td align="center" style="background-color:${GOLD_50}; border:1px solid ${GOLD_500}; border-radius:10px; padding:22px 16px;">
+                  <div class="fn-code" style="font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace; font-size:34px; line-height:42px; font-weight:700; letter-spacing:9px; text-indent:9px; color:${INK}; -webkit-user-select:all; user-select:all;">${escapeHtml(code)}</div>
+                </td>
+              </tr>
+            </table>`;
+
 /**
  * The one-time-code email, HTML and plain text.
  *
@@ -153,22 +236,11 @@ ${escapeHtml(preheader)}&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;&#8204;
 export const renderOtpEmail = ({ title, intro, code, expiryMs, disclaimer }) => {
     const minutes = Math.max(1, Math.round(expiryMs / 60000));
     const unit = minutes === 1 ? 'minute' : 'minutes';
-    const safeCode = escapeHtml(code);
-
+    // Raw `code` — emailCodeBlock escapes it. Pre-escaping here would
+    // double-encode anything non-alphanumeric the day a code format changes.
     const bodyHtml = `
-            <p style="margin:0 0 22px 0; font-size:15px; line-height:23px; color:${INK};">${escapeHtml(intro)}</p>
-
-            <!-- The code sits in a table cell rather than a styled div so Word-
-                 engine Outlook still renders the wash and the border. -->
-            <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
-              <tr>
-                <td align="center" style="background-color:${GOLD_50}; border:1px solid ${GOLD_500}; border-radius:10px; padding:22px 16px;">
-                  <!-- user-select:all lets a desktop user select the whole code
-                       with one click; harmless where unsupported. -->
-                  <div class="fn-code" style="font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace; font-size:34px; line-height:42px; font-weight:700; letter-spacing:9px; text-indent:9px; color:${INK}; -webkit-user-select:all; user-select:all;">${safeCode}</div>
-                </td>
-              </tr>
-            </table>
+            <p style="margin:0; font-size:15px; line-height:23px; color:${INK};">${escapeHtml(intro)}</p>
+${emailCodeBlock(code)}
 
             <p style="margin:20px 0 0 0; font-size:14px; line-height:21px; color:${MUTED};">
               This code expires in <strong style="color:${INK};">${minutes} ${unit}</strong>.

@@ -13,6 +13,14 @@ import { User } from "../models/user.models.js";
 import { resolveOrCreateGuestBuyer } from "../controllers/user/guestAccount.js";
 import { canonicalIdentifier, OTP_EXPIRY_MS } from "../controllers/user/_helpers.js";
 import { sendEmail } from "./sendEmail.js";
+import {
+    renderEmail,
+    renderOtpEmail,
+    emailParagraph,
+    emailButton,
+    emailDetails,
+    emailCallout,
+} from "./emailTemplate.js";
 import { sendSms } from "./sendSms.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,16 +240,43 @@ const sendGuestClaimLink = async ({ user, orderNumber }) => {
     // ── Email (best-effort backup) ───────────────────────────────────────────
     try {
         await upsertOtp(canonicalIdentifier(user, 'email'), 'email');
+        const claimTitle = 'Your FinderNate account is ready';
+        const claimBody =
+            emailParagraph(`We created an account for you so you can track order #${orderNumber}.`, { topGap: 0 })
+            + emailCodeBlock(plainOtp)
+            + emailParagraph(`This code is valid for ${expiryMinutes} minutes. If it expires, use "Forgot password" on the same page.`, { muted: true })
+            + emailButton({ label: 'Set your password', url: claimUrl })
+            // The URL is repeated as visible text on purpose: some clients strip
+            // the button, and a payment-related button whose destination cannot
+            // be read is indistinguishable from a phishing button.
+            + emailParagraph(`Or open this link: ${claimUrl}`, { muted: true })
+            + emailDetails([
+                ['Sign in with', user.email],
+                ['Your username', user.username],
+                ['Order', `#${orderNumber}`],
+            ]);
+
+        const claimText = [
+            claimTitle, '',
+            `We created an account for you so you can track order #${orderNumber}.`, '',
+            `Your code: ${plainOtp}`,
+            `Valid for ${expiryMinutes} minutes. If it expires, use "Forgot password" on the same page.`, '',
+            `Set your password: ${claimUrl}`, '',
+            `Sign in with: ${user.email}`,
+            `Your username: ${user.username}`,
+            `Order: #${orderNumber}`, '',
+            '--', 'findernate.com',
+        ].join('\n');
+
         const emailResult = await sendEmail({
             to: user.email,
             subject: "Set your password - FinderNate",
-            html: `
-                <h3>Your FinderNate account is ready</h3>
-                <p>We created an account for you so you can track order <b>#${orderNumber}</b>.</p>
-                <h2>Your code is: <b>${plainOtp}</b></h2>
-                <p>Open <a href="${claimUrl}">${claimUrl}</a>, enter <b>${user.email}</b> and this code, then choose your password.</p>
-                <p>This code is valid for ${expiryMinutes} minutes. If it expires, just use "Forgot password" on the same page.</p>
-                <p>Your username is <b>${user.username}</b>.</p>`
+            html: renderEmail({
+                title: claimTitle,
+                preheader: `Your account for order #${orderNumber} is ready — set a password to track it.`,
+                bodyHtml: claimBody,
+            }),
+            text: claimText,
         });
         result.email = { ...emailResult, sent: !!emailResult?.success };
         if (!emailResult?.success) {
@@ -328,21 +363,42 @@ const notifyGuestOrderRefunded = async ({ order, email }) => {
 
     if (email) {
         try {
+            const productName = order.productDetails?.name || 'your order';
+            const refundTitle = 'We have refunded your payment';
+            const refundBody =
+                emailParagraph(`Your payment for order #${order.orderNumber} has been refunded to the payment method you used.`, { topGap: 0 })
+                // The product name is seller-supplied free text and was
+                // previously interpolated raw; emailDetails escapes it.
+                + emailDetails([
+                    ['Refunded', amountText],
+                    ['Order', `#${order.orderNumber}`],
+                    ['Item', productName],
+                ])
+                + emailParagraph('This email address already has a FinderNate account, so we could not create a new one to hold the order — and we will never attach a paid order to an existing account without you signing in. Rather than leave your money sitting with us, we sent it straight back.')
+                + emailParagraph('Refunds normally reach your account within 5-7 business days.', { muted: true })
+                + emailParagraph('To buy this item, sign in with this email address first and check out again — your order will then be tracked on your account.');
+
+            const refundText = [
+                refundTitle, '',
+                `Your payment for order #${order.orderNumber} has been refunded to the payment method you used.`, '',
+                `Refunded: ${amountText}`,
+                `Order: #${order.orderNumber}`,
+                `Item: ${productName}`, '',
+                'This email address already has a FinderNate account, so we could not create a new one to hold the order — and we will never attach a paid order to an existing account without you signing in. Rather than leave your money sitting with us, we sent it straight back.', '',
+                'Refunds normally reach your account within 5-7 business days.', '',
+                'To buy this item, sign in with this email address first and check out again — your order will then be tracked on your account.', '',
+                '--', 'findernate.com',
+            ].join('\n');
+
             await sendEmail({
                 to: email,
                 subject: `Refund issued for order #${order.orderNumber} - FinderNate`,
-                html: `
-                    <h3>We have refunded your payment</h3>
-                    <p>Your payment of <b>${amountText}</b> for order <b>#${order.orderNumber}</b>
-                       (${order.productDetails?.name || 'your order'}) has been refunded to the
-                       payment method you used.</p>
-                    <p>This email address already has a FinderNate account, so we could not create a
-                       new one to hold the order, and we will never attach a paid order to an existing
-                       account without you signing in. Rather than leave your money sitting with us,
-                       we sent it straight back.</p>
-                    <p>Refunds normally reach your account within 5-7 business days.</p>
-                    <p>To buy this item, please sign in with this email address first and check out
-                       again — your order will then be tracked on your account.</p>`
+                html: renderEmail({
+                    title: refundTitle,
+                    preheader: `${amountText} for order #${order.orderNumber} has been sent back to your payment method.`,
+                    bodyHtml: refundBody,
+                }),
+                text: refundText,
             });
         } catch (err) {
             console.error(`[guest-refund] Buyer email failed for order ${order.orderNumber}:`, err?.message);
@@ -394,14 +450,42 @@ const flagGuestOrderForAdmin = async (order, reason) => {
     const adminEmail = process.env.ADMIN_ALERT_EMAIL || process.env.SUPPORT_EMAIL;
     if (!adminEmail) return;
     try {
+        const alertTitle = 'A guest order needs a manual refund';
+        const alertAmount = `₹${Number(order.amount).toFixed(2)}`;
+        // Warning tone, not the usual gold: this is the only email that asks a
+        // human to go and do something, and it must not read as one more
+        // transactional notice in a busy inbox. `reason` is an internal error
+        // string — escaped like everything else, since it can carry anything a
+        // gateway or a stack trace put in it.
+        const alertBody =
+            emailParagraph(`Order #${order.orderNumber} settled with no buyer account, and the automatic refund did not go through. The money is still with us.`, { topGap: 0 })
+            + emailCallout(`Reason: ${String(reason)}`, { tone: 'warning' })
+            + emailDetails([
+                ['Order number', String(order.orderNumber)],
+                ['Order id', String(order._id)],
+                ['Amount to refund', alertAmount],
+            ])
+            + emailParagraph('Refund it from the admin escrow screen.');
+
+        const alertText = [
+            alertTitle, '',
+            `Order #${order.orderNumber} settled with no buyer account, and the automatic refund did not go through. The money is still with us.`, '',
+            `Reason: ${String(reason)}`, '',
+            `Order number: ${order.orderNumber}`,
+            `Order id: ${order._id}`,
+            `Amount to refund: ${alertAmount}`, '',
+            'Refund it from the admin escrow screen.',
+        ].join('\n');
+
         await sendEmail({
             to: adminEmail,
             subject: `[Action required] Guest order ${order.orderNumber} needs a manual refund`,
-            html: `
-                <p>Order <b>${order.orderNumber}</b> (<code>${order._id}</code>) settled with no buyer
-                   account and the automatic refund did not go through.</p>
-                <p>Reason: ${String(reason)}</p>
-                <p>Amount: ₹${Number(order.amount).toFixed(2)} — refund it from the admin escrow screen.</p>`
+            html: renderEmail({
+                title: alertTitle,
+                preheader: `${alertAmount} is stuck on order #${order.orderNumber} and needs a manual refund.`,
+                bodyHtml: alertBody,
+            }),
+            text: alertText,
         });
     } catch (err) {
         console.error('[guest-refund] Admin alert email failed:', err?.message);
