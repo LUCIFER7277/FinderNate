@@ -4,6 +4,15 @@ import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 
+// The account number is never returned in full to the seller — only the admin
+// payout view reads it raw, because that is the person who has to type it into
+// a banking app. Guarded on length so a short/garbage value cannot be echoed
+// back whole by slice(-4).
+const maskAccountNumber = (value) => {
+    const raw = (value || '').toString();
+    return raw.length >= 4 ? '****' + raw.slice(-4) : raw;
+};
+
 // POST /api/v1/business/bank-details
 export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
     const userId = req.user._id;
@@ -17,8 +26,8 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
         branchName
     } = req.body;
 
-    if (!accountHolderName || !bankName || !accountNumber || !ifscCode || !accountType) {
-        throw new ApiError(400, "Account holder name, bank name, account number, IFSC code, and account type are required");
+    if (!accountHolderName || !bankName || !ifscCode || !accountType) {
+        throw new ApiError(400, "Account holder name, bank name, IFSC code, and account type are required");
     }
 
     if (!['savings', 'current'].includes(accountType.toLowerCase())) {
@@ -42,6 +51,38 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
     const business = await Business.findById(user.businessProfileId);
     if (!business) {
         throw new ApiError(404, "Business profile not found");
+    }
+
+    // ── The account number is OPTIONAL on update, and required only the first
+    // ── time ──────────────────────────────────────────────────────────────────
+    // It is only ever returned masked ('****1234'), so both clients blank the
+    // field when they open the edit form. While it was mandatory, changing any
+    // other detail — a branch name, a UPI id — forced the seller to retype their
+    // full account number from memory. One slipped digit silently replaced a
+    // correct account number with a wrong one, and payouts are MANUAL: an admin
+    // reads this number and transfers real money to it. Nothing downstream would
+    // have caught it.
+    //
+    // So: send a new number to change it, omit it to keep the stored one. A
+    // masked value echoed back from a GET is treated as "unchanged" rather than
+    // written literally — otherwise a client that prefilled the form would
+    // overwrite the real number with the mask.
+    const existingAccountNumber = business.bankDetails?.accountNumber;
+    const submittedAccountNumber = typeof accountNumber === 'string' ? accountNumber.trim() : '';
+    const looksMasked = /^[*x•]{2,}/i.test(submittedAccountNumber);
+
+    let finalAccountNumber;
+    if (submittedAccountNumber && !looksMasked) {
+        // Digits only, and a length real Indian bank accounts fall inside.
+        // Catches a pasted IFSC, a phone number with spaces, a truncated entry.
+        if (!/^\d{6,20}$/.test(submittedAccountNumber)) {
+            throw new ApiError(400, "Account number must be 6 to 20 digits, with no spaces or letters");
+        }
+        finalAccountNumber = submittedAccountNumber;
+    } else if (existingAccountNumber) {
+        finalAccountNumber = existingAccountNumber;
+    } else {
+        throw new ApiError(400, "Account number is required");
     }
 
     let paymentQRCodeUrl = business.bankDetails?.paymentQRCode;
@@ -69,7 +110,7 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
     business.bankDetails = {
         accountHolderName: accountHolderName.trim(),
         bankName: bankName.trim(),
-        accountNumber,
+        accountNumber: finalAccountNumber,
         ifscCode: ifscCode.toUpperCase(),
         accountType: accountType.toLowerCase(),
         upiId: upiId ? upiId.toLowerCase() : business.bankDetails?.upiId,
@@ -88,14 +129,17 @@ export const addOrUpdateBankDetails = asyncHandler(async (req, res) => {
             bankDetails: {
                 accountHolderName: business.bankDetails.accountHolderName || '',
                 bankName: business.bankDetails.bankName || '',
-                accountNumber: '****' + business.bankDetails.accountNumber.slice(-4),
+                accountNumber: maskAccountNumber(business.bankDetails.accountNumber),
                 ifscCode: business.bankDetails.ifscCode || '',
                 accountType: business.bankDetails.accountType || '',
                 upiId: business.bankDetails.upiId || '',
                 branchName: business.bankDetails.branchName || '',
                 paymentQRCode: business.bankDetails.paymentQRCode || null,
                 isVerified: business.bankDetails.isVerified || false,
-                updatedAt: business.bankDetails.updatedAt || null
+                updatedAt: business.bankDetails.updatedAt || null,
+                // Lets the client say "leave blank to keep the saved number"
+                // instead of silently demanding a retype.
+                accountNumberOnFile: true
             }
         }, "Bank details updated successfully")
     );
@@ -128,17 +172,16 @@ export const getBankDetails = asyncHandler(async (req, res) => {
         );
     }
 
-    const accountNumber = business.bankDetails.accountNumber || '';
-    const maskedAccountNumber = accountNumber.length >= 4
-        ? '****' + accountNumber.slice(-4)
-        : accountNumber;
-
     return res.status(200).json(
         new ApiResponse(200, {
             bankDetails: {
                 accountHolderName: business.bankDetails.accountHolderName || '',
                 bankName: business.bankDetails.bankName || '',
-                accountNumber: maskedAccountNumber,
+                accountNumber: maskAccountNumber(business.bankDetails.accountNumber),
+                // The client shows the mask and treats the input as optional:
+                // blank means "keep this one". Without this the seller had to
+                // retype the full number to change anything else on the form.
+                accountNumberOnFile: true,
                 ifscCode: business.bankDetails.ifscCode || '',
                 accountType: business.bankDetails.accountType || '',
                 upiId: business.bankDetails.upiId || '',

@@ -30,19 +30,19 @@ const PaymentLinkSchema = new mongoose.Schema({
     // and the tombstone helper already normalises anything it does not know.
     contentType: { type: String },
     amount: { type: Number, required: true },
-    // THE SELLER CHOSE `amount` THEMSELVES — it is not the post's list total.
+    // REMOVED FIELD — `sellerSetAmount` is deliberately NOT declared here.
     //
-    // Written only by createShareablePaymentLink, which authenticates the
-    // seller, verifies they own the post, and bounds the figure against the
-    // post's own price. It is what makes a discount possible: the pay endpoint
-    // charges the amount stored HERE when the request names this link by its
-    // linkId, instead of recomputing the list total from the Post.
+    // It briefly marked a link whose `amount` the seller had chosen themselves
+    // (a discount on their own listing). That feature was removed: links are now
+    // always minted at the listing's own total and the charge is always
+    // recomputed from the Post, so no seller-chosen figure exists to record.
     //
-    // A BUYER CAN NEVER SET IT, and it is never inferred from a figure a buyer
-    // sends. DELIBERATELY HAS NO DEFAULT: a link minted before this field
-    // existed was paid at the post's list total, and `false` vs `undefined`
-    // must not change what an old link charges.
-    sellerSetAmount: { type: Boolean },
+    // Rows minted while it existed still carry the field in MongoDB. Nothing
+    // charges from it any more, but resolveLinkPricingFlow still READS it off
+    // the raw document (payments.controllers.js) so those legacy links are not
+    // mistaken for online-store mints and handed the store's shipping waiver.
+    // Do not re-add it to the schema and do not backfill it — leaving it
+    // undeclared is what keeps it read-only.
     shippingCharges: { type: Number, default: 0 },
     gstAmount: { type: Number, default: 0 },
     gstPercent: { type: Number, default: 0 },

@@ -154,29 +154,20 @@ const backfillLinkContentType = async (paymentLink, post) => {
 // The bound is re-applied at PAY time against the post as it stands then, so a
 // link cannot become absurd later by the seller lowering the listed price.
 const MIN_CHARGEABLE_AMOUNT = 1;          // Cashfree rejects anything below ₹1
-const SELLER_AMOUNT_CEILING_MULTIPLE = 2; // of the post's own list total
-// Absolute ceiling for a post that has no list price of its own to scale from.
-// Without this, `listTotal > 0` was false for any post with no product/service
-// block (or a price of 0), the relative ceiling was skipped entirely, and a
-// seller-set link on such a post could name ANY figure — which is exactly the
-// slipped-digit case the bound exists to catch. A flat cap is cruder than 2x a
-// real list price, but "no reference price" must not mean "no limit".
-const SELLER_AMOUNT_ABSOLUTE_CEILING = 500000; // ₹5,00,000
-const assertSellerAmountAllowed = (amount, listTotal) => {
+// Ceiling for the ONE remaining case where a shareable link carries a figure
+// that did not come from the listing: a post with no product/service price
+// block at all, where there is no list total to mint at. Everywhere else the
+// link is minted at the post's own total, so no caller-supplied price survives.
+// "No reference price" must still not mean "no limit" — a slipped digit here
+// mints a link that charges 100x.
+const UNPRICED_POST_AMOUNT_CEILING = 500000; // ₹5,00,000
+const assertLinkAmountAllowed = (amount) => {
     if (!Number.isFinite(amount) || amount < MIN_CHARGEABLE_AMOUNT) {
         throw new ApiError(400, `Amount must be at least ₹${MIN_CHARGEABLE_AMOUNT}`);
     }
-    // Whichever bound is available; when the post has a real list total the
-    // relative one is tighter and wins, otherwise the flat cap applies.
-    const ceiling = listTotal > 0
-        ? round2(listTotal * SELLER_AMOUNT_CEILING_MULTIPLE)
-        : SELLER_AMOUNT_ABSOLUTE_CEILING;
-
-    if (amount > ceiling) {
+    if (amount > UNPRICED_POST_AMOUNT_CEILING) {
         throw new ApiError(400,
-            listTotal > 0
-                ? `Amount cannot be more than ₹${ceiling} for this listing (its listed total is ₹${listTotal}).`
-                : `Amount cannot be more than ₹${ceiling}. This listing has no price set, so a custom amount is capped.`
+            `Amount cannot be more than ₹${UNPRICED_POST_AMOUNT_CEILING}. This listing has no price set, so the amount on its link is capped.`
         );
     }
 };
@@ -226,12 +217,17 @@ const resolveLinkPricingFlow = (link, pricing) => {
     if (link?.pricingFlow === PRICING_FLOW.ONLINE_STORE)   return PRICING_FLOW.ONLINE_STORE;
     if (link?.pricingFlow === PRICING_FLOW.SHAREABLE_LINK) return PRICING_FLOW.SHAREABLE_LINK;
 
-    // A figure the SELLER chose is not evidence of anything about which checkout
-    // minted the link, so it must never be read as one. Without this, a seller
-    // link that happens to sit at the store's shipping-waived total would be
-    // inferred as a store mint and hand that waiver to the public pay URL for a
-    // post the store does not sell.
-    if (link?.sellerSetAmount) return PRICING_FLOW.SHAREABLE_LINK;
+    // LEGACY ROWS ONLY. The seller-set price feature has been removed, so nothing
+    // writes `sellerSetAmount` any more — but rows minted while it existed still
+    // carry it, and for those the figure came from the seller rather than from
+    // either checkout. It is not evidence of which flow minted the link and must
+    // never be read as one: a seller link that happens to sit at the store's
+    // shipping-waived total would otherwise be inferred as a store mint and hand
+    // that waiver to the public pay URL for a post the store does not sell.
+    // Read off the raw document because the field is no longer in the schema.
+    if (link?.get?.('sellerSetAmount', null, { strict: false })) {
+        return PRICING_FLOW.SHAREABLE_LINK;
+    }
 
     // Minted before pricingFlow was recorded: infer from the figure it carries.
     // Only conclusive when the two totals differ — when they are equal (no
@@ -859,29 +855,31 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         throw new ApiError(403, "You can only create payment links for your own posts");
     }
 
-    // ── The seller's own figure, bounded and recorded ─────────────────────────
-    // This request is the ONE place a price may come from outside the Post: the
-    // caller is authenticated, is a business account, and has just been verified
-    // to own the listing, so a discount they choose is theirs to give. It used to
-    // be stored and then silently ignored at pay time — every buyer was charged
-    // the list total instead — which is the bug this fixes.
+    // ── The link is minted at the LISTING's price, never at a figure the caller
+    // ── chose ─────────────────────────────────────────────────────────────────
+    // Sellers cannot set a custom/discounted price on a checkout link. The
+    // request still carries `amount` (both clients send the listing price), but
+    // it is not trusted as a price: whenever the post has a computable total,
+    // THAT is what the link is minted at and the submitted figure is discarded.
     //
-    // `sellerSetAmount` is what the pay endpoint keys on, and it is set only when
-    // the figure actually differs from the post's own total. A link minted at the
-    // list price therefore behaves exactly as every link does today, and nothing
-    // a buyer sends can ever produce this flag.
+    // This is deliberate rather than lenient. The alternative — storing the
+    // caller's figure and recomputing the real one at pay time — is what used to
+    // happen, and it meant a link could quote one number and charge another. One
+    // price, resolved from the listing, on both the link and the charge.
+    //
+    // The only case where the submitted amount survives is a post with no
+    // product/service price block at all: there is nothing to mint at, so the
+    // figure is kept and bounded instead.
     const listPricing = resolvePostPricing(post);
-    assertSellerAmountAllowed(numericAmount, listPricing.totalPrice);
-    const isSellerSetAmount = !(
-        listPricing.totalPrice > 0 &&
-        Math.abs(numericAmount - listPricing.totalPrice) < 0.01
-    );
+    const hasListTotal = listPricing.totalPrice > 0;
+    const linkAmount = hasListTotal ? round2(listPricing.totalPrice) : numericAmount;
+    if (!hasListTotal) assertLinkAmountAllowed(linkAmount);
 
     // Get product details from post
     let productDetails = {
         name: post.caption || "Product",
         description: post.description || "",
-        price: numericAmount,
+        price: linkAmount,
         images: post.media?.filter(m => m.type === 'image').map(m => m.url).filter(Boolean) || []
     };
 
@@ -890,7 +888,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         productDetails = {
             name: post.customization.product.name || productDetails.name,
             description: post.customization.product.description || productDetails.description,
-            price: numericAmount, // Always use the custom amount
+            price: linkAmount, // the listing's own total
             images: post.customization.product.images || productDetails.images,
             category: post.customization.product.category
         };
@@ -898,7 +896,7 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         productDetails = {
             name: post.customization.service.name || productDetails.name,
             description: post.customization.service.description || productDetails.description,
-            price: numericAmount,
+            price: linkAmount,
             images: productDetails.images,
             category: post.customization.service.category
         };
@@ -915,8 +913,12 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
         postId,
         contentType: postContentType(post) || undefined,
         productDetails,
-        amount: numericAmount,
-        sellerSetAmount: isSellerSetAmount || undefined,
+        amount: linkAmount,
+        // Recorded explicitly so resolveLinkPricingFlow never has to INFER the
+        // flow from the figure. Without it, a shareable link that happens to sit
+        // at the store's shipping-waived total gets read as a store mint and
+        // hands that waiver to the public pay URL.
+        pricingFlow: PRICING_FLOW.SHAREABLE_LINK,
         expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days expiry
         paymentUrl: `${frontendUrl}/checkout/${linkId}`,
         shortUrl: `${frontendUrl}/p/${linkId}`,
@@ -930,11 +932,10 @@ export const createShareablePaymentLink = asyncHandler(async (req, res) => {
                 paymentUrl: paymentLink.paymentUrl,
                 shortUrl: paymentLink.shortUrl,
                 postId: postId,
-                amount: numericAmount,
-                // True when the seller priced this link themselves rather than
-                // taking the post's total — the seller UI can say so, and it is
-                // the figure the buyer will be charged.
-                sellerSetAmount: isSellerSetAmount,
+                // The listing's own total — which is also exactly what the buyer
+                // will be charged. It can differ from the `amount` the caller
+                // submitted; the caller does not set the price.
+                amount: linkAmount,
                 productDetails: paymentLink.productDetails,
                 expiresAt: paymentLink.expiresAt,
                 seller: {
@@ -1183,26 +1184,6 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
 
     shippingCharges = round2(totalPrice - basePrice - gstAmount);
 
-    // ── The seller's own price for THIS link, quoted alongside the list total ──
-    // A business seller may mint a link at their own figure (a discount on their
-    // own item). It is reported ADDITIVELY rather than in place of `totalPrice`,
-    // and that is deliberate: it is only chargeable by a client that sends this
-    // link's `linkId` with the payment (see createShareablePhonePeOrder), so
-    // overwriting `totalPrice` with it would give an older client a page whose
-    // Pay button submits a figure the server must refuse. A client that knows
-    // about this field pays `sellerSetPrice.amount` and sends `linkId`; one that
-    // does not keeps quoting and paying `totalPrice`, exactly as before.
-    //
-    // Null whenever the link simply carries the post's own total, which is every
-    // link minted by a checkout flow.
-    const sellerSetPrice = paymentLink.sellerSetAmount
-        ? {
-            amount:   round2(Number(paymentLink.amount)),
-            currency: paymentLink.currency || 'INR',
-            linkId:   paymentLink.linkId,
-        }
-        : null;
-
     const seller = paymentLink.sellerId;
 
     return res.status(200).json(
@@ -1230,7 +1211,6 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
                     totalPrice,
                     currency: paymentLink.currency || 'INR'
                 },
-                sellerSetPrice,
                 seller: {
                     _id: seller._id,
                     fullName: seller.fullName,
@@ -1293,11 +1273,11 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
 // Signed-in buyers and guests both land here; a guest additionally supplies
 // buyerDetails (name, email, phone, 13+ attestation, terms acceptance).
 export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
-    // `linkId` is OPTIONAL, and it is not a price: it names WHICH of the
-    // seller's own checkout links is being paid, so that link's stored amount
-    // can be used. The buyer's `amount` is still required and still has to match
-    // — see the seller-set block below.
-    const { postId, amount, linkId, buyerDetails, shippingAddress } = req.body;
+    // Any `linkId` in the body is IGNORED. It was read here while sellers could
+    // price their own links; that feature is gone, and the amount is recomputed
+    // from the Post on every payment. Accepting it silently rather than 400ing
+    // keeps already-shipped app builds working — they still send it.
+    const { postId, amount, buyerDetails, shippingAddress } = req.body;
     const buyerId = req.user?._id; // May be null for guest checkout
 
     // Validate required fields
@@ -1350,73 +1330,16 @@ export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
     // price is still rejected.
     const postPricing = resolvePostPricing(post);
 
-    // ── A SELLER-AUTHORISED PRICE, ONLY WHEN THE REQUEST NAMES THE LINK ───────
-    // A business seller may mint a checkout link at a figure of their own — a
-    // discount on an item they own (createShareablePaymentLink, which
-    // authenticates them, verifies the ownership and bounds the figure). That
-    // amount used to be discarded here and the buyer charged the list total
-    // instead, so the discount never reached anybody.
-    //
-    // The rule that keeps this from reopening the price-tampering hole:
-    //   • The amount charged is read out of the STORED LINK, server-side. The
-    //     request body cannot introduce a figure — it can only name a link.
-    //   • The link is named by its linkId, the unguessable token the seller
-    //     shares. A buyer inventing numbers cannot reach a price of their own,
-    //     and cannot discover a discount by trying amounts.
-    //   • The buyer's `amount` must still equal what the server is about to
-    //     charge, and is rejected on mismatch exactly as everywhere else — the
-    //     client confirms the server's figure, it never chooses it.
-    //   • Without a linkId, or for a link that carries no seller-set amount,
-    //     resolveChargeableAmount runs untouched: the total is recomputed from
-    //     the Post and nothing else is accepted.
-    let sellerSetLink = null;
-    if (linkId) {
-        const namedLink = await PaymentLink.findOne({ linkId, isShareableLink: true });
-        if (!namedLink || String(namedLink.postId || '') !== String(postId)) {
-            throw new ApiError(404, "Checkout link not found");
-        }
-        if (namedLink.status !== 'active') {
-            throw new ApiError(400, "This checkout link is no longer active");
-        }
-        if (namedLink.sellerSetAmount) sellerSetLink = namedLink;
-    }
-
-    let pricing;
-    let numericAmount;
-    let pricingFlow = PRICING_FLOW.SHAREABLE_LINK;
-
-    if (sellerSetLink) {
-        const storedAmount = round2(Number(sellerSetLink.amount));
-        // Re-bounded against the post AS IT STANDS NOW: a link minted months ago
-        // must not be able to charge many times what the listing is worth today
-        // because the seller has since lowered the price.
-        assertSellerAmountAllowed(storedAmount, postPricing.totalPrice);
-
-        const confirmedAmount = round2(Number(amount));
-        if (!Number.isFinite(confirmedAmount) || Math.abs(confirmedAmount - storedAmount) >= 0.01) {
-            throw new ApiError(400,
-                `Price mismatch: this item costs ₹${storedAmount}. Please reload the page and try again.`
-            );
-        }
-
-        numericAmount = storedAmount;
-        // The seller named one all-inclusive figure, so no tax or shipping split
-        // is invented for it — the whole amount is the price of the item. Keeps
-        // the order's shippingCharges from going negative on a discount.
-        pricing = {
-            ...postPricing,
-            basePrice:       numericAmount,
-            shippingCharges: 0,
-            gstPercent:      0,
-            gstAmount:       0,
-            amount:          numericAmount,
-        };
-    } else {
-        const requestedTotal = round2(Number(amount));
-        pricingFlow   = await resolvePricingFlowForLink(postId, requestedTotal, postPricing);
-        pricing       = resolveChargeableAmount(post, amount, pricingFlow);
-        numericAmount = pricing.amount;
-    }
+    // ── NO PRICE EVER COMES FROM THE REQUEST ─────────────────────────────────
+    // Sellers cannot set a custom price on a checkout link, so there is nothing
+    // here to read one out of: the chargeable total is recomputed from the Post
+    // on every payment, and the buyer's `amount` is only ever cross-checked
+    // against it. This is the guard that stops a buyer paying ₹1 for a ₹48,000
+    // listing, and it has no exceptions.
+    const requestedTotal = round2(Number(amount));
+    const pricingFlow    = await resolvePricingFlowForLink(postId, requestedTotal, postPricing);
+    const pricing        = resolveChargeableAmount(post, amount, pricingFlow);
+    const numericAmount  = pricing.amount;
 
     // ── Existing-email HARD STOP ─────────────────────────────────────────────
     // No order is created, nothing is attached, no token is issued. The website
