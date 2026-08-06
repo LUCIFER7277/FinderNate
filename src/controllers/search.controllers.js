@@ -94,7 +94,16 @@ const postToProductCard = (p) => {
 const isEmptyTsResult = (r) => !r || !r.found;
 
 /**
- * Drops search hits whose underlying document no longer exists.
+ * Accounts a stale index must not be allowed to surface. `$nin`/`$ne` both match
+ * a MISSING field, so legacy rows without accountStatus/isDeleted are kept.
+ */
+const VISIBLE_USER_FILTER = {
+    accountStatus: { $nin: ['deactivated', 'banned'] },
+    isDeleted: { $ne: true },
+};
+
+/**
+ * Drops search hits the index should no longer be serving.
  *
  * Typesense is a SEPARATE store kept in step by a dedicated worker process
  * (`npm run typesense:sync`, src/scripts/typesense.sync.js). If that worker is
@@ -103,14 +112,24 @@ const isEmptyTsResult = (r) => !r || !r.found;
  * accounts are gone, still come back as perfectly ordinary results. Tapping one
  * opens a 404, and to the person searching it reads as "search returns junk".
  *
- * Verifying the ids against MongoDB before answering makes a stale index unable
- * to serve content that no longer exists, whatever the worker is doing. It is
- * one indexed _id query per search over at most `perPage` ids.
+ * [visibilityFilter] is why this is not merely an existence check. A frozen
+ * index also holds the PUBLISHING STATE the document had when it was last
+ * indexed: a listing the seller has since made private or archived still
+ * carries isPublic:true there, passes Typesense's own filter_by, and — being
+ * very much still present in MongoDB — would sail through an existence-only
+ * check and be disclosed with its image and price. No controller calls
+ * indexPost/removePost, so nothing else corrects that state. Re-asserting the
+ * SAME predicate the Mongo fallback applies keeps the two paths in this file
+ * from disagreeing about who may see what.
  *
- * Applied only to the Typesense path — the Mongo fallbacks read the collection
- * directly and cannot go stale.
+ * The guard only ever removes hits it has positively disproved: a doc with no
+ * id, or an id that is not an ObjectId, is kept.
+ *
+ * Costs one indexed query per search over at most `perPage` ids. Applied only
+ * to the Typesense path — the Mongo fallbacks read the collection directly and
+ * cannot go stale.
  */
-const dropStaleHits = async (docs, Model, idKey = '_id') => {
+const dropStaleHits = async (docs, Model, idKey = '_id', visibilityFilter = {}) => {
     if (!Array.isArray(docs) || docs.length === 0) return docs || [];
 
     // Ids this check is entitled to judge. Anything absent or not an ObjectId
@@ -127,6 +146,7 @@ const dropStaleHits = async (docs, Model, idKey = '_id') => {
 
     const live = await Model.find({
         _id: { $in: [...checkable].map((id) => new mongoose.Types.ObjectId(id)) },
+        ...visibilityFilter,
     }).select('_id').lean();
     const liveIds = new Set(live.map((row) => row._id.toString()));
 
@@ -228,8 +248,8 @@ export const instantSearch = asyncHandler(async (req, res) => {
             // the right answer rather than a blank screen.
             if (data) {
                 const [users, products] = await Promise.all([
-                    dropStaleHits(data.users, User),
-                    dropStaleHits(data.products, Post),
+                    dropStaleHits(data.users, User, '_id', VISIBLE_USER_FILTER),
+                    dropStaleHits(data.products, Post, '_id', PUBLIC_POST_FILTER),
                 ]);
                 data = { ...data, users, products };
             }
@@ -265,8 +285,9 @@ export const searchProfiles = asyncHandler(async (req, res) => {
         try {
             const r = await tsSearchProfiles({ q: query, blockedUserIds: blockedUsers, page, perPage: limit });
             if (!isEmptyTsResult(r)) {
-                // Accounts deleted since the last index write — see dropStaleHits.
-                const liveDocs = await dropStaleHits(r.docs, User, 'id');
+                // Accounts deleted, deactivated or banned since the last index
+                // write — see dropStaleHits.
+                const liveDocs = await dropStaleHits(r.docs, User, 'id', VISIBLE_USER_FILTER);
                 const users = liveDocs.map((d) => ({
                     _id: d.id,
                     username: d.username,
@@ -281,10 +302,28 @@ export const searchProfiles = asyncHandler(async (req, res) => {
                     businessCategory: d.businessCategory || null,
                     followersCount: d.followersCount || 0,
                 }));
-                return res.status(200).json(new ApiResponse(200, {
-                    users,
-                    pagination: { page: r.page, limit, total: r.found, totalPages: Math.ceil(r.found / limit) },
-                }, 'Profile search results'));
+                // Every hit on this page was stale: fall through to Mongo rather
+                // than answering "0 rows, total 3", which renders as a result
+                // count with nothing under it. Mongo also searches bio and
+                // location, so it may well have live matches the index missed.
+                // Restricted to page 1 for the same reason as searchProducts —
+                // see the note there.
+                if (users.length > 0 || page > 1) {
+                    // `r.found` still counts the hits that were just dropped;
+                    // report what is actually deliverable so the total cannot
+                    // promise rows that no longer exist.
+                    const dropped = r.docs.length - users.length;
+                    const total = Math.max(r.found - dropped, users.length);
+                    return res.status(200).json(new ApiResponse(200, {
+                        users,
+                        pagination: {
+                            page: r.page,
+                            limit,
+                            total,
+                            totalPages: Math.ceil(total / limit),
+                        },
+                    }, 'Profile search results'));
+                }
             }
         } catch (err) {
             console.error('searchProfiles: Typesense failed, falling back to Mongo:', err.message);
@@ -364,28 +403,40 @@ export const searchProducts = asyncHandler(async (req, res) => {
                 blockedUserIds: blockedUsers,
             });
             if (!isEmptyTsResult(r)) {
-                // Products whose post has since been deleted — see dropStaleHits.
+                // Products whose post has since been deleted, or which the
+                // seller has since made private or archived — see dropStaleHits.
                 // This is the Products tab, and a stale index is exactly what
                 // made it read as "shows nothing relevant": the ghosts crowd out
                 // the real listings and every one of them 404s when tapped.
-                const products = await dropStaleHits(r.products, Post);
+                const products = await dropStaleHits(r.products, Post, '_id', PUBLIC_POST_FILTER);
                 // Every hit on this page was a ghost: fall through to the Mongo
                 // path rather than answering with an empty page the user would
                 // read as "no such product".
-                if (products.length > 0) {
+                //
+                // ONLY on page 1. The two corpora are ranked differently
+                // (Typesense _text_match/engagementScore vs the Mongo
+                // _relevance/likes/createdAt stage below), so switching mid-run
+                // makes `skip` mean something else entirely: Mongo's rows
+                // 21-40 can repeat listings already shown from Typesense's page
+                // 1, and the app appends pages without deduping. On a later
+                // page an empty result is the honest answer — it ends
+                // pagination instead of showing the user the same product twice.
+                if (products.length > 0 || page > 1) {
+                    // `found` is the engine's total, which still counts the
+                    // hits just dropped; report what is actually deliverable so
+                    // the page count cannot promise rows that do not exist.
+                    // Typesense guarantees hits.length <= found, so this cannot
+                    // go negative.
+                    const dropped = r.products.length - products.length;
+                    const total = Math.max(r.found - dropped, products.length);
                     return res.status(200).json(new ApiResponse(200, {
                         products,
                         facets: r.facets,
-                        // `found` is the engine's total, which still counts the
-                        // ghosts; report what is actually deliverable so the
-                        // page count cannot promise rows that do not exist.
                         pagination: {
                             page: r.page,
                             limit,
-                            total: r.found - (r.products.length - products.length),
-                            totalPages: Math.ceil(
-                                Math.max(r.found - (r.products.length - products.length), products.length) / limit
-                            ),
+                            total,
+                            totalPages: Math.ceil(total / limit),
                         },
                     }, 'Product search results'));
                 }

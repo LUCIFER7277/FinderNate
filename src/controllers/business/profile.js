@@ -8,6 +8,19 @@ import { getCoordinates } from "../../utils/getCoordinates.js";
 import mongoose from "mongoose";
 import { BUSINESS_CATEGORIES, extractTagsFromText } from "./helpers.js";
 
+// Canonical forms of the two statutory identity numbers: GSTIN is 15 uppercase
+// alphanumerics, Aadhaar is 12 digits, and neither contains a space.
+//
+// Used for BOTH the incoming value and the STORED one. Rows written before this
+// validation existed hold whatever the client happened to send — the website
+// posts Aadhaar back in its grouped display form ("XXXX XXXX XXXX"), the app
+// stored GST exactly as typed — so a raw comparison against a freshly
+// normalised value reports an unchanged number as changed, which silently
+// revokes the admin's KYC approval. Normalising both sides makes the first save
+// after this deploy repair the stored value instead.
+const normaliseGst = (value) => String(value ?? '').replace(/\s+/g, '').toUpperCase();
+const normaliseAadhaar = (value) => String(value ?? '').replace(/\s+/g, '');
+
 // POST /api/v1/business/create
 export const createBusinessProfile = asyncHandler(async (req, res) => {
     const userId = req.user._id;
@@ -86,7 +99,7 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
     // lookup entirely and register a second time.
     let normalisedGst = '';
     if (typeof gstNumber === 'string' && gstNumber.trim() !== '') {
-        normalisedGst = gstNumber.replace(/\s+/g, '').toUpperCase();
+        normalisedGst = normaliseGst(gstNumber);
         if (!/^[0-9A-Z]{15}$/.test(normalisedGst)) {
             throw new ApiError(400, "GST number must be exactly 15 letters or digits, with no spaces");
         }
@@ -100,7 +113,7 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
     if (typeof aadhaarNumber === 'string' && aadhaarNumber.trim() !== '') {
         // Spaces stripped because both clients display Aadhaar grouped as
         // "XXXX XXXX XXXX" and the website posts back what it renders.
-        normalisedAadhaar = aadhaarNumber.replace(/\s+/g, '');
+        normalisedAadhaar = normaliseAadhaar(aadhaarNumber);
         if (!/^\d{12}$/.test(normalisedAadhaar)) {
             throw new ApiError(400, "Aadhaar number must be exactly 12 digits, with no spaces");
         }
@@ -442,7 +455,16 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
             if (existingGST) {
                 throw new ApiError(409, "GST number already registered");
             }
-            if (business.gstNumber !== normalisedGst) gstChanged = true;
+            // Compare LIKE WITH LIKE. Rows written before this validation
+            // existed hold whatever the client sent — the app stored GST
+            // exactly as typed, so lower case is on file. Comparing a freshly
+            // normalised value against one of those makes an UNCHANGED number
+            // look changed exactly once per row, and a "change" here revokes
+            // the admin's KYC approval and pushes the seller back into the
+            // pending queue for editing something unrelated. Normalising both
+            // sides means the first save after this deploy quietly repairs the
+            // stored value instead of costing the seller their badge.
+            if (normaliseGst(business.gstNumber) !== normalisedGst) gstChanged = true;
             business.gstNumber = normalisedGst;
         } else {
             if (business.gstNumber) gstChanged = true;
@@ -466,11 +488,16 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
             // ("XXXX XXXX XXXX"), so the stored value depended on which client
             // wrote it — and comparing the two forms made an unchanged number
             // look changed, needlessly revoking the admin's KYC approval.
-            const normalisedAadhaar = aadhaarNumber.replace(/\s+/g, '');
+            const normalisedAadhaar = normaliseAadhaar(aadhaarNumber);
             if (!/^\d{12}$/.test(normalisedAadhaar)) {
                 throw new ApiError(400, "Aadhaar number must be exactly 12 digits, with no spaces");
             }
-            if (business.aadhaarNumber !== normalisedAadhaar) aadhaarChanged = true;
+            // Both sides normalised — see the GST branch above. This one bites
+            // hardest: the website renders Aadhaar grouped as "XXXX XXXX XXXX"
+            // and posts back what it renders, so every website-written row on
+            // file holds the spaced form. Comparing that against the stripped
+            // value would revoke KYC approval on the seller's next save.
+            if (normaliseAadhaar(business.aadhaarNumber) !== normalisedAadhaar) aadhaarChanged = true;
             business.aadhaarNumber = normalisedAadhaar;
         } else {
             if (business.aadhaarNumber) aadhaarChanged = true;
