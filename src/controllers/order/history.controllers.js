@@ -58,6 +58,65 @@ const buildOrderHistoryQuery = ({ status, paymentStatus, startDate, endDate, min
 };
 
 // Map 'held' → 'paid' for user display (admin retains 'held' in DB for manual release)
+// ── What counts as MONEY, and what counts as DONE ────────────────────────────
+//
+// Every total on these screens used to be `$sum: '$amount'` over the buyer's or
+// seller's whole order collection, with no reference to whether the order was
+// ever paid. A buyer with one ₹1 payment and two abandoned ₹1 checkouts was told
+// they had spent ₹3.00, and a seller was credited with earnings for money that
+// never arrived. An unpaid order is not a purchase; it is an intention.
+//
+// paymentStatus enum: pending | paid | held | released | refunded | failed
+//   paid / held / released → the buyer was actually charged (held = sitting in
+//                            manual escrow, released = already paid out). All
+//                            three are real money that left the buyer.
+//   refunded               → charged, then given back. Net spend is zero, so it
+//                            must NOT be counted as spent.
+//   pending / failed       → never charged.
+const SETTLED_PAYMENT_STATUSES = ['paid', 'held', 'released'];
+
+// Sum `field` only over orders where money genuinely moved.
+const sumWhenPaid = (field) => ({
+    $sum: { $cond: [{ $in: ['$paymentStatus', SETTLED_PAYMENT_STATUSES] }, field, 0] }
+});
+const avgWhenPaid = (field) => ({
+    $avg: { $cond: [{ $in: ['$paymentStatus', SETTLED_PAYMENT_STATUSES] }, field, null] }
+});
+
+// orderStatus enum: created | payment_pending | payment_received | processing |
+//                   shipped | delivered | confirmed | disputed | cancelled |
+//                   refunded | seller_rejected
+//
+// These three buckets must PARTITION the orders — completed + pending +
+// cancelled has to equal totalOrders, or the cards contradict the list beneath
+// them. They did not: "pending" was a hand-written list that included
+// payment_received/shipped/delivered (not pending at all) while omitting
+// `created` and `payment_pending` (the only genuinely pending ones), so a buyer
+// with 3 orders saw Completed 0 / Pending 1.
+const COMPLETED_ORDER_STATUSES = ['confirmed'];
+const CANCELLED_ORDER_STATUSES = ['cancelled', 'refunded', 'seller_rejected'];
+
+const countWhereStatusIn = (statuses) => ({
+    $sum: { $cond: [{ $in: ['$orderStatus', statuses] }, 1, 0] }
+});
+
+// Pending is defined as the REMAINDER rather than its own list, so it cannot
+// drift out of sync when a new orderStatus is added to the enum.
+const countPendingOrders = () => ({
+    $sum: {
+        $cond: [
+            {
+                $and: [
+                    { $not: [{ $in: ['$orderStatus', COMPLETED_ORDER_STATUSES] }] },
+                    { $not: [{ $in: ['$orderStatus', CANCELLED_ORDER_STATUSES] }] }
+                ]
+            },
+            1,
+            0
+        ]
+    }
+});
+
 const normalizePaymentStatus = (orders) =>
     orders.map(o => {
         const obj = o.toObject ? o.toObject() : o;
@@ -92,10 +151,11 @@ export const getBuyerOrderHistory = asyncHandler(async (req, res) => {
             $group: {
                 _id: null,
                 totalOrders: { $sum: 1 },
-                totalSpent: { $sum: '$amount' },
-                completedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] } },
-                pendingOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] } },
-                cancelledOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] } }
+                // Only orders the buyer was actually charged for.
+                totalSpent: sumWhenPaid('$amount'),
+                completedOrders: countWhereStatusIn(COMPLETED_ORDER_STATUSES),
+                pendingOrders: countPendingOrders(),
+                cancelledOrders: countWhereStatusIn(CANCELLED_ORDER_STATUSES)
             }
         }
     ]);
@@ -138,10 +198,15 @@ export const getSellerOrderHistory = asyncHandler(async (req, res) => {
             $group: {
                 _id: null,
                 totalOrders: { $sum: 1 },
-                totalEarned: { $sum: '$sellerAmount' },
-                completedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] } },
-                pendingOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] } },
-                cancelledOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] } }
+                // Money the buyer was actually charged, on this seller's orders.
+                // Includes `held` — under the manual escrow flow that cash has
+                // been collected on the seller's behalf even though the payout
+                // is still a hand transfer. It excludes refunded and never-paid
+                // orders, which is what used to inflate this figure.
+                totalEarned: sumWhenPaid('$sellerAmount'),
+                completedOrders: countWhereStatusIn(COMPLETED_ORDER_STATUSES),
+                pendingOrders: countPendingOrders(),
+                cancelledOrders: countWhereStatusIn(CANCELLED_ORDER_STATUSES)
             }
         }
     ]);
@@ -180,12 +245,15 @@ export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
             $group: {
                 _id: null,
                 totalOrders: { $sum: 1 },
-                totalSpent: { $sum: '$amount' },
-                averageOrderValue: { $avg: '$amount' },
-                completedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] } },
-                pendingOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] } },
+                totalSpent: sumWhenPaid('$amount'),
+                // Averaged over PAID orders only. Including unpaid ones dragged
+                // the average toward zero and made it disagree with
+                // totalSpent / (orders actually paid for).
+                averageOrderValue: avgWhenPaid('$amount'),
+                completedOrders: countWhereStatusIn(COMPLETED_ORDER_STATUSES),
+                pendingOrders: countPendingOrders(),
                 disputedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'disputed'] }, 1, 0] } },
-                cancelledOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] } }
+                cancelledOrders: countWhereStatusIn(CANCELLED_ORDER_STATUSES)
             }
         }
     ]);
@@ -195,7 +263,7 @@ export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
         {
             $group: {
                 _id: '$productDetails.category',
-                totalSpent: { $sum: '$amount' },
+                totalSpent: sumWhenPaid('$amount'),
                 orderCount: { $sum: 1 }
             }
         },
@@ -211,7 +279,7 @@ export const getBuyerOrderStatistics = asyncHandler(async (req, res) => {
         {
             $group: {
                 _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
-                totalSpent: { $sum: '$amount' },
+                totalSpent: sumWhenPaid('$amount'),
                 orderCount: { $sum: 1 }
             }
         },
@@ -253,14 +321,14 @@ export const getSellerOrderStatistics = asyncHandler(async (req, res) => {
             $group: {
                 _id: null,
                 totalOrders: { $sum: 1 },
-                totalRevenue: { $sum: '$amount' },
-                totalEarned: { $sum: '$sellerAmount' },
-                platformFees: { $sum: '$platformFee' },
-                averageOrderValue: { $avg: '$amount' },
-                completedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'confirmed'] }, 1, 0] } },
-                pendingOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['payment_received', 'processing', 'shipped', 'delivered']] }, 1, 0] } },
+                totalRevenue: sumWhenPaid('$amount'),
+                totalEarned: sumWhenPaid('$sellerAmount'),
+                platformFees: sumWhenPaid('$platformFee'),
+                averageOrderValue: avgWhenPaid('$amount'),
+                completedOrders: countWhereStatusIn(COMPLETED_ORDER_STATUSES),
+                pendingOrders: countPendingOrders(),
                 disputedOrders: { $sum: { $cond: [{ $eq: ['$orderStatus', 'disputed'] }, 1, 0] } },
-                cancelledOrders: { $sum: { $cond: [{ $in: ['$orderStatus', ['cancelled', 'refunded']] }, 1, 0] } }
+                cancelledOrders: countWhereStatusIn(CANCELLED_ORDER_STATUSES)
             }
         }
     ]);
@@ -270,9 +338,9 @@ export const getSellerOrderStatistics = asyncHandler(async (req, res) => {
         {
             $group: {
                 _id: '$productDetails.name',
-                totalRevenue: { $sum: '$amount' },
+                totalRevenue: sumWhenPaid('$amount'),
                 orderCount: { $sum: 1 },
-                averagePrice: { $avg: '$amount' }
+                averagePrice: avgWhenPaid('$amount')
             }
         },
         { $sort: { orderCount: -1 } },
@@ -287,8 +355,8 @@ export const getSellerOrderStatistics = asyncHandler(async (req, res) => {
         {
             $group: {
                 _id: { year: { $year: '$createdAt' }, month: { $month: '$createdAt' } },
-                totalRevenue: { $sum: '$amount' },
-                totalEarned: { $sum: '$sellerAmount' },
+                totalRevenue: sumWhenPaid('$amount'),
+                totalEarned: sumWhenPaid('$sellerAmount'),
                 orderCount: { $sum: 1 }
             }
         },
