@@ -93,6 +93,58 @@ const postToProductCard = (p) => {
  */
 const isEmptyTsResult = (r) => !r || !r.found;
 
+/**
+ * Drops search hits whose underlying document no longer exists.
+ *
+ * Typesense is a SEPARATE store kept in step by a dedicated worker process
+ * (`npm run typesense:sync`, src/scripts/typesense.sync.js). If that worker is
+ * not running, the index freezes at whatever the last backfill wrote and keeps
+ * answering with it — posts that have since been deleted, and sellers whose
+ * accounts are gone, still come back as perfectly ordinary results. Tapping one
+ * opens a 404, and to the person searching it reads as "search returns junk".
+ *
+ * Verifying the ids against MongoDB before answering makes a stale index unable
+ * to serve content that no longer exists, whatever the worker is doing. It is
+ * one indexed _id query per search over at most `perPage` ids.
+ *
+ * Applied only to the Typesense path — the Mongo fallbacks read the collection
+ * directly and cannot go stale.
+ */
+const dropStaleHits = async (docs, Model, idKey = '_id') => {
+    if (!Array.isArray(docs) || docs.length === 0) return docs || [];
+
+    // Ids this check is entitled to judge. Anything absent or not an ObjectId
+    // was never queried, so it is kept rather than silently dropped — the guard
+    // must only ever remove hits it has positively disproved.
+    const checkable = new Set();
+    for (const doc of docs) {
+        const raw = doc?.[idKey];
+        if (!raw) continue;
+        const key = String(raw);
+        if (mongoose.Types.ObjectId.isValid(key)) checkable.add(key);
+    }
+    if (checkable.size === 0) return docs;
+
+    const live = await Model.find({
+        _id: { $in: [...checkable].map((id) => new mongoose.Types.ObjectId(id)) },
+    }).select('_id').lean();
+    const liveIds = new Set(live.map((row) => row._id.toString()));
+
+    const kept = docs.filter((doc) => {
+        const key = String(doc?.[idKey] ?? '');
+        if (!checkable.has(key)) return true;
+        return liveIds.has(key);
+    });
+
+    if (kept.length !== docs.length) {
+        console.warn(
+            `[search] dropped ${docs.length - kept.length} stale Typesense hit(s) ` +
+            `for ${Model.modelName} — the typesense:sync worker is probably not running`
+        );
+    }
+    return kept;
+};
+
 /* --------------------------- MongoDB fallbacks ----------------------------- */
 
 const mongoInstantFallback = async (query, blockedUsers, limit) => {
@@ -170,6 +222,17 @@ export const instantSearch = asyncHandler(async (req, res) => {
                 userLimit: limit,
                 productLimit: limit,
             });
+            // A stale index answers with deleted posts and departed accounts —
+            // see dropStaleHits. If everything in the page turns out to be a
+            // ghost the emptiness check below falls through to Mongo, which is
+            // the right answer rather than a blank screen.
+            if (data) {
+                const [users, products] = await Promise.all([
+                    dropStaleHits(data.users, User),
+                    dropStaleHits(data.products, Post),
+                ]);
+                data = { ...data, users, products };
+            }
         } catch (err) {
             console.error('instantSearch: Typesense failed, falling back to Mongo:', err.message);
         }
@@ -202,7 +265,9 @@ export const searchProfiles = asyncHandler(async (req, res) => {
         try {
             const r = await tsSearchProfiles({ q: query, blockedUserIds: blockedUsers, page, perPage: limit });
             if (!isEmptyTsResult(r)) {
-                const users = r.docs.map((d) => ({
+                // Accounts deleted since the last index write — see dropStaleHits.
+                const liveDocs = await dropStaleHits(r.docs, User, 'id');
+                const users = liveDocs.map((d) => ({
                     _id: d.id,
                     username: d.username,
                     fullName: d.fullName || null,
@@ -299,11 +364,31 @@ export const searchProducts = asyncHandler(async (req, res) => {
                 blockedUserIds: blockedUsers,
             });
             if (!isEmptyTsResult(r)) {
-                return res.status(200).json(new ApiResponse(200, {
-                    products: r.products,
-                    facets: r.facets,
-                    pagination: { page: r.page, limit, total: r.found, totalPages: Math.ceil(r.found / limit) },
-                }, 'Product search results'));
+                // Products whose post has since been deleted — see dropStaleHits.
+                // This is the Products tab, and a stale index is exactly what
+                // made it read as "shows nothing relevant": the ghosts crowd out
+                // the real listings and every one of them 404s when tapped.
+                const products = await dropStaleHits(r.products, Post);
+                // Every hit on this page was a ghost: fall through to the Mongo
+                // path rather than answering with an empty page the user would
+                // read as "no such product".
+                if (products.length > 0) {
+                    return res.status(200).json(new ApiResponse(200, {
+                        products,
+                        facets: r.facets,
+                        // `found` is the engine's total, which still counts the
+                        // ghosts; report what is actually deliverable so the
+                        // page count cannot promise rows that do not exist.
+                        pagination: {
+                            page: r.page,
+                            limit,
+                            total: r.found - (r.products.length - products.length),
+                            totalPages: Math.ceil(
+                                Math.max(r.found - (r.products.length - products.length), products.length) / limit
+                            ),
+                        },
+                    }, 'Product search results'));
+                }
             }
         } catch (err) {
             console.error('searchProducts: Typesense failed, falling back to Mongo:', err.message);

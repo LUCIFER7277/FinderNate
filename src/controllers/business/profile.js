@@ -71,13 +71,38 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         }
     }
 
-    if (gstNumber) {
-        if (gstNumber.length < 15) {
-            throw new ApiError(400, "GST number must be at least 15 characters long");
+    // A GSTIN is exactly 15 uppercase alphanumerics; an Aadhaar number is
+    // exactly 12 digits. Neither contains a space.
+    //
+    // The only check here used to be `gstNumber.length < 15`, which is a floor
+    // and not a format: "22AAAAA0000A1Z5 COPIED FROM CERTIFICATE" satisfies it,
+    // and so does 60 characters of anything. Both clients let that through
+    // because neither constrained the field, and the value ends up in front of
+    // an admin who reads it off the verification screen and acts on it — so a
+    // malformed number that LOOKS plausible is the failure that matters.
+    //
+    // Normalised before the uniqueness check, not after: the same GSTIN typed
+    // with a trailing space or in lower case used to miss the existing-row
+    // lookup entirely and register a second time.
+    let normalisedGst = '';
+    if (typeof gstNumber === 'string' && gstNumber.trim() !== '') {
+        normalisedGst = gstNumber.replace(/\s+/g, '').toUpperCase();
+        if (!/^[0-9A-Z]{15}$/.test(normalisedGst)) {
+            throw new ApiError(400, "GST number must be exactly 15 letters or digits, with no spaces");
         }
-        const existingGST = await Business.findOne({ gstNumber });
+        const existingGST = await Business.findOne({ gstNumber: normalisedGst });
         if (existingGST) {
             throw new ApiError(409, "GST number already registered");
+        }
+    }
+
+    let normalisedAadhaar = '';
+    if (typeof aadhaarNumber === 'string' && aadhaarNumber.trim() !== '') {
+        // Spaces stripped because both clients display Aadhaar grouped as
+        // "XXXX XXXX XXXX" and the website posts back what it renders.
+        normalisedAadhaar = aadhaarNumber.replace(/\s+/g, '');
+        if (!/^\d{12}$/.test(normalisedAadhaar)) {
+            throw new ApiError(400, "Aadhaar number must be exactly 12 digits, with no spaces");
         }
     }
 
@@ -133,12 +158,11 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
         existingBusiness.tags = uniqueTags;
         if (website) existingBusiness.website = website;
 
-        if (gstNumber && gstNumber.trim() !== '') {
-            existingBusiness.gstNumber = gstNumber;
-        }
-        if (aadhaarNumber && aadhaarNumber.trim() !== '') {
-            existingBusiness.aadhaarNumber = aadhaarNumber;
-        }
+        // The NORMALISED values, not the raw body: what was validated above is
+        // what gets stored, so the row can never hold a spaced or lower-case
+        // variant that the uniqueness check would then fail to match.
+        if (normalisedGst) existingBusiness.gstNumber = normalisedGst;
+        if (normalisedAadhaar) existingBusiness.aadhaarNumber = normalisedAadhaar;
 
         existingBusiness.isProfileCompleted = true;
         await existingBusiness.save();
@@ -184,12 +208,9 @@ export const createBusinessProfile = asyncHandler(async (req, res) => {
             businessData._id = user.businessProfileId;
         }
 
-        if (gstNumber && gstNumber.trim() !== '') {
-            businessData.gstNumber = gstNumber;
-        }
-        if (aadhaarNumber && aadhaarNumber.trim() !== '') {
-            businessData.aadhaarNumber = aadhaarNumber;
-        }
+        // Normalised, as above.
+        if (normalisedGst) businessData.gstNumber = normalisedGst;
+        if (normalisedAadhaar) businessData.aadhaarNumber = normalisedAadhaar;
 
         business = await Business.create(businessData);
 
@@ -406,19 +427,23 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
         let gstChanged = false;
 
         if (gstNumber && gstNumber.trim() !== '') {
-            if (gstNumber.length < 15) {
-                throw new ApiError(400, "GST number must be at least 15 characters long");
+            // Same format rule as the create path: exactly 15 uppercase
+            // alphanumerics. `length < 15` alone was a floor, not a format, so
+            // a spaced or over-length value passed and was stored verbatim.
+            const normalisedGst = gstNumber.replace(/\s+/g, '').toUpperCase();
+            if (!/^[0-9A-Z]{15}$/.test(normalisedGst)) {
+                throw new ApiError(400, "GST number must be exactly 15 letters or digits, with no spaces");
             }
 
             const existingGST = await Business.findOne({
-                gstNumber,
+                gstNumber: normalisedGst,
                 userId: { $ne: userId }
             });
             if (existingGST) {
                 throw new ApiError(409, "GST number already registered");
             }
-            if (business.gstNumber !== gstNumber) gstChanged = true;
-            business.gstNumber = gstNumber;
+            if (business.gstNumber !== normalisedGst) gstChanged = true;
+            business.gstNumber = normalisedGst;
         } else {
             if (business.gstNumber) gstChanged = true;
             business.gstNumber = undefined;
@@ -436,8 +461,17 @@ export const updateBusinessProfile = asyncHandler(async (req, res) => {
         let aadhaarChanged = false;
 
         if (aadhaarNumber && aadhaarNumber.trim() !== '') {
-            if (business.aadhaarNumber !== aadhaarNumber) aadhaarChanged = true;
-            business.aadhaarNumber = aadhaarNumber;
+            // Exactly 12 digits. There was NO validation here at all, and the
+            // website posts the number back in its display form
+            // ("XXXX XXXX XXXX"), so the stored value depended on which client
+            // wrote it — and comparing the two forms made an unchanged number
+            // look changed, needlessly revoking the admin's KYC approval.
+            const normalisedAadhaar = aadhaarNumber.replace(/\s+/g, '');
+            if (!/^\d{12}$/.test(normalisedAadhaar)) {
+                throw new ApiError(400, "Aadhaar number must be exactly 12 digits, with no spaces");
+            }
+            if (business.aadhaarNumber !== normalisedAadhaar) aadhaarChanged = true;
+            business.aadhaarNumber = normalisedAadhaar;
         } else {
             if (business.aadhaarNumber) aadhaarChanged = true;
             business.aadhaarNumber = undefined;
