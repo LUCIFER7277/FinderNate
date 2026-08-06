@@ -6,6 +6,34 @@ const FOLLOW_STATUS_TTL = RedisTTL.FOLLOW_STATUS;
 const COUNT_TTL         = RedisTTL.FOLLOW_COUNT;
 const LIST_TTL          = RedisTTL.FOLLOW_LIST;
 
+/**
+ * Add one id to the viewer's following-status SET, but ONLY if that set has
+ * already been built. Never create it.
+ *
+ * getFollowingIdSet treats the key's mere existence as "this is the complete
+ * list" — it returns SMEMBERS without consulting MongoDB. A plain SADD onto an
+ * expired/absent key therefore does not add one entry to a cache, it REPLACES
+ * the entire cached following list with a single id, and every other account the
+ * viewer follows begins reporting isFollowing:false. The home feed reads this
+ * set; the profile page reads MongoDB; so the two disagree and the feed shows a
+ * "Follow" pill for somebody whose profile shows "Unfollow".
+ *
+ * EXISTS and SADD must be one atomic step: between a JS-side check and the write
+ * the key can expire, which is the very case that corrupts it.
+ *
+ * Skipping the write is always safe. The Follower row is committed to MongoDB
+ * before this runs, so the next read finds no key and rebuilds the full, correct
+ * set from the database.
+ */
+const ADD_TO_FOLLOWING_STATUS_IF_BUILT = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  redis.call('SADD', KEYS[1], ARGV[1])
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+  return 1
+end
+return 0
+`;
+
 // Atomically increment/decrement both count keys inside a single Lua call
 // so no other command can run between the two operations.
 const INCR_PAIR_SCRIPT = `
@@ -204,8 +232,22 @@ export async function onUserFollowed(followerId, targetUserId) {
         const now = Date.now();
         const pipeline = redisClient.pipeline();
 
-        pipeline.sadd(followingStatusKey, targetIdStr);
-        pipeline.expire(followingStatusKey, FOLLOW_STATUS_TTL);
+        // NOT an unconditional SADD — see ADD_TO_FOLLOWING_STATUS_IF_BUILT.
+        //
+        // getFollowingIdSet's contract is "key present → authoritative". A plain
+        // SADD on a key that has expired CREATES it holding this one id, so the
+        // whole of the viewer's following list silently becomes that single
+        // entry: everyone else they follow starts reading back as not-followed.
+        // That is the "profile says Unfollow, feed says Follow" split, because
+        // the profile asks MongoDB and the feed asks this set.
+        //
+        // When the key is absent we deliberately write nothing. The DB row is
+        // already committed above, so the next read misses, rebuilds the FULL
+        // set from Mongo, and is correct.
+        await redisClient.eval(
+            ADD_TO_FOLLOWING_STATUS_IF_BUILT, 1,
+            followingStatusKey, targetIdStr, String(FOLLOW_STATUS_TTL)
+        );
 
         pipeline.zadd(followersZSetKey, now, followerIdStr);
         pipeline.zremrangebyrank(followersZSetKey, 0, -(FOLLOW_LIST_MAX + 1));
