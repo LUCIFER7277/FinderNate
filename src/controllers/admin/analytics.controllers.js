@@ -21,14 +21,28 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
         activeUsers,
         verifiedBusinesses
     ] = await Promise.all([
-        User.countDocuments(),
+        // Soft-deleted accounts are excluded. Nothing else in the platform
+        // treats an isDeleted user as a user — the auth guard rejects them and
+        // the socket handshake refuses them — so counting them here inflates
+        // the headline number the dashboard reports as "total users".
+        User.countDocuments({ isDeleted: { $ne: true } }),
         Business.countDocuments(),
         Report.countDocuments(),
         Report.countDocuments({ status: 'pending' }),
         Business.countDocuments({
             $or: [
                 { 'documents': { $elemMatch: { documentType: 'aadhaar', verified: false } } },
-                { aadhaarNumber: { $exists: true, $ne: null, $ne: "" }, isVerified: false }
+                // `$nin: [null, ""]`, NOT `{ $ne: null, $ne: "" }`.
+                //
+                // That was a JavaScript object literal with a DUPLICATE KEY:
+                // the second `$ne` silently overwrites the first, so only the
+                // `""` check survived and the null check never ran at all. A
+                // business whose aadhaarNumber is explicitly null then matched
+                // `$exists: true` and got queued as awaiting Aadhaar
+                // verification despite having submitted no Aadhaar. There are
+                // already 2 such businesses; they escape this count today only
+                // because they happen to be verified.
+                { aadhaarNumber: { $exists: true, $nin: [null, ""] }, isVerified: false }
             ]
         }),
         Business.countDocuments({
@@ -37,7 +51,9 @@ export const getDashboardStats = asyncHandler(async (req, res) => {
                 { 'documents': { $elemMatch: { verified: false, documentType: { $ne: 'aadhaar' } } } }
             ]
         }),
-        User.countDocuments({ accountStatus: 'active' }),
+        // Same exclusion as totalUsers — a deleted account is not an active one,
+        // and without this activeUsers could exceed the total it is a subset of.
+        User.countDocuments({ accountStatus: 'active', isDeleted: { $ne: true } }),
         Business.countDocuments({ isVerified: true })
     ]);
 

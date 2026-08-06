@@ -750,8 +750,16 @@ export const getOrderAnalytics = asyncHandler(async (req, res) => {
     if (startDate) dateFilter.$gte = new Date(startDate);
     if (endDate) dateFilter.$lte = new Date(endDate);
 
+    // Revenue means money that actually moved: paid / held / released.
+    //
+    // This was `$ne: 'pending'`, which excludes only never-started payments and
+    // still counts `failed` (the charge did not go through) and `refunded` (the
+    // charge was given back) as revenue. Both inflate the platform's own
+    // takings — the figure the super admin reconciles bank transfers against.
+    // Matches the definition used for buyer/seller totals in
+    // controllers/order/history.controllers.js.
     const matchStage = {
-        paymentStatus: { $ne: 'pending' },
+        paymentStatus: { $in: ['paid', 'held', 'released'] },
         ...(Object.keys(dateFilter).length ? { createdAt: dateFilter } : {})
     };
 
