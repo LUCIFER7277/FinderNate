@@ -24,6 +24,10 @@ const StorySchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     }],
+    // Set only by the author, through PATCH /stories/:storyId/archive (and
+    // cleared by .../unarchive). An archived story is exempt from the 24-hour
+    // purge job, is hidden from the live tray and the profile stories tab, and
+    // is what fetchArchivedStoriesByUser lists.
     isArchived: {
         type: Boolean,
         default: false

@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
@@ -11,6 +12,22 @@ import socketManager from "../config/socket.js";
 import { assertCanViewPostById } from "./post/visibility.js";
 
 const ENGAGEMENT_TTL = RedisTTL.POST_ENGAGEMENT;
+
+/**
+ * A comment id that is not an ObjectId is a comment that does not exist.
+ *
+ * Every handler here used to hand req.params.commentId straight to findById, so
+ * "/comments/undefined" — which the clients do send when a thread id is missing
+ * — raised a CastError deep inside Mongoose instead of the plain 404 the caller
+ * can act on. Mirrors assertCanViewPostById in post/visibility.js, which does
+ * the same for postIds, and answers 404 for the same reason: whether an id is
+ * well-formed is not information worth a distinct status.
+ */
+const assertValidCommentId = (commentId, message = "Comment not found") => {
+    if (!commentId || !mongoose.Types.ObjectId.isValid(commentId)) {
+        throw new ApiError(404, message);
+    }
+};
 
 /**
  * Keep post.engagement.comments and its Redis cache in step.
@@ -83,6 +100,8 @@ export const createComment = asyncHandler(async (req, res) => {
     let rootCommentId = null;
 
     if (parentCommentId) {
+        assertValidCommentId(parentCommentId, "Parent comment not found");
+
         const parentComment = await Comment.findById(parentCommentId).select("userId rootCommentId");
         if (!parentComment) {
             throw new ApiError(404, "Parent comment not found");
@@ -283,6 +302,8 @@ export const getCommentById = asyncHandler(async (req, res) => {
     const { commentId } = req.params;
     const { page = 1, limit = 10 } = req.query;
 
+    assertValidCommentId(commentId);
+
     // ✅ FIXED: Handle both Mongoose document and plain object from cache
     const userId = req.user?._id ? req.user._id.toString() : null;
     const pageNum = parseInt(page) || 1;
@@ -468,6 +489,8 @@ export const getCommentById = asyncHandler(async (req, res) => {
  * offers post owners.
  */
 const assertCommentAuthor = async (commentId, userId) => {
+    assertValidCommentId(commentId);
+
     const comment = await Comment.findById(commentId).select("userId postId isDeleted");
     if (!comment || comment.isDeleted) throw new ApiError(404, "Comment not found");
 
@@ -479,6 +502,8 @@ const assertCommentAuthor = async (commentId, userId) => {
 };
 
 const assertCanDeleteComment = async (commentId, userId) => {
+    assertValidCommentId(commentId);
+
     const comment = await Comment.findById(commentId).select("userId postId isDeleted");
     if (!comment) throw new ApiError(404, "Comment not found");
 

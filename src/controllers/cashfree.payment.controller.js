@@ -25,7 +25,13 @@ import { isOnlineStoreListing } from "./onlineStoreProducts.controllers.js";
 // a literal here: the string this endpoint stamps on a PaymentLink is the same
 // string resolveLinkPricingFlow matches on, and a typo in one of two copies is
 // a silently unpayable link.
-import { PRICING_FLOW } from "./payments.controllers.js";
+import { PRICING_FLOW, resolveDeletedPostContentType } from "./payments.controllers.js";
+// A store product can be deleted while somebody still has its page open. Every
+// other order-creation path answers the shared deleted-content tombstone rather
+// than a bare 404 the client cannot tell apart from a broken URL; this one is
+// the last that did not. See the util for the shape and for why a write path
+// answers 410.
+import { sendDeletedTombstone } from "../utils/contentTombstone.utils.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
@@ -96,7 +102,21 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
 
     // ── Load post and seller ───────────────────────────────────────────────────
     const post = await Post.findById(postId);
-    if (!post) throw new ApiError(404, "Product not found");
+    if (!post) {
+        // 410 with the tombstone, not a bare 404: this call CREATES an order, so
+        // it genuinely cannot be performed, and the store page has to be able to
+        // say the product was taken down rather than showing a generic failure.
+        // No order can be created past this point either way.
+        //
+        // The post is gone, so the noun is read back off the payment links minted
+        // from it; the store only lists products, so that is the fallback when no
+        // link recorded one.
+        return sendDeletedTombstone(res, {
+            contentType: (await resolveDeletedPostContentType(postId)) || 'product',
+            contentId: postId,
+            status: 410,
+        });
+    }
 
     // ── It must actually be something the online store sells ──────────────────
     // This route is PUBLIC and unauthenticated, and a few lines below it mints a
@@ -237,6 +257,10 @@ export const createOnlineStoreOrder = asyncHandler(async (req, res) => {
             linkId,
             sellerId: seller._id,
             postId,
+            // What this link pointed at, recorded while the post is still here —
+            // it is what names the thing in the tombstone after a deletion.
+            // isOnlineStoreListing above has already established it is a product.
+            contentType: post.contentType || 'product',
             productDetails,
             amount: numericAmount,
             expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),

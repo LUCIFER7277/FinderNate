@@ -38,7 +38,14 @@ const PostInteractionSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Compound index for efficient querying
+// Compound index for efficient querying.
+//
+// Logically one row per {userId, postId, interactionType} — every write path
+// (trackPostInteraction, hidePost, batchTrackInteractions) upserts on exactly
+// this triple. It is deliberately NOT unique yet: existing collections already
+// hold duplicate rows from the old findOne-then-save race, so building a unique
+// index would fail outright. Dedupe first, then add unique: true here to make
+// the invariant enforced rather than merely intended.
 PostInteractionSchema.index({ userId: 1, postId: 1, interactionType: 1 });
 PostInteractionSchema.index({ userId: 1, lastInteracted: -1 });
 PostInteractionSchema.index({ postId: 1, interactionType: 1 });

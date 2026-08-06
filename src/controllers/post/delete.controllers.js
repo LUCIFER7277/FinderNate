@@ -10,6 +10,7 @@ import SavedPost from "../../models/savedPost.models.js";
 import PostInteraction from "../../models/postInteraction.models.js";
 import Report from "../../models/report.models.js";
 import Order from "../../models/order.models.js";
+import PaymentLink from "../../models/paymentLink.models.js";
 import { deleteMultipleFromBunny, deleteFromBunny } from "../../utils/bunny.js";
 import { invalidatePostCaches } from "./helpers.js";
 
@@ -40,6 +41,24 @@ const assertNoLiveOrders = async (postId) => {
         );
     }
 };
+
+/**
+ * A payment link cannot outlive the listing it sells.
+ *
+ * Deleting the post left every PaymentLink that referenced it sitting at status
+ * 'active'. Nothing could actually be bought through one — the checkout
+ * endpoints answer a deleted-content tombstone once the post is gone — but the
+ * ROW still claimed to be live, so admin views and any query over open links
+ * counted links for products that no longer exist.
+ *
+ * 'paid' rows are left exactly as they are: they are the record of a completed
+ * sale, and the order created from one still points at it.
+ */
+const cancelPaymentLinksForPost = async (postId) =>
+    PaymentLink.updateMany(
+        { postId, status: 'active' },
+        { $set: { status: 'cancelled' } }
+    );
 
 export const deletePost = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -86,6 +105,7 @@ export const deletePost = asyncHandler(async (req, res) => {
 
     await Promise.allSettled([
         Like.deleteMany({ postId: id }),
+        cancelPaymentLinksForPost(id),
         // Comment.deleteMany({ postId: id }),
         // SavedPost.deleteMany({ postId: id })
     ]);
@@ -281,6 +301,7 @@ export const deleteContent = asyncHandler(async (req, res) => {
                 SavedPost.deleteMany({ postId: postId }),
                 PostInteraction.deleteMany({ postId: postId }),
                 Report.deleteMany({ reportedPostId: postId }),
+                cancelPaymentLinksForPost(postId),
             ]);
 
             await invalidatePostCaches(postId, userId);

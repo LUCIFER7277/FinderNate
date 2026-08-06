@@ -25,33 +25,42 @@ export const trackPostInteraction = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Invalid interaction type");
     }
 
-    try {
-        // Check if interaction already exists
-        const existingInteraction = await PostInteraction.findOne({
-            userId,
-            postId,
-            interactionType
-        });
+    // The same guard the batch endpoint applies: a malformed id would otherwise
+    // reach the upsert and come back as a CastError wrapped in a 500.
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+        throw new ApiError(400, "Invalid post ID format");
+    }
 
-        if (existingInteraction) {
-            // Update existing interaction
-            existingInteraction.interactionCount += 1;
-            existingInteraction.lastInteracted = new Date();
-            if (viewDuration > 0) {
-                existingInteraction.viewDuration = Math.max(existingInteraction.viewDuration, viewDuration);
-            }
-            await existingInteraction.save();
-        } else {
-            // Create new interaction
-            await PostInteraction.create({
-                userId,
-                postId,
-                interactionType,
-                viewDuration,
-                lastInteracted: new Date(),
-                interactionCount: 1
-            });
+    try {
+        // One atomic upsert instead of findOne-then-save.
+        //
+        // The read and the write used to be two round trips, so two taps landing
+        // together both saw "no row yet" and both inserted — the same
+        // {userId, postId, interactionType} triple stored twice, splitting the
+        // interaction count across rows and double-counting the post in every
+        // aggregate built on this collection. Letting the server do the match
+        // and the write in one operation closes that window.
+        //
+        // $max carries the viewDuration rule (keep the longest view) without a
+        // read, and works on insert too, so no $setOnInsert is needed for it —
+        // which is what the batch endpoint's $max/$setOnInsert conflict was
+        // about. Everything else (viewDuration 0, isHidden false) still comes
+        // from the schema defaults Mongoose applies on upsert.
+        const update = {
+            $set: { lastInteracted: new Date() },
+            $inc: { interactionCount: 1 },
+            $setOnInsert: { userId, postId, interactionType }
+        };
+
+        if (viewDuration > 0) {
+            update.$max = { viewDuration };
         }
+
+        await PostInteraction.updateOne(
+            { userId, postId, interactionType },
+            update,
+            { upsert: true }
+        );
 
         return res.status(200).json(
             new ApiResponse(200, {}, "Interaction tracked successfully")

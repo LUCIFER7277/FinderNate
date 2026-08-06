@@ -520,3 +520,106 @@ export const deleteStory = asyncHandler(async (req, res) => {
 
     res.status(200).json(new ApiResponse(200, { storyId }, "Story deleted successfully"));
 });
+
+// Shared response shaping for the archive toggles: same field mapping the other
+// story endpoints use (mediaType → postType, viewers never leave the server).
+const toStoryResponse = (story) => {
+    const obj = { ...story };
+    obj.postType = obj.mediaType;
+    delete obj.mediaType;
+    delete obj.viewers;
+    return obj;
+};
+
+// 8. Archive a story (author only)
+//
+// isArchived has existed on the schema, been read by fetchArchivedStoriesByUser
+// and been honoured by the purge job since the beginning, but nothing ever set
+// it — so every archive list was empty for everyone. This is the missing write.
+//
+// Archiving is the "keep this past its 24 hours" action: the expiry job skips
+// isArchived rows (see the filter in src/jobs/storyExpiry.job.js), so the row
+// and its media survive. It also takes the story out of the live tray and the
+// profile stories tab immediately, because both filter isArchived: false.
+//
+// Only a story that is still live can be archived. Once expiresAt has passed
+// the story is already invisible everywhere and is a purge candidate — a worker
+// may be part-way through deleting its media at this very moment — so letting
+// it be archived then would resurrect a half-deleted row. The atomic
+// findOneAndUpdate below is what enforces that: the guard is evaluated by the
+// database, not read-then-write.
+export const archiveStory = asyncHandler(async (req, res) => {
+    const { storyId } = req.params;
+    const userId = req.user._id;
+
+    const story = await Story.findById(storyId).select("userId isArchived").lean();
+    if (!story) throw new ApiError(404, "Story not found");
+
+    // Owner only — nobody may archive somebody else's story. Checked before the
+    // update so a non-owner gets 403 rather than the "expired" 409 below.
+    if (story.userId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You are not authorized to archive this story");
+    }
+
+    if (story.isArchived) {
+        const current = await Story.findById(storyId).lean();
+        return res.status(200).json(
+            new ApiResponse(200, toStoryResponse(current), "Story is already archived")
+        );
+    }
+
+    const updated = await Story.findOneAndUpdate(
+        { _id: storyId, userId, isArchived: false, expiresAt: { $gt: new Date() } },
+        { $set: { isArchived: true } },
+        { new: true }
+    ).lean();
+
+    if (!updated) {
+        throw new ApiError(409, "This story has expired and can no longer be archived");
+    }
+
+    res.status(200).json(new ApiResponse(200, toStoryResponse(updated), "Story archived"));
+});
+
+// 9. Un-archive a story (author only)
+//
+// The undo for the above, and only that: it puts the story back into the normal
+// 24-hour lifecycle. That is only meaningful while the story is still within
+// that window — un-archiving one whose expiresAt has passed would not put it
+// back in anyone's tray (every live query also filters expiresAt > now), it
+// would only hand the row and its media to the next purge pass. Deleting a
+// story is what DELETE /stories/:storyId is for; a restore toggle must not be
+// the thing that silently destroys the media, so that case is refused.
+export const unarchiveStory = asyncHandler(async (req, res) => {
+    const { storyId } = req.params;
+    const userId = req.user._id;
+
+    const story = await Story.findById(storyId).select("userId isArchived expiresAt").lean();
+    if (!story) throw new ApiError(404, "Story not found");
+
+    if (story.userId.toString() !== userId.toString()) {
+        throw new ApiError(403, "You are not authorized to un-archive this story");
+    }
+
+    if (!story.isArchived) {
+        const current = await Story.findById(storyId).lean();
+        return res.status(200).json(
+            new ApiResponse(200, toStoryResponse(current), "Story is not archived")
+        );
+    }
+
+    const updated = await Story.findOneAndUpdate(
+        { _id: storyId, userId, isArchived: true, expiresAt: { $gt: new Date() } },
+        { $set: { isArchived: false } },
+        { new: true }
+    ).lean();
+
+    if (!updated) {
+        throw new ApiError(
+            409,
+            "This story's 24 hours are already over, so it can only stay archived or be deleted"
+        );
+    }
+
+    res.status(200).json(new ApiResponse(200, toStoryResponse(updated), "Story un-archived"));
+});
