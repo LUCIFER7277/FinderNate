@@ -4,6 +4,7 @@ import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { AuthOtp } from "../../models/authOtp.models.js";
 import { sendEmail } from "../../utils/sendEmail.js";
+import { renderOtpEmail } from "../../utils/emailTemplate.js";
 import { sendSms } from "../../utils/sendSms.js";
 import {
     rateCheckAndUpsertOtp,
@@ -97,19 +98,31 @@ const sendVerificationOTPForEmail = asyncHandler(async (req, res) => {
         password_reset: "Your OTP for Password Reset - FinderNate",
     };
     const headings = {
-        email_verification: "Email Verification OTP",
-        password_reset: "Password Reset OTP",
+        email_verification: "Verify your email address",
+        password_reset: "Reset your password",
     };
+    const intros = {
+        email_verification: "Use the code below to confirm this email address on your FinderNate account.",
+        password_reset: "Use the code below to set a new password for your FinderNate account.",
+    };
+
+    const key = headings[purpose] ? purpose : "email_verification";
+    // Expiry text is derived from OTP_EXPIRY_MS, not written as a literal, so
+    // the copy cannot drift from the value the verifier actually enforces —
+    // the old templates hardcoded "5 minutes" in three places.
+    const otpEmail = renderOtpEmail({
+        title: headings[key],
+        intro: intros[key],
+        code: plainOtp,
+        expiryMs: OTP_EXPIRY_MS,
+        disclaimer: "If you didn't request this, you can safely ignore this email.",
+    });
 
     await sendEmail({
         to: user.email,
-        subject: subjects[purpose] || subjects.email_verification,
-        html: `
-            <h3>${headings[purpose] || headings.email_verification}</h3>
-            <h2>Your OTP is: <b>${plainOtp}</b></h2>
-            <p>This OTP is valid for 5 minutes.</p>
-            <p>If you did not request this, please ignore this email.</p>
-        `
+        subject: subjects[key],
+        html: otpEmail.html,
+        text: otpEmail.text,
     });
 
     return res.status(200).json(
@@ -221,14 +234,18 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     await rateCheckAndUpsertOtp({ identifier, type, purpose: "password_reset", hashedOtp, expiry, ip: clientIp(req) });
 
     if (type === "email") {
+        const resetEmail = renderOtpEmail({
+            title: "Reset your password",
+            intro: "Use the code below to set a new password for your FinderNate account.",
+            code: plainOtp,
+            expiryMs: OTP_EXPIRY_MS,
+            disclaimer: "If you didn't request a password reset, you can safely ignore this email — your password is unchanged.",
+        });
         await sendEmail({
             to: user.email,
             subject: "Your OTP for Password Reset - FinderNate",
-            html: `
-                <h3>Password Reset OTP</h3>
-                <h2>Your OTP is: <b>${plainOtp}</b></h2>
-                <p>This OTP is valid for 5 minutes.</p>
-                <p>If you did not request this, please ignore this email.</p>`
+            html: resetEmail.html,
+            text: resetEmail.text,
         });
     } else {
         //* The account's real number — `identifier` is scoped with the account
@@ -460,14 +477,19 @@ const sendEmailChangeOtp = asyncHandler(async (req, res) => {
         ip: clientIp(req),
     });
 
+    const changeEmail = renderOtpEmail({
+        title: "Confirm your new email address",
+        intro: "Use the code below to confirm this address as the new email on your FinderNate account.",
+        code: plainOtp,
+        expiryMs: OTP_EXPIRY_MS,
+        disclaimer: "If you didn't request this change, you can ignore this email — your account is unchanged.",
+    });
+
     await sendEmail({
         to: normalizedEmail,
         subject: "Confirm your new email address - FinderNate",
-        html: `
-            <h3>Confirm your new email address</h3>
-            <h2>Your OTP is: <b>${plainOtp}</b></h2>
-            <p>This OTP is valid for 5 minutes.</p>
-            <p>If you did not request this change you can ignore this email — your account is unchanged.</p>`
+        html: changeEmail.html,
+        text: changeEmail.text,
     });
 
     return res.status(200).json(

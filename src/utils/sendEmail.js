@@ -57,7 +57,14 @@ const SMTP_PORT = Number(process.env.EMAIL_PORT) || 465;
 const FROM_ADDRESS = process.env.EMAIL_FROM?.trim() || process.env.EMAIL_USER;
 const FROM_NAME = process.env.EMAIL_FROM_NAME?.trim() || 'FinderNate';
 
-export const sendEmail = async ({ to, subject, html }) => {
+// `text` is optional but strongly preferred: an HTML-only message is a spam
+// signal at Gmail and Outlook, and this deployment is already fighting a
+// filtering problem for an unrelated reason (a From: domain whose SPF/DKIM did
+// not align). Passing both parts sends multipart/alternative, which removes one
+// more reason to be filtered — and it is also what a screen reader, a watch and
+// a plain-text client actually read. Callers that omit it still work exactly as
+// before; nodemailer just sends the HTML part alone.
+export const sendEmail = async ({ to, subject, html, text }) => {
     // The From: domain must match the product's domain and have SPF + DKIM
     // published for it, or Gmail and Outlook score the message as spoofing and
     // file it as spam — which for the guest-checkout claim link means the buyer
@@ -88,6 +95,10 @@ export const sendEmail = async ({ to, subject, html }) => {
             to,
             subject,
             html,
+            // Omitted entirely when the caller did not supply one — passing
+            // `text: undefined` is fine, but being explicit keeps the sent
+            // message identical to before for the callers not yet templated.
+            ...(text ? { text } : {}),
         });
 
         return { success: true, messageId: info?.messageId };
