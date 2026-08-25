@@ -16,16 +16,10 @@ import { MAX_UPLOAD_MB, overallTooLargeMessage } from '../constants/uploadLimits
  * MUST STAY SYNCHRONOUS. Express 4 does not await error handlers: marking this
  * async turns any internal rejection into an unhandledRejection, and
  * src/index.js exits the process on those. Nothing here may touch the database
- * or await anything — the error is stashed on the request and written later,
- * off the response path, by the diagnostics hook in requestContext.js.
+ * or await anything.
  */
 const errorHandler = (err, req, res, next) => {
     const { status, body } = classify(err);
-
-    // Read off the request by the res 'finish' hook, once the response is
-    // already flushed. Nothing is written to the database from in here.
-    req._diagError = err;
-    req._diagStatus = status;
 
     logError(err, req, status);
 

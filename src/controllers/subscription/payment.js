@@ -18,28 +18,15 @@ import {
     MetricsCollector
 } from '../../utils/monitoring.utils.js';
 import { SUBSCRIPTION_PLANS } from './plans.js';
-
-const PLAN_TO_BUSINESS_PLAN = {
-    small_business: 'plan2',
-    corporate: 'plan3'
-};
-
-// Adds one calendar month without the Date.setMonth() overflow that turned a
-// 31-January renewal into 3 March and handed out free days.
-//
-// Exported because the legacy Razorpay webhook (controllers/webhook.controllers.js)
-// needs exactly this arithmetic. It previously kept a verbatim copy, which is how
-// the two renewal paths drifted apart and why only one of them got fixed the first
-// time. One definition, two callers.
-export const addOneMonth = (from) => {
-    const next = new Date(from);
-    const day  = next.getDate();
-    next.setDate(1);
-    next.setMonth(next.getMonth() + 1);
-    const lastDayOfTargetMonth = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate();
-    next.setDate(Math.min(day, lastDayOfTargetMonth));
-    return next;
-};
+// The renewal arithmetic, the Business-plan mapping, the cache sweep and the
+// redemption guard now live in activation.js and are shared with the Google
+// Play path — the same "keep it as one definition" rule the Razorpay drift
+// taught, now that there genuinely is a second activation path again.
+import {
+    addOneMonth,
+    findRedemption,
+    persistActivation
+} from './activation.js';
 
 // Which plan a Cashfree order was actually for. Derived from the order note we
 // set at creation time, falling back to the amount paid — never from the client.
@@ -53,19 +40,6 @@ const resolvePlanFromCashfreeOrder = (cfOrder) => {
     const paidAmount = Number(cfOrder?.order_amount);
     const byPrice = paidPlans.filter(([, p]) => p.price === paidAmount);
     return byPrice.length === 1 ? byPrice[0][0] : null;
-};
-
-const invalidateCaches = async (userId) => {
-    const { FeedCacheManager, UserCacheManager } = await import('../../utils/cache.utils.js');
-    await Promise.allSettled([
-        UserCacheManager.invalidateUserProfile(userId.toString()),
-        FeedCacheManager.invalidateUserFeed(userId),
-        FeedCacheManager.invalidateExploreFeed(),
-        FeedCacheManager.invalidateTrendingFeed()
-    ]);
-    const { redisClient } = await import('../../config/redis.config.js');
-    const feedKeys = await redisClient.keys('fn:user:*:feed:*');
-    if (feedKeys.length > 0) await redisClient.del(...feedKeys);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +84,7 @@ const activateSubscriptionForOrder = async ({ cfOrder, cfPaymentId, expectedUser
     if (!user) throw new ApiError(404, 'User not found');
     if (!user.isBusinessProfile) throw new ApiError(403, 'Only business accounts can activate a subscription.');
 
-    let subscription = await Subscription.findOne({ userId: user._id });
+    const subscription = await Subscription.findOne({ userId: user._id });
 
     // ── One payment, one activation ───────────────────────────────────────────
     // Without this the same cashfreeOrderId could be replayed every month for a
@@ -118,8 +92,16 @@ const activateSubscriptionForOrder = async ({ cfOrder, cfPaymentId, expectedUser
     // Match on the gateway payment id AND the order id: when Cashfree's
     // payments lookup fails the caller falls back to the order id, and the two
     // must not be redeemable as if they were separate payments.
+    //
+    // findRedemption searches redeemedPaymentIds — the full history — and not
+    // just the scalar paymentId this used to query. paymentId is overwritten by
+    // every renewal, so the old check went blind to any receipt older than the
+    // most recent one, and a Cashfree order stays PAID forever: after a single
+    // renewal the previous order id could be re-posted for another free month,
+    // indefinitely. That is precisely the hole redeemedPaymentIds was added to
+    // close, and the guard now actually reads it.
     const redemptionKeys = [cfPaymentId, cfOrder?.order_id].filter(Boolean).map(String);
-    const redeemedBy = await Subscription.findOne({ paymentId: { $in: redemptionKeys } });
+    const redeemedBy = await findRedemption(redemptionKeys);
     if (redeemedBy) {
         if (redeemedBy.userId.toString() === user._id.toString()) {
             return { user, plan, subscription: redeemedBy, business: null, alreadyApplied: true };
@@ -137,40 +119,16 @@ const activateSubscriptionForOrder = async ({ cfOrder, cfPaymentId, expectedUser
         subscription.status === 'active' &&
         subscription.endDate > now;
 
-    const endDate = addOneMonth(stillRunningSamePlan ? subscription.endDate : now);
+    const { subscription: saved, business } = await persistActivation({
+        user,
+        plan,
+        startDate: stillRunningSamePlan ? (subscription.startDate || now) : now,
+        endDate: addOneMonth(stillRunningSamePlan ? subscription.endDate : now),
+        paymentId: cfPaymentId,
+        source: 'cashfree'
+    });
 
-    if (subscription) {
-        subscription.plan      = plan;
-        subscription.status    = 'active';
-        subscription.startDate = stillRunningSamePlan ? (subscription.startDate || now) : now;
-        subscription.endDate   = endDate;
-        subscription.paymentId = cfPaymentId;
-        await subscription.save();
-    } else {
-        subscription = await Subscription.create({
-            userId: user._id,
-            plan,
-            status: 'active',
-            startDate: now,
-            endDate,
-            paymentId: cfPaymentId
-        });
-    }
-
-    const Business = (await import('../../models/business.models.js')).default;
-    const business = await Business.findOneAndUpdate(
-        { userId: user._id },
-        { $set: { plan: PLAN_TO_BUSINESS_PLAN[plan], subscriptionStatus: 'active', isVerified: true } },
-        { upsert: true, new: true }
-    );
-
-    try {
-        await invalidateCaches(user._id);
-    } catch (cacheError) {
-        console.error('Cache invalidation error:', cacheError);
-    }
-
-    return { user, plan, subscription, business, alreadyApplied: false };
+    return { user, plan, subscription: saved, business, alreadyApplied: false };
 };
 
 export const createSubscriptionOrder = asyncHandler(async (req, res) => {
@@ -240,7 +198,7 @@ export const createSubscriptionOrder = asyncHandler(async (req, res) => {
         );
     } catch (error) {
         console.error('❌ Cashfree subscription order creation failed:', error);
-        ErrorLogger.logRazorpayError(userId.toString(), null, error);
+        ErrorLogger.logPaymentGatewayError(userId.toString(), null, error);
         throw new ApiError(500, `Payment gateway error: ${error.message}`);
     }
 });
@@ -362,7 +320,7 @@ export const subscriptionWebhook = asyncHandler(async (req, res) => {
     } catch (activationError) {
         // Never 500 back at Cashfree — that just triggers redelivery of a
         // payload we have already logged. Surface it for reconciliation instead.
-        ErrorLogger.logRazorpayError('webhook', cfOrderId, activationError);
+        ErrorLogger.logPaymentGatewayError('webhook', cfOrderId, activationError);
         console.error(`[Cashfree subscription webhook] Activation failed for order ${cfOrderId}:`, activationError?.message || activationError);
     }
 

@@ -150,7 +150,7 @@ async function testPaymentsAPI() {
         testOrderId = result.data?.data?.orderId;
         // Verify response structure matches CreateOrderResponse type
         const data = result.data?.data;
-        const hasRequiredFields = data?.orderId && data?.razorpayOrderId && data?.amount;
+        const hasRequiredFields = data?.orderId && data?.cashfreeOrderId && data?.amount;
         logTest('  → Response matches CreateOrderResponse type', hasRequiredFields);
     } else failed++;
 

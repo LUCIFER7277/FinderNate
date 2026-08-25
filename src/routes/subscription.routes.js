@@ -7,6 +7,8 @@ import {
     createSubscriptionOrder,
     verifySubscriptionPayment,
     subscriptionWebhook,
+    verifyGooglePlayPurchase,
+    googlePlayNotification,
     testUpgradeSubscription
 } from '../controllers/subscription/index.js';
 import { verifyJWT } from '../middlewares/auth.middleware.js';
@@ -15,6 +17,12 @@ const router = Router();
 
 // Public route — Cashfree webhook (no JWT)
 router.post('/webhook', subscriptionWebhook);                    // POST /api/v1/subscription/webhook
+
+// Public route — Google Play Real-time Developer Notifications, delivered by
+// Cloud Pub/Sub, which has no user session. Authenticated by the shared secret
+// in ?token= (GOOGLE_PLAY_RTDN_SECRET) inside the handler. Must stay ABOVE the
+// verifyJWT below, for the same reason the Cashfree webhook does.
+router.post('/google-play/notification', googlePlayNotification);
 
 // Apply authentication middleware to all routes below
 router.use(verifyJWT);
@@ -25,9 +33,15 @@ router.get('/upgrade-prompt', getUpgradePrompt);                 // GET /api/v1/
 router.get('/feature/:feature/access', checkFeatureAccess);      // GET /api/v1/subscription/feature/calling/access
 router.get('/plans', getAvailablePlans);                         // GET /api/v1/subscription/plans
 
-// Cashfree payment routes for subscription upgrade
+// Cashfree payment routes for subscription upgrade (website + the physical
+// goods store; still the only gateway the web app uses)
 router.post('/create-order', createSubscriptionOrder);           // POST /api/v1/subscription/create-order
 router.post('/verify-payment', verifySubscriptionPayment);       // POST /api/v1/subscription/verify-payment
+
+// Google Play Billing — the Android app's subscription path. Play requires its
+// own billing system for anything unlocking in-app functionality, so the app
+// cannot use the Cashfree routes above for subscriptions.
+router.post('/google-play/verify', verifyGooglePlayPurchase);    // POST /api/v1/subscription/google-play/verify
 
 // @deprecated - TEST ONLY: Upgrade subscription without payment (for testing business features)
 // This endpoint should not be used in production. Use /create-order and /verify-payment instead

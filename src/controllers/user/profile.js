@@ -18,7 +18,6 @@ import SearchHistory from "../../models/searchHistory.models.js";
 import PostInteraction from "../../models/postInteraction.models.js";
 import Subscription from "../../models/subscription.models.js";
 import PushSubscription from "../../models/pushSubscription.models.js";
-import Device from "../../models/device.models.js";
 import Chat from "../../models/chat.models.js";
 import Message from "../../models/message.models.js";
 import Activity from "../../models/activity.models.js";
@@ -497,7 +496,9 @@ const deleteAccount = asyncHandler(async (req, res) => {
         Subscription.deleteMany({ userId }),
         Subscription.deleteMany({ subscriberId: userId }),
         PushSubscription.deleteMany({ userId }),
-        Device.deleteMany({ userId }),
+        // The Device model is gone: nothing in the codebase ever created a
+        // Device row, so this cleared an always-empty collection while the
+        // schema stood as a ready-made landing zone for ipAddress/browser/os.
         // A Chat is the SHARED record of a conversation, not a per-user copy.
         // This was Chat.deleteMany({ participants: userId }), which hard-deleted
         // every thread the leaving user was in — so the person on the other side
@@ -633,7 +634,7 @@ const deleteAccount = asyncHandler(async (req, res) => {
                             "stories", "drafts", "products", "cart", "wishlist", "orders",
                             "saved_posts", "search_history", "post_interactions",
                             "subscriptions_user", "subscriptions_subscriber", "push_subscriptions",
-                            "payments", "devices", "chats", "messages", "activities_user",
+                            "payments", "chats", "messages", "activities_user",
                             "activities_target", "notifications_user", "notifications_sender",
                             "reports", "feedback", "follow_requests_from", "follow_requests_to",
                             "contact_requests_user", "contact_requests_contact", "blocks_blocker",

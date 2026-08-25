@@ -232,6 +232,12 @@ const sendGuestClaimLink = async ({ user, orderNumber }) => {
             });
             result.sms.sent = true;
         } catch (err) {
+            // The ONE caller of sendSms that must swallow its throw, including
+            // the "non-Indian number" ApiError. Everywhere else that error has
+            // to reach the user, because the OTP is the only way forward; here
+            // the email below carries the same code, and the payment has
+            // already settled — turning an undeliverable SMS into a failure
+            // would strand a paid order over a channel that was never required.
             result.sms.error = err?.message || 'SMS send failed';
             console.error(`[guest-claim] SMS failed for order ${orderNumber}:`, result.sms.error);
         }

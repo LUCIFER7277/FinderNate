@@ -41,11 +41,44 @@ export const handleExpiredSubscriptions = async () => {
 
         let successCount = 0;
         let failureCount = 0;
+        let reconciledCount = 0;
 
         // Process each expired subscription
         for (const subscription of expiredSubscriptions) {
             try {
                 const userId = subscription.userId;
+
+                // ── Google Play renews behind our back ────────────────────────
+                // A Cashfree subscription past its endDate really is over: the
+                // user has to come back and pay again. A Play one is the
+                // opposite — Play charges the card by itself and only tells us
+                // afterwards via an RTDN, and it also runs its own grace period
+                // for failed payments. So a Play row whose endDate has passed
+                // usually means "we have not heard yet", not "it lapsed", and
+                // expiring it here would revoke a subscription the user is
+                // still paying for.
+                //
+                // Ask Play instead and take whatever answer it gives; that call
+                // extends the row when it has renewed and deactivates it when
+                // it genuinely ended.
+                if (subscription.source === 'google_play') {
+                    if (!subscription.playPurchaseToken) {
+                        console.warn(`⚠️ Play subscription for user ${userId} has no purchase token — leaving as-is for manual review`);
+                        continue;
+                    }
+                    const { isGooglePlayConfigured } = await import('../config/googlePlay.config.js');
+                    if (!isGooglePlayConfigured()) {
+                        // Never expire on our own guess when we simply cannot
+                        // ask. Silence from a misconfigured server is not
+                        // evidence the user stopped paying.
+                        console.warn('⚠️ Google Play not configured — skipping Play subscription expiry');
+                        continue;
+                    }
+                    const { reconcilePlaySubscription } = await import('../controllers/subscription/googlePlay.js');
+                    await reconcilePlaySubscription(subscription.playPurchaseToken);
+                    reconciledCount++;
+                    continue;
+                }
 
                 // 1. Update subscription status to expired
                 subscription.status = 'expired';
@@ -94,7 +127,10 @@ export const handleExpiredSubscriptions = async () => {
             expiredCount: expiredSubscriptions.length,
             successCount,
             failureCount,
-            message: `Processed ${successCount} expired subscriptions successfully, ${failureCount} failures`
+            reconciledCount,
+            message: `Processed ${successCount} expired subscriptions successfully, ` +
+                     `${reconciledCount} Google Play subscriptions reconciled with the store, ` +
+                     `${failureCount} failures`
         };
 
         return result;

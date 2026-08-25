@@ -5,7 +5,7 @@ import { ApiResponse } from "../../utils/ApiResponse.js";
 import { AuthOtp } from "../../models/authOtp.models.js";
 import { sendEmail } from "../../utils/sendEmail.js";
 import { renderOtpEmail } from "../../utils/emailTemplate.js";
-import { sendSms } from "../../utils/sendSms.js";
+import { sendSms, assertSmsDeliverable } from "../../utils/sendSms.js";
 import {
     rateCheckAndUpsertOtp,
     generateAcessAndRefreshToken,
@@ -227,6 +227,20 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
     //* spelling the client sends back.
     identifier = canonicalIdentifier(user, type);
 
+    //* Before rateCheckAndUpsertOtp spends one of the day's OTPs and arms the
+    //* 60s cooldown — see registerUser in auth.js. Someone locked out of their
+    //* account otherwise got "use an Indian number", then "please wait N
+    //* seconds" on the retry, for a code that could never arrive.
+    //*
+    //* The argument is `String(user.phoneNumber)` — byte for byte what is handed
+    //* to sendSms below, NOT a normalised form of it. `phoneNumber` predates
+    //* normalizePhone and is stored both bare ("9483122481") and prefixed
+    //* ("+919483122481"); passing anything else here could answer differently
+    //* than the send itself would.
+    if (type === "phone" && process.env.NODE_ENV !== 'development') {
+        assertSmsDeliverable(String(user.phoneNumber));
+    }
+
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
@@ -260,6 +274,13 @@ const sendPasswordResetOTP = asyncHandler(async (req, res) => {
         } catch (smsErr) {
             if (process.env.NODE_ENV === 'development') {
                 console.warn(`[DEV] SMS failed (${smsErr.message}). Reset OTP for ${user.phoneNumber}: ${plainOtp}`);
+            } else if (smsErr instanceof ApiError) {
+                //* Unsupported number, not a gateway failure — see the same
+                //* branch in auth.js registerUser. Retrying cannot help, so it
+                //* must not be dressed up as the 503 below. An account on such
+                //* a number can still reset by email, which is the other arm of
+                //* this very if/else, so the wording must not imply otherwise.
+                throw smsErr;
             } else {
                 throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
             }
@@ -367,6 +388,12 @@ const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
     //* several accounts may share one. Uniqueness lives on email + username.
     const normalizedPhone = normalizePhone(phone);
 
+    //* Before any quota is charged — see registerUser in auth.js. Attaching a
+    //* number we cannot verify is refused outright rather than after it has
+    //* cost the account an OTP and started a cooldown on a number that will
+    //* never receive one.
+    if (process.env.NODE_ENV !== 'development') assertSmsDeliverable(normalizedPhone);
+
     const plainOtp = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedOtp = await AuthOtp.hashOtp(plainOtp);
     const expiry = new Date(Date.now() + OTP_EXPIRY_MS);
@@ -378,6 +405,12 @@ const sendPhoneVerificationOtp = asyncHandler(async (req, res) => {
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
             console.warn(`[DEV] SMS failed (${smsErr.message}). Phone verification OTP for ${normalizedPhone}: ${plainOtp}`);
+        } else if (smsErr instanceof ApiError) {
+            //* Unsupported number, not a gateway failure — see registerUser in
+            //* auth.js. Here it also tells the user the number they are trying
+            //* to attach to the account cannot be verified at all, which is the
+            //* one thing a 503 would hide from them.
+            throw smsErr;
         } else {
             throw new ApiError(503, `Failed to send OTP: ${smsErr.message}`);
         }

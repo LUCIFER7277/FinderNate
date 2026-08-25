@@ -403,9 +403,10 @@ SUBSCRIPTION_CHECK_ENABLED=true
 FREE_TIER_CALL_ENABLED=false
 BUSINESS_PRIORITY_ENABLED=true
 
-# Payment gateway (if applicable)
-STRIPE_SECRET_KEY=your_stripe_key
-PAYMENT_WEBHOOK_SECRET=your_webhook_secret
+# Payment gateway — Cashfree is the only supported gateway
+CASHFREE_APP_ID=your_cashfree_app_id
+CASHFREE_SECRET_KEY=your_cashfree_secret_key
+CASHFREE_ENV=sandbox   # or: production
 ```
 
 ---

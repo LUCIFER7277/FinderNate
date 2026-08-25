@@ -683,25 +683,12 @@ export const trackShare = asyncHandler(async (req, res) => {
     lastInteracted: new Date(),
   });
 
-  // Optionally track analytics
-  if (platform || referrer) {
-    await Post.findByIdAndUpdate(postId, {
-      $push: {
-        "analytics.shareEvents": {
-          $each: [
-            {
-              userId,
-              platform: platform || "unknown",
-              referrer: referrer || req.get("referer") || "direct",
-              timestamp: new Date(),
-              userAgent: req.get("user-agent"),
-            },
-          ],
-          $slice: -100,
-        },
-      },
-    });
-  }
+  // No per-share analytics row is written. This used to $push
+  // {userId, platform, referrer, userAgent} onto "analytics.shareEvents",
+  // a path AnalyticsSchema does not declare, so Mongoose strict mode dropped
+  // the whole update — it recorded nothing, and would have started collecting
+  // user-agent/referrer fingerprints the moment the field was added. The share
+  // COUNT is still tracked above (Redis, and engagement.shares as fallback).
 
   // Invalidate share-page cache
   await redisClient.del(`fn:share:post:${postId}`);

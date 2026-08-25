@@ -1,6 +1,4 @@
 import { randomUUID } from 'crypto';
-// DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
-import { captureServerEvent } from '../diagnostics/serverCapture.js';
 
 /**
  * Gives every request an id, and logs the ones worth looking at.
@@ -73,26 +71,6 @@ export const requestLogger = (req, res, next) => {
             `[${tag}] id=${req.id} ${req.method} ${req.originalUrl} ` +
             `→ ${res.statusCode} ${ms}ms${who}`
         );
-
-        // DIAGNOSTICS HOOK (removable — see DIAGNOSTICS_REMOVAL.md)
-        //
-        // Deliberately here and not in the error handler. By the time 'finish'
-        // fires the response is fully flushed, so a slow or failing write
-        // cannot delay the user, cannot corrupt a half-sent response, and
-        // cannot throw anywhere that would reach Express. The error object
-        // itself was stashed on the request by errorHandler, which does no I/O
-        // of its own.
-        //
-        // Not awaited, and it never throws — see the hazard notes in
-        // serverCapture.js.
-        if (failed) {
-            captureServerEvent({
-                req,
-                statusCode: res.statusCode,
-                ms,
-                err: req._diagError,
-            });
-        }
     });
 
     next();

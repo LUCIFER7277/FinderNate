@@ -4,7 +4,6 @@
  */
 
 import axios from 'axios';
-import crypto from 'crypto';
 
 const BASE_URL = 'http://localhost:3000/api/v1';
 
@@ -125,10 +124,10 @@ async function testGetShareablePaymentDetails() {
 }
 
 // ==========================================
-// TEST 3: Create Razorpay Order for Shareable Link (Guest)
+// TEST 3: Create Cashfree Order for Shareable Link (Guest)
 // ==========================================
 async function testCreateGuestOrder() {
-  logSection('TEST 3: Create Razorpay Order for Shareable Link (Guest Checkout)');
+  logSection('TEST 3: Create Cashfree Order for Shareable Link (Guest Checkout)');
 
   if (!testPostId) {
     log('⚠️', 'Skipping - no post ID');
@@ -156,7 +155,7 @@ async function testCreateGuestOrder() {
 
     log('✅', 'Guest order created:', {
       orderId: response.data.data.orderId,
-      razorpayOrderId: response.data.data.razorpayOrderId,
+      cashfreeOrderId: response.data.data.cashfreeOrderId,
       amount: response.data.data.amount
     });
 
@@ -172,7 +171,7 @@ async function testCreateGuestOrder() {
 // TEST 4: Create Order as Logged-in Buyer
 // ==========================================
 async function testCreateBuyerOrder() {
-  logSection('TEST 4: Create Razorpay Order (Logged-in Buyer)');
+  logSection('TEST 4: Create Cashfree Order (Logged-in Buyer)');
 
   if (!testPostId || !buyerToken) {
     log('⚠️', 'Skipping - no post ID or buyer token');
@@ -199,7 +198,7 @@ async function testCreateBuyerOrder() {
 
     log('✅', 'Buyer order created:', {
       orderId: response.data.data.orderId,
-      razorpayOrderId: response.data.data.razorpayOrderId,
+      cashfreeOrderId: response.data.data.cashfreeOrderId,
       amount: response.data.data.amount
     });
 
@@ -229,22 +228,24 @@ async function testPaymentVerification() {
       authRequest(buyerToken || sellerToken)
     );
 
-    const razorpayOrderId = orderResponse.data.data.order.razorpayOrderId;
+    const cashfreeOrderId = orderResponse.data.data.order.cashfreeOrderId;
 
-    // Simulate payment verification (in real scenario, this comes from Razorpay)
-    const razorpayPaymentId = 'pay_test_' + Date.now();
-    const razorpaySignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || 'test_secret')
-      .update(razorpayOrderId + '|' + razorpayPaymentId)
-      .digest('hex');
-
+    // NOTE: there is nothing left to "simulate" here. /payments/verify does not
+    // accept a client-computed signature — it takes the Cashfree order id and
+    // asks Cashfree server-side what that order's status is (see verifyPayment
+    // in controllers/payments.controllers.js), then binds the transaction to
+    // this order via assertTransactionBelongsToOrder. That is deliberate: a
+    // client-supplied signature was the whole attack surface this endpoint was
+    // hardened against.
+    //
+    // So against a sandbox order that has NOT actually been paid, this step is
+    // expected to fail — a genuine pass requires completing the hosted Cashfree
+    // checkout at the returned checkoutUrl first.
     const response = await axios.post(
       `${BASE_URL}/payments/verify`,
       {
         orderId: testOrderId,
-        razorpayOrderId,
-        razorpayPaymentId,
-        razorpaySignature
+        txnId: cashfreeOrderId
       },
       authRequest(buyerToken)
     );

@@ -35,8 +35,14 @@ export const PASSWORD_MIN = 8;
 export const PASSWORD_MAX = 20;
 
 // ── Age policy ─────────────────────────────────────────────────────────────
-/** Minimum age to hold an account, matching the declared store content rating. */
-export const MIN_SIGNUP_AGE = 13;
+/**
+ * Minimum age to hold an account, matching the declared store content rating.
+ *
+ * 18 to agree with the Terms, Privacy Policy and Seller Terms, and with the
+ * 18+ target audience declared on the Play listing. Keep in step with
+ * kMinimumSignupAgeYears in the app's personal_information_page_1.dart.
+ */
+export const MIN_SIGNUP_AGE = 18;
 
 /**
  * Enforces the password policy server-side.

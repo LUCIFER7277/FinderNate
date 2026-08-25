@@ -169,6 +169,10 @@ function buildInvoiceData(order, viewerIsBuyer) {
 
         // Payment Info
         paymentStatus: order.paymentStatus,
+        // Legacy gateway ids — undefined on every order paid through Cashfree,
+        // populated only on orders predating the gateway migration. Kept so a
+        // historical invoice still shows the buyer a payment reference; see the
+        // note on these fields in models/order.models.js before removing.
         razorpayPaymentId: order.razorpayPaymentId,
         razorpayOrderId: order.razorpayOrderId,
         paymentReleasedAt: order.paymentReleasedAt,

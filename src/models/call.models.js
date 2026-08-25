@@ -73,21 +73,11 @@ const CallSchema = new mongoose.Schema({
         ref: 'User'
     },
 
-    // 📱 Device/quality information
-    metadata: {
-        initiatorDevice: String,
-        receiverDevice: String,
-        quality: {
-            type: String,
-            enum: ['excellent', 'good', 'poor', 'failed'],
-            default: 'good'
-        },
-        connectionType: {
-            type: String,
-            enum: ['wifi', 'cellular', 'unknown'],
-            default: 'unknown'
-        }
-    }
+    // No device/quality metadata is stored. initiatorDevice, receiverDevice,
+    // quality and connectionType used to be declared here and were never
+    // written by anything; they only stood ready to collect device
+    // fingerprints the privacy declaration does not cover. The call record
+    // itself — who called whom, when, how long, how it ended — is kept.
 }, {
     timestamps: true,
     toJSON: { virtuals: true },

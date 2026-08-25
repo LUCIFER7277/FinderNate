@@ -323,24 +323,6 @@ export const guestCheckoutIpRateLimit = rateLimit({
     store: new RedisStore({ prefix: 'rl:guestco:ip:', windowMs: 10 * 60 * 1000 })
 });
 
-// DIAGNOSTICS MODULE (removable — see DIAGNOSTICS_REMOVAL.md in the mobile
-// repo). Tight per-IP cap for the log-ingest endpoint: one device uploads a
-// batch every ~3 min plus error flushes, so 60/min/IP is very generous for
-// real testers while blocking a flood that could fill the DB before the 30-day
-// TTL prunes it.
-export const diagnosticsRateLimit = rateLimit({
-    windowMs: 60 * 1000, // 1 minute
-    max: 60,
-    message: {
-        error: 'Too many diagnostics uploads, please slow down.',
-        retryAfter: 60
-    },
-    standardHeaders: true,
-    legacyHeaders: false,
-    passOnStoreError: true,
-    store: new RedisStore({ prefix: 'rl:diag:', windowMs: 60 * 1000 })
-});
-
 // Rate limiter for notification endpoints
 export const notificationRateLimit = rateLimit({
     windowMs: 30 * 1000, // 30 seconds

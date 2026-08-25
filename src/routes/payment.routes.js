@@ -6,12 +6,12 @@ import {
 import {
     createPaymentLink,
     getPaymentLinkDetails,
-    createPhonePeOrder,
+    createChatCashfreeOrder,
     verifyPayment,
-    phonePeWebhook,
+    chatCashfreeWebhook,
     createShareablePaymentLink,
     getShareablePaymentLinkDetails,
-    createShareablePhonePeOrder,
+    createShareableCashfreeOrder,
     getCheckoutByLinkId,
     showProductInterest,
     sendCheckoutMessage,
@@ -28,7 +28,7 @@ import {
 const router = Router();
 
 // Cashfree S2S webhook — chat/escrow orders (no auth, sets paymentStatus: 'held' + escrow)
-router.post("/webhook", phonePeWebhook);
+router.post("/webhook", chatCashfreeWebhook);
 
 // Public route - get payment link details
 router.get("/link/:linkId", getPaymentLinkDetails);
@@ -71,7 +71,7 @@ router.post(
     "/post/create-order",
     guestCheckoutIpRateLimit,
     optionalVerifyJWT,
-    createShareablePhonePeOrder
+    createShareableCashfreeOrder
 );
 
 // Public route - get checkout details by linkId (for shareable checkout links)
@@ -129,7 +129,7 @@ router.post("/create-link", createPaymentLink);
 router.post("/create-shareable-link", createShareablePaymentLink);
 
 // Buyer initiates Cashfree payment (chat payment link)
-router.post("/create-order", createPhonePeOrder);
+router.post("/create-order", createChatCashfreeOrder);
 
 
 // Buyer shows interest - sends checkout message in chat with full product details & price breakdown

@@ -49,13 +49,57 @@ const SubscriptionSchema = new mongoose.Schema({
     autoRenew: {
         type: Boolean,
         default: true
+    },
+    /**
+     * Which gateway the CURRENT period was bought through.
+     *
+     * Needed because the two gateways renew in opposite directions. Cashfree
+     * renewals arrive as a fresh client-driven payment, so nothing happens
+     * unless the user comes back and pays. Google Play renews on its own and
+     * only tells us afterwards, via a Real-time Developer Notification — so a
+     * google_play subscription must NOT be expired locally by the nightly job
+     * just because endDate passed; Play may simply be in its grace period and
+     * about to notify us. See jobs/subscriptionExpiry.job.js.
+     *
+     * Legacy rows predate the field and are Cashfree by definition; the default
+     * reflects that rather than leaving them undefined.
+     */
+    source: {
+        type: String,
+        enum: ['cashfree', 'google_play'],
+        default: 'cashfree',
+        index: true
+    },
+    /**
+     * Google Play's purchase token for the current subscription. This is the
+     * handle for every later question about the subscription — it is what
+     * purchases.subscriptionsv2.get takes, and what an RTDN carries. It stays
+     * stable across automatic renewals of the same subscription and only
+     * changes when the user re-subscribes after a lapse or upgrades tier.
+     */
+    playPurchaseToken: {
+        type: String,
+        default: null,
+        index: true,
+        sparse: true
+    },
+    /** The Play product id purchased, e.g. 'small_business' / 'corporate'. */
+    playProductId: {
+        type: String,
+        default: null
     }
 }, { timestamps: true });
 
-// Record the redemption without every caller having to remember to. Both
-// activation paths (subscription/payment.js and the legacy Razorpay
-// webhook.controllers.js) assign paymentId and then save(), so appending here
-// keeps the history complete for renewals and first activations alike.
+// Record the redemption without every caller having to remember to. The
+// activation path (subscription/payment.js, Cashfree) assigns paymentId and
+// then save(), so appending here keeps the history complete for renewals and
+// first activations alike. This hook is the reason the guard still holds if a
+// second activation path is ever added — it cannot forget to record.
+//
+// A legacy Razorpay webhook was a second writer here until the non-Cashfree
+// gateways were removed; historical redeemedPaymentIds may therefore contain
+// Razorpay payment ids (pay_*). They are kept: this array is the replay guard,
+// and dropping an id would let it be redeemed again.
 SubscriptionSchema.pre('save', function (next) {
     if (!Array.isArray(this.redeemedPaymentIds)) this.redeemedPaymentIds = [];
 

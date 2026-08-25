@@ -16,8 +16,12 @@
 
 ## Overview
 
+> **Gateway note:** Cashfree is the only payment gateway. The Razorpay and
+> PhonePe integrations were removed, along with `POST /api/v1/webhooks/razorpay`.
+> `RAZORPAY_*` / `PHONEPE_*` environment variables are not read by anything.
+
 The subscription system enables users to upgrade from free tier to paid plans (Small Business ₹999/mo, Corporate ₹2999/mo) with:
-- Razorpay payment integration
+- Cashfree payment integration
 - Automatic subscription expiry handling
 - Webhook support for payment notifications
 - Comprehensive logging and monitoring
@@ -29,13 +33,13 @@ The subscription system enables users to upgrade from free tier to paid plans (S
 
 ### ✅ Core Features
 - **3-Tier Subscription Plans**: Free, Small Business (₹999/mo), Corporate (₹2999/mo)
-- **Razorpay Payment Gateway**: Secure payment processing with signature verification
+- **Cashfree Payment Gateway**: Server-side order-status verification plus signed webhooks
 - **Subscription Management**: Create, upgrade, and expire subscriptions
 - **Business Profile Sync**: Auto-sync subscription status with business profiles
 - **Calling Features**: Audio/video calls restricted to paid users
 
 ### ✅ Production-Ready Features
-- **Webhook Handler**: Processes Razorpay payment events asynchronously
+- **Webhook Handler**: Processes Cashfree payment events asynchronously
 - **Cron Jobs**: Auto-expire subscriptions and send renewal reminders
 - **Monitoring System**: Comprehensive logging of payments, subscriptions, and errors
 - **Cache Invalidation**: Auto-clear caches when subscription changes
@@ -50,10 +54,10 @@ The subscription system enables users to upgrade from free tier to paid plans (S
 Add these to your `.env` file:
 
 ```bash
-# Razorpay Configuration
-RAZORPAY_KEY_ID=rzp_test_YOUR_KEY_ID          # Test key (replace with live key in production)
-RAZORPAY_KEY_SECRET=YOUR_KEY_SECRET            # Test secret (replace in production)
-RAZORPAY_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET    # For webhook signature verification
+# Cashfree Configuration
+CASHFREE_APP_ID=YOUR_APP_ID                    # Sandbox app id (replace with live in production)
+CASHFREE_SECRET_KEY=YOUR_SECRET_KEY            # Also used to verify webhook signatures
+CASHFREE_ENV=sandbox                           # Change to 'production' in production
 
 # Environment
 NODE_ENV=development  # Change to 'production' in production
@@ -62,7 +66,7 @@ NODE_ENV=development  # Change to 'production' in production
 ### 2. Install Dependencies
 
 ```bash
-npm install node-cron razorpay
+npm install
 ```
 
 ### 3. Database Indexes
@@ -120,7 +124,7 @@ Example: `/api/v1/subscription/feature/calling/access`
 
 ### 💳 Payment Flow
 
-#### Step 1: Create Razorpay Order
+#### Step 1: Create Cashfree Order
 ```http
 POST /api/v1/subscription/create-order
 Authorization: Bearer <token>
@@ -136,11 +140,12 @@ Content-Type: application/json
 {
   "statusCode": 200,
   "data": {
-    "razorpayOrderId": "order_xyz",
-    "razorpayKeyId": "rzp_test_...",
-    "amount": 99900,  // in paise (₹999)
-    "currency": "INR",
+    "cashfreeOrderId": "CF-...",
+    "checkoutUrl": "https://payments.cashfree.com/order/#...",
+    "paymentSessionId": "session_...",
+    "cashfreeMode": "sandbox",
     "plan": "small_business",
+    "planName": "Small Business",
     "planPrice": 999
   }
 }
@@ -148,25 +153,13 @@ Content-Type: application/json
 
 #### Step 2: Complete Payment on Frontend
 
-Use Razorpay Checkout:
+Send the buyer to the Cashfree hosted checkout:
 
 ```javascript
-const options = {
-  key: response.razorpayKeyId,
-  amount: response.amount,
-  currency: response.currency,
-  order_id: response.razorpayOrderId,
-  name: "FinderNate",
-  description: "Subscription Upgrade",
-  handler: function(razorpayResponse) {
-    // Send to backend for verification
-    verifyPayment(razorpayResponse);
-  }
-};
-
-const rzp = new Razorpay(options);
-rzp.open();
+window.location.href = response.checkoutUrl;
 ```
+
+Cashfree redirects back to the configured return URL once the payment resolves.
 
 #### Step 3: Verify Payment
 ```http
@@ -175,12 +168,14 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {
-  "razorpay_order_id": "order_xyz",
-  "razorpay_payment_id": "pay_abc",
-  "razorpay_signature": "signature_hash",
+  "cashfreeOrderId": "CF-...",
   "plan": "small_business"
 }
 ```
+
+> The client does **not** send a signature. The server calls Cashfree and asks
+> what that order's status is. This is deliberate — a client-supplied signature
+> is a forgeable claim, whereas the gateway's own answer is not.
 
 **Response:**
 ```json
@@ -257,37 +252,42 @@ Authorization: Bearer <token>
 
 ## Webhook Configuration
 
-### 1. Setup Webhook in Razorpay Dashboard
+### 1. Setup Webhook in the Cashfree Dashboard
 
-1. Go to: https://dashboard.razorpay.com/app/webhooks
-2. Click "Add New Webhook"
-3. Enter webhook URL: `https://yourdomain.com/api/v1/webhooks/razorpay`
-4. Select events:
-   - ✅ payment.captured
-   - ✅ payment.failed
-   - ✅ order.paid
-   - ✅ payment.authorized
-5. Set webhook secret in `.env` as `RAZORPAY_WEBHOOK_SECRET`
+1. Open the Cashfree merchant dashboard → Webhooks.
+2. Add the subscription webhook URL:
+   `https://yourdomain.com/api/v1/subscription/webhook`
+3. The signing secret is `CASHFREE_SECRET_KEY` — there is no separate webhook
+   secret to configure.
+
+The other two Cashfree webhooks belong to the commerce flows, not subscriptions:
+
+```
+https://yourdomain.com/api/v1/payments/webhook           # chat / escrow orders
+https://yourdomain.com/api/v1/payments/cashfree/webhook  # online-store orders
+```
 
 ### 2. Webhook Endpoint
 
 ```http
-POST /api/v1/webhooks/razorpay
+POST /api/v1/subscription/webhook
 Content-Type: application/json
-X-Razorpay-Signature: <signature>
+x-webhook-signature: <base64 HMAC-SHA256>
+x-webhook-timestamp: <timestamp>
 
 {
-  "event": "payment.captured",
-  "payload": { /* payment data */ }
+  "data": {
+    "order":   { "order_id": "CF-...", "order_status": "PAID" },
+    "payment": { "cf_payment_id": 12345, "payment_status": "SUCCESS" }
+  }
 }
 ```
 
-**Supported Events:**
-- `payment.captured` - Payment successful (activates subscription)
-- `payment.failed` - Payment failed (logs error)
-- `order.paid` - Order marked as paid
-- `payment.authorized` - Payment authorized (waiting for capture)
-- `subscription.cancelled` - Subscription cancelled
+The handler acts only on `order_status: PAID` + `payment_status: SUCCESS`, and
+signature verification is mandatory — it is the only authentication this route
+has. The signature is computed over the **raw** request body, which is why
+`src/app.js` captures `req.rawBody` in the `express.json` verify hook. Anything
+that consumes or rewrites the body before that will break every callback.
 
 ### 3. Test Webhook
 
@@ -386,11 +386,15 @@ Content-Type: application/json
 
 **⚠️ This endpoint is disabled in production!**
 
-### 2. Test Razorpay Integration
+### 2. Test the Cashfree Integration
 
-Use Razorpay test cards:
-- Success: `4111 1111 1111 1111`
-- Failure: `4111 1111 1111 1112`
+Set `CASHFREE_ENV=sandbox` with sandbox credentials and use Cashfree's sandbox
+test instruments (see the Cashfree sandbox docs for the current card/UPI list —
+do not hard-code them here, they change).
+
+Note that `/verify-payment` asks Cashfree for the order status server-side, so
+there is no signature a harness can forge: a genuine pass requires completing
+the hosted checkout at the returned `checkoutUrl`.
 
 ### 3. Test Webhook Locally
 
@@ -399,7 +403,10 @@ Use ngrok to expose local server:
 ngrok http 3000
 ```
 
-Then update webhook URL in Razorpay dashboard to ngrok URL.
+Then point the Cashfree dashboard webhook at the ngrok URL. Signature
+verification still applies, and there is a replay window on
+`x-webhook-timestamp` — if your machine's clock has drifted, valid callbacks
+will be rejected as stale.
 
 ### 4. Test Expiry Job
 
@@ -419,10 +426,11 @@ POST /api/v1/subscription/monitoring/test-expiry-job
 
 ### Pre-Deployment Checklist
 
-- [ ] Update Razorpay keys to **live credentials**
+- [ ] Update Cashfree keys to **live credentials**
   ```bash
-  RAZORPAY_KEY_ID=rzp_live_YOUR_LIVE_KEY
-  RAZORPAY_KEY_SECRET=YOUR_LIVE_SECRET
+  CASHFREE_APP_ID=YOUR_LIVE_APP_ID
+  CASHFREE_SECRET_KEY=YOUR_LIVE_SECRET_KEY
+  CASHFREE_ENV=production
   ```
 
 - [ ] Set environment to production
@@ -430,15 +438,13 @@ POST /api/v1/subscription/monitoring/test-expiry-job
   NODE_ENV=production
   ```
 
-- [ ] Configure webhook URL in Razorpay dashboard
+- [ ] Configure webhook URL in the Cashfree dashboard
   ```
-  https://yourdomain.com/api/v1/webhooks/razorpay
+  https://yourdomain.com/api/v1/subscription/webhook
   ```
 
-- [ ] Verify webhook secret is set
-  ```bash
-  RAZORPAY_WEBHOOK_SECRET=your_webhook_secret
-  ```
+- [ ] Confirm the raw-body capture in `src/app.js` is intact (webhook signatures
+      are computed over the raw body)
 
 - [ ] Test payment flow end-to-end
 - [ ] Verify cron jobs start on server boot
@@ -486,32 +492,35 @@ npm run pm2:status
 
 ### Payment Creation Fails
 
-**Symptom:** Error creating Razorpay order
+**Symptom:** Error creating Cashfree order
 
 **Solutions:**
-1. Check Razorpay credentials are correct
-2. Verify amount is in paise (multiply by 100)
-3. Check Razorpay API status
+1. Check `CASHFREE_APP_ID` / `CASHFREE_SECRET_KEY` are correct
+2. Confirm `CASHFREE_ENV` matches the credentials (sandbox keys will not work
+   against production, or vice versa)
+3. Check Cashfree API status
 4. Review error logs: `logs/errors.log`
 
 ### Payment Verification Fails
 
-**Symptom:** "Invalid payment signature" error
+**Symptom:** Verification reports the order is not paid
 
 **Solutions:**
-1. Ensure `RAZORPAY_KEY_SECRET` is correct
-2. Check signature calculation matches Razorpay format
-3. Verify payment_id and order_id are correct
-4. Review payment logs for details
+1. Confirm the `cashfreeOrderId` sent is the one returned by `/create-order`
+2. Remember verification is server-side — the order must actually be `PAID` at
+   Cashfree; there is no client signature involved
+3. Review payment logs for details
 
 ### Webhook Not Working
 
 **Symptom:** Payments succeed but subscription not activated
 
 **Solutions:**
-1. Verify webhook URL is correct in Razorpay dashboard
-2. Check `RAZORPAY_WEBHOOK_SECRET` is set
-3. Test webhook signature verification
+1. Verify webhook URL is correct in the Cashfree dashboard
+2. Confirm `req.rawBody` is still captured in `src/app.js` — signatures are
+   computed over the raw body
+3. Check server clock drift: callbacks outside the replay window on
+   `x-webhook-timestamp` are rejected
 4. Check server logs for webhook events
 5. Ensure webhook endpoint is accessible publicly
 
@@ -563,7 +572,7 @@ npm run pm2:status
 1. **Always verify payments** - Never trust client-side payment success
 2. **Use webhooks** - Handle edge cases where user closes payment window
 3. **Monitor logs** - Regularly check for failed payments
-4. **Test thoroughly** - Use Razorpay test mode before going live
+4. **Test thoroughly** - Use Cashfree sandbox mode before going live
 5. **Cache invalidation** - Always clear caches after subscription changes
 
 ### Financial Compliance
@@ -590,14 +599,14 @@ npm run pm2:status
 - Review webhook logs
 
 **Monthly:**
-- Revenue reconciliation with Razorpay
+- Revenue reconciliation with Cashfree
 - Subscription churn analysis
 - System performance review
 
 ### Need Help?
 
-- Razorpay Documentation: https://razorpay.com/docs/
-- Razorpay Support: https://razorpay.com/support/
+- Cashfree Documentation: https://docs.cashfree.com/
+- Cashfree Support: https://www.cashfree.com/help-support/
 - Server Logs: `npm run pm2:logs`
 - Monitoring Dashboard: `/api/v1/subscription/monitoring/dashboard`
 
@@ -605,9 +614,14 @@ npm run pm2:status
 
 ## Version History
 
-**v1.0.0** (Current)
+**v1.1.0** (Current)
+- ✅ Cashfree is the sole payment gateway
+- ✅ Razorpay and PhonePe integrations removed (config, routes, controllers,
+     the `razorpay` npm dependency, and `POST /api/v1/webhooks/razorpay`)
+
+**v1.0.0**
 - ✅ Core subscription system
-- ✅ Razorpay payment integration
+- ✅ Razorpay payment integration (removed in v1.1.0)
 - ✅ Webhook handler
 - ✅ Cron jobs for expiry
 - ✅ Monitoring and logging
@@ -629,9 +643,11 @@ npm run pm2:status
 ```
 src/
 ├── controllers/
+│   ├── subscription/payment.js        # Cashfree order, verify, webhook, activation
 │   ├── subscription.controllers.js    # Main subscription logic
-│   ├── webhook.controllers.js         # Razorpay webhook handler
 │   └── monitoring.controllers.js      # Monitoring endpoints
+├── config/
+│   └── cashfree.config.js             # Cashfree gateway client
 ├── jobs/
 │   └── subscriptionExpiry.job.js      # Cron jobs
 ├── routes/
@@ -649,9 +665,9 @@ src/
 ### Environment Variables Summary
 
 ```bash
-RAZORPAY_KEY_ID=rzp_live_XXX
-RAZORPAY_KEY_SECRET=XXX
-RAZORPAY_WEBHOOK_SECRET=XXX
+CASHFREE_APP_ID=XXX
+CASHFREE_SECRET_KEY=XXX
+CASHFREE_ENV=production
 NODE_ENV=production
 ```
 

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -42,10 +43,47 @@ const formatLogEntry = (level, message, data = {}) => {
 };
 
 /**
+ * One-way fingerprint for a payment credential.
+ *
+ * A Google Play purchase token (or any other payment token) must never be
+ * written to these files: they sit on the persistent disk render.yaml mounts,
+ * they survive restarts, and account deletion clears collections, not files.
+ * A short SHA-256 prefix still lets two log lines about the same purchase be
+ * correlated, without the token itself ever landing on disk.
+ */
+export const fingerprintToken = (value) => {
+    if (!value) return null;
+    return `tok_${crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 12)}`;
+};
+
+/**
+ * Size cap for a single log file, in bytes.
+ *
+ * Nothing else prunes these files and the deployed host keeps them across
+ * restarts, so each one is rotated a single generation deep once it passes the
+ * cap: payments.log -> payments.log.1, overwriting whatever .1 held before.
+ * That bounds the whole logs directory at 2x this value per file.
+ */
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+
+const rotateIfOversized = (filePath) => {
+    if (!fs.existsSync(filePath)) return;
+    if (fs.statSync(filePath).size < MAX_LOG_BYTES) return;
+
+    const rotated = `${filePath}.1`;
+    // rename onto an existing target fails on Windows, so clear it first.
+    if (fs.existsSync(rotated)) {
+        fs.rmSync(rotated, { force: true });
+    }
+    fs.renameSync(filePath, rotated);
+};
+
+/**
  * Write log to file
  */
 const writeLog = (filePath, entry) => {
     try {
+        rotateIfOversized(filePath);
         fs.appendFileSync(filePath, entry);
     } catch (error) {
         console.error('Failed to write log:', error);
@@ -121,13 +159,24 @@ export class PaymentLogger {
 
     /**
      * Log webhook event
+     *
+     * `data` is the raw gateway payload and is deliberately NOT serialised: a
+     * Cashfree webhook body carries customer_name, customer_email and
+     * customer_phone, and this line is appended to a file on a persistent disk
+     * that account deletion never touches. Only the non-personal fields needed
+     * to trace a payment are pulled out — event type, order id, payment status
+     * and the timestamp formatLogEntry adds.
      */
     static logWebhookEvent(eventType, paymentId, userId, data) {
+        const order = data?.data?.order ?? data?.order ?? {};
+        const payment = data?.data?.payment ?? data?.payment ?? {};
+
         const entry = formatLogEntry('INFO', 'Webhook Event Received', {
             eventType,
             paymentId,
             userId,
-            data,
+            orderId: order.order_id ?? null,
+            paymentStatus: payment.payment_status ?? null,
             status: 'webhook_received'
         });
 
@@ -218,10 +267,19 @@ export class ErrorLogger {
     }
 
     /**
-     * Log Razorpay error
+     * Log a payment-gateway error.
+     *
+     * Was logRazorpayError. Both callers are Cashfree subscription paths in
+     * controllers/subscription/payment.js — the Razorpay name was left over from
+     * an integration that no longer exists and mislabelled every Cashfree
+     * failure in the error log as a Razorpay one.
+     *
+     * error.error?.code / .description is the Razorpay SDK's error shape and is
+     * simply undefined for Cashfree/axios errors; both fields are kept because
+     * they are optional and already absent from every line this writes today.
      */
-    static logRazorpayError(userId, orderId, error) {
-        const entry = formatLogEntry('ERROR', 'Razorpay Error', {
+    static logPaymentGatewayError(userId, orderId, error) {
+        const entry = formatLogEntry('ERROR', 'Payment Gateway Error', {
             userId,
             orderId,
             errorCode: error.error?.code,
@@ -230,7 +288,7 @@ export class ErrorLogger {
         });
 
         writeLog(ERROR_LOG_FILE, entry);
-        console.error('❌ Razorpay error:', { userId, orderId, error: error.message });
+        console.error('❌ Payment gateway error:', { userId, orderId, error: error.message });
     }
 
     /**

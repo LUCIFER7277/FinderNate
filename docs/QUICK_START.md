@@ -3,55 +3,56 @@
 ## What Was Implemented
 
 ✅ **Subscription Expiry Cron Job** - Auto-expires subscriptions daily at 2 AM
-✅ **Razorpay Webhook Handler** - Handles payment events asynchronously
+✅ **Cashfree Subscription Webhook** - Handles payment events asynchronously
 ✅ **Monitoring & Logging** - Tracks all payments, subscriptions, and errors
+
+> **Gateway note:** Cashfree is the only payment gateway. The Razorpay and
+> PhonePe integrations were removed, along with `POST /api/v1/webhooks/razorpay`.
+> `RAZORPAY_*` and `PHONEPE_*` environment variables are not read by anything.
 
 ---
 
-## Files Created/Modified
+## Key Files
 
-### New Files Created:
 1. `src/jobs/subscriptionExpiry.job.js` - Cron job for expiring subscriptions
-2. `src/controllers/webhook.controllers.js` - Razorpay webhook handler
-3. `src/routes/webhook.routes.js` - Webhook routes
-4. `src/utlis/monitoring.utils.js` - Logging and monitoring utilities
-5. `src/controllers/monitoring.controllers.js` - Monitoring API endpoints
-6. `SUBSCRIPTION_SYSTEM_GUIDE.md` - Complete documentation
-
-### Modified Files:
-1. `src/controllers/subscription.controllers.js` - Added logging
-2. `src/routes/subscription.routes.js` - Added monitoring routes
-3. `src/app.js` - Added webhook routes
-4. `src/index.js` - Added cron job initialization
-5. `package.json` - Added node-cron dependency
+2. `src/controllers/subscription/payment.js` - Cashfree order creation, verification, webhook
+3. `src/config/cashfree.config.js` - Cashfree gateway client
+4. `src/utils/cashfreeWebhook.utils.js` - Webhook signature verification
+5. `src/routes/webhook.routes.js` - Non-payment webhooks only (Bunny Stream)
+6. `src/utils/monitoring.utils.js` - Logging and monitoring utilities
+7. `src/controllers/monitoring.controllers.js` - Monitoring API endpoints
+8. `SUBSCRIPTION_SYSTEM_GUIDE.md` - Complete documentation
 
 ---
 
 ## Before Production Deployment
 
-### 1️⃣ Update Razorpay Credentials (.env)
+### 1️⃣ Set Cashfree Credentials (.env)
 
 ```bash
-# Replace test keys with LIVE keys
-RAZORPAY_KEY_ID=rzp_live_YOUR_LIVE_KEY        # ← Change this!
-RAZORPAY_KEY_SECRET=YOUR_LIVE_SECRET           # ← Change this!
-RAZORPAY_WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET    # ← Set this!
+CASHFREE_APP_ID=YOUR_LIVE_APP_ID               # ← Change this!
+CASHFREE_SECRET_KEY=YOUR_LIVE_SECRET_KEY       # ← Change this!
+CASHFREE_ENV=production                        # ← Change this!
 NODE_ENV=production                            # ← Change this!
 ```
 
-### 2️⃣ Configure Razorpay Webhook
+### 2️⃣ Configure the Cashfree Webhook
 
-1. Go to https://dashboard.razorpay.com/app/webhooks
-2. Add webhook URL: `https://yourdomain.com/api/v1/webhooks/razorpay`
-3. Select events: `payment.captured`, `payment.failed`, `order.paid`
-4. Copy webhook secret to `.env`
+In the Cashfree merchant dashboard, point the webhook at the endpoint for the
+flow you are enabling:
+
+```
+https://yourdomain.com/api/v1/subscription/webhook       # subscriptions
+https://yourdomain.com/api/v1/payments/webhook           # chat / escrow orders
+https://yourdomain.com/api/v1/payments/cashfree/webhook  # online-store orders
+```
+
+All three verify the Cashfree signature and reject anything unsigned — the
+signature is the only authentication these routes have.
 
 ### 3️⃣ Test Before Going Live
 
 ```bash
-# Test webhook endpoint is accessible
-curl https://yourdomain.com/api/v1/webhooks/test
-
 # Test monitoring dashboard
 curl -H "Authorization: Bearer YOUR_TOKEN" \
   https://yourdomain.com/api/v1/subscription/monitoring/dashboard
@@ -72,9 +73,9 @@ User clicks "Upgrade"
   ↓
 Frontend calls: POST /subscription/create-order
   ↓
-Get Razorpay order ID
+Get Cashfree order ID + checkoutUrl
   ↓
-Open Razorpay checkout
+Redirect to the Cashfree hosted checkout
   ↓
 User completes payment
   ↓
@@ -83,10 +84,14 @@ Frontend calls: POST /subscription/verify-payment ← Primary activation
 Subscription activated ✅
 
 // Backup: If user closes window before verify-payment
-Razorpay webhook: POST /webhooks/razorpay ← Webhook activation
+Cashfree webhook: POST /subscription/webhook ← Webhook activation
   ↓
 Subscription activated ✅
 ```
+
+Both paths call the same `activateSubscriptionForOrder`. Keep it that way — a
+second, drifted copy of this logic is exactly how the two renewal paths once
+diverged and why only one of them got the month-overflow fix.
 
 ### Daily Expiry Check
 
@@ -188,9 +193,9 @@ This means `/subscription/test-upgrade` will NOT work in production. ✅
 
 Before going to production:
 
-- [ ] Update Razorpay keys to **live credentials**
+- [ ] Update Cashfree keys to **live credentials** and set `CASHFREE_ENV=production`
 - [ ] Set `NODE_ENV=production` in `.env`
-- [ ] Configure webhook in Razorpay dashboard
+- [ ] Configure the webhook URLs in the Cashfree dashboard
 - [ ] Test webhook endpoint is publicly accessible
 - [ ] Verify cron jobs start on server boot
 - [ ] Check logs directory is created (automatic)
@@ -202,14 +207,17 @@ Before going to production:
 ## Common Issues & Solutions
 
 ### "Payment gateway not configured"
-→ Check `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` are set in `.env`
+→ Check `CASHFREE_APP_ID` and `CASHFREE_SECRET_KEY` are set in `.env`
 
 ### "Invalid payment signature"
-→ Check `RAZORPAY_KEY_SECRET` is correct
+→ Check `CASHFREE_SECRET_KEY` is correct and matches `CASHFREE_ENV`
+  (sandbox keys will not verify production callbacks, or vice versa)
 
 ### Webhook not activating subscription
-→ Verify webhook URL in Razorpay dashboard
-→ Check `RAZORPAY_WEBHOOK_SECRET` is set
+→ Verify the webhook URL in the Cashfree dashboard
+→ Confirm `express.json`'s raw-body capture is intact in `src/app.js` — the
+  signature is computed over the raw body, so any middleware that consumes or
+  rewrites it first will make every callback fail verification
 → Check server logs for webhook events
 
 ### Cron job not running
@@ -254,4 +262,4 @@ npm run pm2:restart
 
 **🎉 Your subscription system is ready for production!**
 
-Just update the Razorpay credentials and configure the webhook.
+Just update the Cashfree credentials and configure the webhook.

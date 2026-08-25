@@ -182,7 +182,7 @@ const assertLinkAmountAllowed = (amount) => {
 //
 // So the caller now says which flow it is, and the amount is validated against
 // THAT flow's own total:
-//   PRICING_FLOW.SHAREABLE_LINK — createShareablePhonePeOrder. Charges the full
+//   PRICING_FLOW.SHAREABLE_LINK — createShareableCashfreeOrder. Charges the full
 //       total including shipping. This is the money path for this file.
 //   PRICING_FLOW.ONLINE_STORE   — the store's own total (shipping waived at
 //       ≥ ₹499). The store checkout itself lives in
@@ -449,8 +449,14 @@ export const getPaymentLinkDetails = asyncHandler(async (req, res) => {
     );
 });
 
-// Create PhonePe payment for chat payment link
-export const createPhonePeOrder = asyncHandler(async (req, res) => {
+// Create a Cashfree payment for a chat payment link.
+//
+// Named createPhonePeOrder until the non-Cashfree gateways were removed. The
+// body has been pure Cashfree for a long time — the name was the last trace of
+// an integration that no longer exists, and it was actively dangerous: it made
+// a live money path look like dead PhonePe code to anyone grepping for gateways
+// to delete.
+export const createChatCashfreeOrder = asyncHandler(async (req, res) => {
     const { linkId, shippingAddress } = req.body;
     const buyerId = req.user._id;
 
@@ -620,21 +626,6 @@ export const verifyPayment = asyncHandler(async (req, res) => {
     }
 
     // --- Verify with Cashfree ---
-    // // --- Verify with PhonePe ---
-    // let statusResponse;
-    // try {
-    //     statusResponse = await checkPhonePePaymentStatus(merchantTransactionId);
-    // } catch (error) {
-    //     throw new ApiError(400, "Failed to verify payment status with PhonePe");
-    // }
-
-    // if (statusResponse?.state !== 'COMPLETED') {
-    //     order.paymentStatus = 'failed';
-    //     order.orderStatus = 'payment_pending';
-    //     await order.save();
-    //     throw new ApiError(400, `Payment failed: state=${statusResponse?.state || 'unknown'}`);
-    // }
-
     let cfOrder;
     try {
         cfOrder = await getCashfreeOrderStatus(cashfreeOrderId);
@@ -756,7 +747,9 @@ export const verifyPayment = asyncHandler(async (req, res) => {
 // Cashfree S2S webhook — chat/escrow orders (no auth, called by Cashfree).
 // Same format as /cashfree/webhook but sets paymentStatus:'held' + escrow hold.
 // ─────────────────────────────────────────────────────────────────────────────
-export const phonePeWebhook = asyncHandler(async (req, res) => {
+// Named phonePeWebhook until the non-Cashfree gateways were removed; it has
+// only ever verified a Cashfree signature. See createChatCashfreeOrder above.
+export const chatCashfreeWebhook = asyncHandler(async (req, res) => {
     // Signature is mandatory — it is the only authentication this route has.
     if (!requireCashfreeWebhookSignature(req, res, '[Cashfree chat webhook]')) return;
 
@@ -999,7 +992,7 @@ export const getShareablePaymentLinkDetails = asyncHandler(async (req, res) => {
     // The stored link record is keyed on the figure that is IN the URL.
     const linkAmount = pricing.amount;
 
-    // ...and the QUOTE must be the total that createShareablePhonePeOrder will
+    // ...and the QUOTE must be the total that createShareableCashfreeOrder will
     // accept for THIS link, which depends on which checkout minted it. Quoting a
     // figure the pay endpoint rejects produced a page whose Pay button could
     // only ever answer "price mismatch … please reload" — and reloading produced
@@ -1171,7 +1164,7 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
     gstPercent        = linkPricing.gstPercent;
 
     // The total THIS link's own flow charges — not the link's stored figure and
-    // not ANY_LINK. This page pays through createShareablePhonePeOrder, which
+    // not ANY_LINK. This page pays through createShareableCashfreeOrder, which
     // accepts exactly one total per flow, so quoting a seller's arbitrary custom
     // amount (or the wrong flow's total) produced a page whose Pay button could
     // only ever answer "price mismatch". The stored amount is a display hint at
@@ -1272,7 +1265,9 @@ export const getCheckoutByLinkId = asyncHandler(async (req, res) => {
 // Create Cashfree payment for a shareable payment link.
 // Signed-in buyers and guests both land here; a guest additionally supplies
 // buyerDetails (name, email, phone, 13+ attestation, terms acceptance).
-export const createShareablePhonePeOrder = asyncHandler(async (req, res) => {
+// Named createShareablePhonePeOrder until the non-Cashfree gateways were
+// removed; the body is pure Cashfree. See createChatCashfreeOrder above.
+export const createShareableCashfreeOrder = asyncHandler(async (req, res) => {
     // Any `linkId` in the body is IGNORED. It was read here while sellers could
     // price their own links; that feature is gone, and the amount is recomputed
     // from the Post on every payment. Accepting it silently rather than 400ing

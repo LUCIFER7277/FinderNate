@@ -3,7 +3,7 @@ import { User } from "../../models/user.models.js";
 import { ApiError } from "../../utils/ApiError.js";
 import { ApiResponse } from "../../utils/ApiResponse.js";
 import { v4 as uuidv4 } from "uuid";
-import { sendSms } from "../../utils/sendSms.js";
+import { sendSms, assertSmsDeliverable } from "../../utils/sendSms.js";
 import { TempUser } from "../../models/tempUser.models.js";
 import { AuthOtp } from "../../models/authOtp.models.js";
 import { AcceptanceLog } from "../../models/acceptanceLog.models.js";
@@ -99,6 +99,21 @@ const registerUser = asyncHandler(async (req, res) => {
     //* up on both created two records.
     const normalizedPhone = normalizePhone(phoneNumber);
 
+    //* Can this number receive the SMS AT ALL — asked here, with the other input
+    //* checks, and NOT left to sendSms below.
+    //*
+    //* sendSms runs after rateCheckAndUpsertOtp, which spends one of the day's
+    //* OTPs for this number and arms the 60s resend cooldown. So a number
+    //* Fast2SMS can never reach was told "use an Indian number" and then, if the
+    //* same number came back within the minute, "please wait N seconds before
+    //* requesting a new OTP" — a wait for a code that was never coming. Worse on
+    //* mobile, where the phone field is a screen back and the error lands beside
+    //* a live Submit button. Checked first, the doomed request costs nothing.
+    //*
+    //* Skipped in development so the escape hatch in the catch below (log the
+    //* OTP, carry on) still lets these flows be exercised without a live gateway.
+    if (process.env.NODE_ENV !== 'development') assertSmsDeliverable(normalizedPhone);
+
     //* Email and username are unique per account; a PHONE NUMBER IS NOT —
     //* several accounts may legitimately share one, so it is deliberately not
     //* checked here. Password reset asks which account is meant.
@@ -178,6 +193,14 @@ const registerUser = asyncHandler(async (req, res) => {
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
             console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${normalizedPhone}: ${plainOtp}`);
+        } else if (smsErr instanceof ApiError) {
+            //* sendSms raises an ApiError for a number it can NEVER deliver to
+            //* — currently anything non-Indian. That is a permanent fact about
+            //* the number, not a gateway hiccup, so it keeps its own status and
+            //* its own wording. Folded into the 503 below it would come out as
+            //* "please try again", which cannot ever work, and the client would
+            //* sit there retrying a request that is doomed by construction.
+            throw smsErr;
         } else {
             throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
         }
@@ -409,6 +432,12 @@ const resendRegistrationOTP = asyncHandler(async (req, res) => {
 
     const normalizedPhone = normalizePhone(phone);
 
+    //* Before anything is charged for it — see registerUser above. A resend is
+    //* where the old ordering hurt most: the cooldown armed by the previous
+    //* request was still running, so the reply to an unreachable number was
+    //* "please wait N seconds", not "this number cannot be used".
+    if (process.env.NODE_ENV !== 'development') assertSmsDeliverable(normalizedPhone);
+
     const tempUser = await TempUser.findOne({ phoneNumber: normalizedPhone });
     if (!tempUser) {
         throw new ApiError(404, "Registration session not found. Please register again.");
@@ -441,6 +470,9 @@ const resendRegistrationOTP = asyncHandler(async (req, res) => {
     } catch (smsErr) {
         if (process.env.NODE_ENV === 'development') {
             console.warn(`[DEV] SMS failed (${smsErr.message}). OTP for ${normalizedPhone}: ${plainOtp}`);
+        } else if (smsErr instanceof ApiError) {
+            //* Unsupported number, not a gateway failure — see registerUser.
+            throw smsErr;
         } else {
             throw new ApiError(503, `Failed to send OTP: ${smsErr.message}. Please try again or contact support.`);
         }

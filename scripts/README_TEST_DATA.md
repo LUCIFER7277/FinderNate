@@ -314,7 +314,7 @@ npm run seed:orders
 
 2. **Real Posts**: If you have posts in your database, orders will be linked to them. Otherwise, the `postId` field will be undefined.
 
-3. **Razorpay IDs**: The script generates fake Razorpay order/payment IDs for testing. These are random strings and won't work with actual Razorpay API.
+3. **Gateway IDs**: The script generates fake gateway order/payment IDs for testing. These are random strings and won't work against the real Cashfree API.
 
 4. **Tracking Numbers**: Tracking IDs are randomly generated and won't work with real carrier websites.
 

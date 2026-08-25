@@ -138,11 +138,27 @@ const OrderSchema = new mongoose.Schema({
         enum: ['created', 'payment_pending', 'payment_received', 'processing', 'shipped', 'delivered', 'confirmed', 'disputed', 'cancelled', 'refunded', 'seller_rejected'],
         default: 'created'
     },
+    // ── LEGACY GATEWAY IDS — READ-ONLY HISTORY, DO NOT DELETE ─────────────────
+    // The Razorpay and PhonePe integrations were removed; Cashfree is the only
+    // gateway. Nothing WRITES these fields any more.
+    //
+    // They are deliberately kept in the schema rather than dropped. Removing a
+    // path from a Mongoose schema does not delete the stored value — it makes it
+    // invisible to the model, so every order paid before the migration would
+    // silently lose its payment reference. These are the only receipt a buyer or
+    // support has for those orders, and they are still read downstream:
+    //   - controllers/invoice.controllers.js reads razorpayPaymentId/razorpayOrderId
+    //     into the invoice detail payload.
+    //   - the website's InvoiceModal renders order.phonePeTransactionId as
+    //     "Payment ID" (frontend src/components/orders/InvoiceModal.tsx).
+    // Delete these only after confirming in production that no Order document
+    // still carries them.
     razorpayOrderId: String,
     razorpayPaymentId: String,
     razorpaySignature: String,
     phonePeMerchantTransactionId: String,
     phonePeTransactionId: String,
+    // ── ACTIVE GATEWAY (Cashfree) ─────────────────────────────────────────────
     cashfreeOrderId: String,      // Cashfree order ID (CF-xxx) stored for webhook lookup
     cashfreePaymentId: String,    // Cashfree cf_payment_id populated after payment
     refundId: String,             // Cashfree refund ID once a refund is initiated
@@ -180,7 +196,11 @@ OrderSchema.index({ buyerId: 1, createdAt: -1 });
 OrderSchema.index({ sellerId: 1, createdAt: -1 });
 OrderSchema.index({ orderStatus: 1 });
 OrderSchema.index({ paymentStatus: 1 });
-OrderSchema.index({ phonePeMerchantTransactionId: 1 }); // fast webhook lookup
+// Legacy. No webhook looks orders up by this any more (the Cashfree webhooks use
+// cashfreeOrderId below). Kept because the index already exists in production —
+// dropping the declaration would not drop it there, and it still serves manual
+// lookups of pre-Cashfree orders. Drop it deliberately with a migration, if ever.
+OrderSchema.index({ phonePeMerchantTransactionId: 1 });
 OrderSchema.index({ cashfreeOrderId: 1 });              // fast Cashfree webhook lookup
 
 export default mongoose.model('Order', OrderSchema);

@@ -22,6 +22,27 @@ export const SUBSCRIPTION_PLANS = {
     }
 };
 
+/**
+ * Google Play product id → our plan tier.
+ *
+ * The ids are identical to the tier names on purpose, so there is one less
+ * thing to keep in step, but the map is written out rather than assumed: Play
+ * product ids are permanent once a product is created, so if a tier is ever
+ * renamed the old id has to keep working and this is where that would live.
+ *
+ * Each product carries a single `monthly` base plan in Play; the billing period
+ * lives on the base plan, not on the product, so it is not part of the id.
+ */
+export const PLAY_PRODUCT_TO_PLAN = {
+    small_business: 'small_business',
+    corporate: 'corporate'
+};
+
+/** The inverse, for telling the app which products to fetch from Play. */
+export const PLAN_TO_PLAY_PRODUCT = Object.fromEntries(
+    Object.entries(PLAY_PRODUCT_TO_PLAN).map(([productId, plan]) => [plan, productId])
+);
+
 export const getAvailablePlans = asyncHandler(async (req, res) => {
     const plans = [
         {
