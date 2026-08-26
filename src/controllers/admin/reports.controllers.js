@@ -41,12 +41,36 @@ export const getAllReports = asyncHandler(async (req, res) => {
         else if (type === 'story') filter.reportedStoryId = { $exists: true, $ne: null };
     }
 
+    // The author of reported content is populated one level deeper than the
+    // content itself. Without it a comment/post/story report showed only the
+    // reporter, so a moderator could delete the content but had no idea whose
+    // it was and no way to act on the account behind it. accountStatus comes
+    // along so the panel can show "already banned" instead of offering the
+    // action again.
+    const AUTHOR_FIELDS = 'username fullName profileImageUrl accountStatus';
+
     const reports = await Report.find(filter)
         .populate('reporterId', 'username fullName profileImageUrl')
         .populate('reportedUserId', 'username fullName profileImageUrl accountStatus')
-        .populate('reportedPostId', 'caption media userId contentType')
-        .populate('reportedCommentId', 'content userId')
-        .populate('reportedStoryId', 'media userId')
+        // postType is what separates a photo from a Vibe (reel/video) from a
+        // tweet — they all live in the Post collection, so without it the panel
+        // can only say "Post" and a moderator cannot tell what they are about
+        // to remove.
+        .populate({
+            path: 'reportedPostId',
+            select: 'caption media userId contentType postType',
+            populate: { path: 'userId', select: AUTHOR_FIELDS },
+        })
+        .populate({
+            path: 'reportedCommentId',
+            select: 'content userId',
+            populate: { path: 'userId', select: AUTHOR_FIELDS },
+        })
+        .populate({
+            path: 'reportedStoryId',
+            select: 'media userId',
+            populate: { path: 'userId', select: AUTHOR_FIELDS },
+        })
         .sort({ createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit);
@@ -144,6 +168,31 @@ const takeDownStory = async (story) => {
     await invalidatePostCaches(story._id.toString(), story.userId);
 };
 
+/**
+ * The account a ban/suspend should land on for a given report.
+ *
+ * Only a 'user' report carries reportedUserId. A comment, post or story report
+ * identifies the offending account solely through the content's own author, so
+ * ban_user used to be silently skipped for all three: the report was still
+ * marked resolved and the activity log still recorded "action: ban_user", while
+ * nothing at all happened to the account. A moderator had no way to see that.
+ *
+ * Returns an id or null. Content already deleted by a prior action yields null,
+ * which the caller reports rather than swallowing.
+ */
+const resolveOffendingUserId = (report) => {
+    if (report.reportedUserId) return report.reportedUserId._id ?? report.reportedUserId;
+
+    const authored = report.reportedCommentId
+        ?? report.reportedPostId
+        ?? report.reportedStoryId;
+    if (!authored?.userId) return null;
+
+    // userId is populated to a document by getAllReports but is a bare
+    // ObjectId when the doc is loaded here, so accept both shapes.
+    return authored.userId._id ?? authored.userId;
+};
+
 // PUT /api/v1/admin/reports/:reportId/status
 export const updateReportStatus = asyncHandler(async (req, res) => {
     const { reportId } = req.params;
@@ -191,18 +240,22 @@ export const updateReportStatus = asyncHandler(async (req, res) => {
             } else if (report.reportedStoryId) {
                 await takeDownStory(report.reportedStoryId);
             }
-        } else if (action === 'ban_user' && report.reportedUserId) {
-            await User.findByIdAndUpdate(report.reportedUserId._id, {
-                accountStatus: 'banned'
-            });
-            await invalidateAuthCache(report.reportedUserId._id);
-            await notifyStatusChange(report.reportedUserId._id.toString(), 'banned');
-        } else if (action === 'suspend_user' && report.reportedUserId) {
-            await User.findByIdAndUpdate(report.reportedUserId._id, {
-                accountStatus: 'deactivated'
-            });
-            await invalidateAuthCache(report.reportedUserId._id);
-            await notifyStatusChange(report.reportedUserId._id.toString(), 'deactivated');
+        } else if (action === 'ban_user' || action === 'suspend_user') {
+            const targetUserId = resolveOffendingUserId(report);
+
+            // Fail loudly. Marking the report resolved while the account went
+            // untouched is how a moderator ends up believing a ban was applied.
+            if (!targetUserId) {
+                throw new ApiError(
+                    400,
+                    "Cannot action the account for this report: the reported content and its author are no longer available."
+                );
+            }
+
+            const accountStatus = action === 'ban_user' ? 'banned' : 'deactivated';
+            await User.findByIdAndUpdate(targetUserId, { accountStatus });
+            await invalidateAuthCache(targetUserId);
+            await notifyStatusChange(targetUserId.toString(), accountStatus);
         }
     }
 
