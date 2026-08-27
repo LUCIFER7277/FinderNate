@@ -179,16 +179,30 @@ export const getUserChats = asyncHandler(async (req, res) => {
 
     const statusFilter = ['active', 'requested'].includes(chatStatus) ? chatStatus : 'active';
 
+    // createChat() and the first addMessage() are separate calls (get-or-create
+    // the chat, then navigate in and let the user type). If the sender never
+    // actually sends anything — backs out, the app is killed, the request
+    // drops — the chat document still exists with zero messages, and used to
+    // surface as a blank "message request" on the recipient's side with
+    // nothing to show. lastMessageId is only ever set by addMessage (see
+    // message.controllers.js), never at creation, so requiring it here hides
+    // a chat from both list views until a real message exists. This is a pure
+    // read-side filter — it fixes every chat stuck in this state retroactively,
+    // no backfill needed — and does not affect opening a chat you just
+    // created, since that navigates straight to the chatId the create call
+    // returned rather than looking it up in this list.
     let chatFilter;
     if (statusFilter === 'requested') {
         chatFilter = {
             participants: { $in: [userObjectId] },
             status: 'requested',
-            createdBy: { $ne: userObjectId }
+            createdBy: { $ne: userObjectId },
+            lastMessageId: { $ne: null }
         };
     } else {
         chatFilter = {
             participants: { $in: [userObjectId] },
+            lastMessageId: { $ne: null },
             $or: [
                 { status: 'active' },
                 { status: 'requested', createdBy: userObjectId }
