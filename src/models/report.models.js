@@ -29,7 +29,7 @@ const ReportSchema = new mongoose.Schema({
     reason: {
         type: String,
         required: true,
-        enum: ['spam', 'harassment', 'nudity', 'violence', 'hateSpeech', 'scam', 'other']
+        enum: ['spam', 'harassment', 'nudity', 'violence', 'hateSpeech', 'scam', 'childSafety', 'other']
     },
     description: {
         type: String,

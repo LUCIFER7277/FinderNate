@@ -33,7 +33,7 @@ export const reportContent = asyncHandler(async (req, res) => {
         throw new ApiError(400, `Type must be one of: ${validTypes.join(', ')}`);
     }
 
-    const validReasons = ['spam', 'harassment', 'nudity', 'violence', 'hateSpeech', 'scam', 'other'];
+    const validReasons = ['spam', 'harassment', 'nudity', 'violence', 'hateSpeech', 'scam', 'childSafety', 'other'];
     if (!validReasons.includes(reason)) {
         throw new ApiError(400, `Reason must be one of: ${validReasons.join(', ')}`);
     }
@@ -124,7 +124,12 @@ export const reportContent = asyncHandler(async (req, res) => {
         //
         // The admin panel already reviews reports and offers view / delete /
         // keep, so the decision has a home. This only makes sure it reaches it.
-        if (reportCount >= REPORT_ESCALATION_THRESHOLD) {
+        //
+        // childSafety is the one exception to waiting for REPORT_ESCALATION_THRESHOLD:
+        // a single CSAE report escalates immediately. Google's Child Safety
+        // Standards policy expects these to reach a reviewer without waiting
+        // for corroborating reports, which the content itself may never get.
+        if (reportCount >= REPORT_ESCALATION_THRESHOLD || reason === 'childSafety') {
             await Report.updateMany(
                 { ...deleteFilter, status: 'pending' },
                 { status: 'under_review' }
